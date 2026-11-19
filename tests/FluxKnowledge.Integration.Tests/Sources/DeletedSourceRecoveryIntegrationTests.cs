@@ -267,12 +267,12 @@ public sealed partial class DeletedSourceRecoveryIntegrationTests(NativeSqlServe
             await db.SaveChangesAsync();
             return id;
         }
-        internal async Task<Guid> QueueAsync(Guid inputId)
+        internal async Task<Guid> QueueAsync(Guid inputId, bool sourceLinked = true)
         {
             await using var db = Factory.CreateDbContext();
             var input = await db.SourceRevisions.SingleAsync(x => x.Id == inputId);
             var identity = new SourceIdentityEntity { Id = Guid.NewGuid(), SourceKind = "retained local source", StableKey = "removal:" + Guid.NewGuid(), CreatedAtUtc = DateTimeOffset.UtcNow };
-            var record = new PipelineRecordEntity { Id = Guid.NewGuid(), SourceIdentityId = identity.Id, SourceRevisionId = inputId,
+            var record = new PipelineRecordEntity { Id = Guid.NewGuid(), SourceIdentityId = identity.Id, SourceRevisionId = sourceLinked ? inputId : null,
                 Revision = 1, ContentHash = input.ContentSha256, CurrentStage = (int)PipelineStage.Embed, RegisteredAtUtc = DateTimeOffset.UtcNow };
             record.RootLineageRecordId = record.Id;
             var job = new JobEntity { Id = Guid.NewGuid(), PipelineRecordId = record.Id, SourceRevision = 1, Stage = (int)PipelineStage.Embed,

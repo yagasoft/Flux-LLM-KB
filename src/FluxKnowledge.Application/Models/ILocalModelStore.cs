@@ -10,6 +10,7 @@ public interface ILocalModelStore
 public static class ModelStoreReasons
 {
     public const string BundleVerified = "model-bundle-verified";
+    public const string BundleAvailable = "model-bundle-local-available";
     public const string BundleLeaseUnavailable = "model-bundle-lease-unavailable";
     public const string SpecificationInvalid = "model-specification-invalid";
     public const string PathUnsafe = "model-path-unsafe";

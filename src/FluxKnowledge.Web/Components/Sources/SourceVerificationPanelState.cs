@@ -50,7 +50,7 @@ public sealed class SourceVerificationPanelState(ISourceVerificationStore store,
 
     public Task VerifyAsync(Guid rootId) => ExecuteAsync(rootId, "source_verify", new { rootId }, "Verification was requested.");
 
-    public Task FullRescanAsync(Guid rootId) => ExecuteAsync(rootId, "source_sync", new { rootId, fullContent = true }, "Full content rescan was requested.");
+    public Task FullRescanAsync(Guid rootId) => ExecuteAsync(rootId, "source_sync", new { rootId, fullContent = true }, "Metadata reconciliation was requested.");
     public Task ReconcileAsync(Guid rootId) => ExecuteAsync(rootId, "source_sync", new { rootId, reconcileMetadata = true }, "Metadata reconciliation was requested.");
 
     public Task SavePolicyAsync(Guid rootId, SourceVerificationPolicy policy) => ExecuteAsync(rootId,

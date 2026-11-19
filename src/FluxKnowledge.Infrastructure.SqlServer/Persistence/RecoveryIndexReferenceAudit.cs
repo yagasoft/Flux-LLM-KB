@@ -20,12 +20,12 @@ public sealed class RecoveryIndexAuditException(string reason, string relativePa
 /// <summary>Privileged, bounded inspection of recovery reference metadata. Never opens source or index payloads.</summary>
 public sealed class RecoveryIndexReferenceAudit(string indexRoot)
 {
-    public const int ClassifierVersion = 1;
+    public const int ClassifierVersion = 3;
     private static readonly JsonSerializerOptions StrictJson = new() { UnmappedMemberHandling = JsonUnmappedMemberHandling.Disallow };
     private sealed record RetentionJournal(Guid OperationId, string ManifestHash, Guid GenerationId, bool Restore,
         List<string> Started, List<string> Completed, bool DirectoryStarted = false, bool DirectoryCompleted = false);
     private static readonly HashSet<string> Payloads = new(StringComparer.Ordinal)
-        { "candidate", "previous", "failed", "candidate-interactive-host", "previous-interactive-host", "operator" };
+        { "candidate", "previous", "failed", "candidate-interactive-host", "previous-interactive-host", "candidate-source-helper", "operator" };
     private static readonly HashSet<string> NonPinningFiles = new(StringComparer.Ordinal)
     {
         "candidate-config.json", "original-config.json", "source-access-config-before.json", "source-access-config-after.json",
@@ -104,7 +104,7 @@ public sealed class RecoveryIndexReferenceAudit(string indexRoot)
             // These directories are restored as application code, never as an ANN payload.
             // Only the packet's reference metadata can pin an external generation.
             var role = Path.GetFileName(path).Contains("interactive-host", StringComparison.Ordinal) ? "OutlookHost" :
-                Path.GetFileName(path) == "operator" ? "Cli" : "Web";
+                Path.GetFileName(path) is "operator" or "candidate-source-helper" ? "Cli" : "Web";
             var entry = Path.Combine(path, "FluxKnowledge." + role + ".dll");
             using var file = new FileStream(PhysicalFileIdentity.OpenReadNoFollow(entry), FileAccess.Read);
             if (file.Length is < 1 or > 64 * 1024 * 1024) Refuse(entry, "index-recovery-payload-invalid");
@@ -221,12 +221,18 @@ public sealed class RecoveryIndexReferenceAudit(string indexRoot)
                 var name = Path.GetFileName(child);
                 if (Payloads.Contains(name)) { Payload(child); continue; }
                 if (name is not ("manifest.json" or "corpus-rebuild-manifest.json" or "hybrid-state.json" or "repository-recovery-receipt.json") &&
-                    !NonPinningFiles.Contains(name)) Refuse(child);
+                    !NonPinningFiles.Contains(name) && !RecoveryUpdateMetadata.Supports(name)) Refuse(child);
                 using var document = Metadata(child);
                 if (document is null) continue;
                 var value = document.RootElement;
+                if (RecoveryUpdateMetadata.Supports(name) && !RecoveryUpdateMetadata.Validate(name, value, path))
+                    Refuse(child, "index-recovery-reference-metadata-unsupported");
                 if (name == "corpus-rebuild-manifest.json") rebuildHash = Rebuild(child, value);
-                if (name == "manifest.json")
+                if (name == "manifest.json" && RecoveryUpdateMetadata.IsTypedManifest(value))
+                {
+                    if (!RecoveryUpdateMetadata.ValidateManifest(value, path)) Refuse(child, "index-recovery-application-manifest-invalid");
+                }
+                else if (name == "manifest.json")
                 {
                     var expected = new[] { "commit", "staged_at_utc", "application_root", "migrations", "clean_slate", "reviewed_legacy_index_payloads", "vector_publication_metadata" };
                     if (value.EnumerateObject().Any(property => !expected.Contains(property.Name, StringComparer.Ordinal)) ||

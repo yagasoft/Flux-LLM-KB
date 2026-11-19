@@ -119,7 +119,7 @@ public sealed partial class SqlToUsearchRebuildTests
     }
 
     [NativeSqlServerFact]
-    public async Task Active_projection_still_refuses_corrupt_serving_vector_payload()
+    public async Task Active_projection_does_not_rehash_same_length_serving_vector_payload()
     {
         await using var environment = await PipelineEnvironment.CreateAsync(_fixture, "Serving payload integrity.");
         using var provider = CreateRecoveryProvider(environment.Factory, environment.IndexRoot);
@@ -135,8 +135,7 @@ public sealed partial class SqlToUsearchRebuildTests
             await context.SaveChangesAsync();
         }
         await coordinator.RunOnceAsync(CancellationToken.None);
-        Assert.Equal(DerivedIndexRecoveryState.OperatorActionRequired, coordinator.Snapshot.State);
-        Assert.Equal(DerivedIndexRecoveryFailureCategory.SqlMembershipInvalid, coordinator.Snapshot.FailureCategory);
+        Assert.Equal(DerivedIndexRecoveryState.Healthy, coordinator.Snapshot.State);
     }
 
     [NativeSqlServerFact]

@@ -38,7 +38,9 @@ public sealed class PhysicalSourceConvergenceTests(NativeSqlServerFixture fixtur
         var first = await worker.ScanAsync(source.Claim.SourceRoot, source.Claim.ScanRequest, default);
         Assert.Equal(2, first.DiscoveredCount);
         Assert.Equal(0, first.BlockedCount);
-        Assert.Equal(discoveredBytes, copiedBytes);
+        Assert.Equal(new FileInfo(source.Path("available.txt")).Length +
+            new FileInfo(source.Path("unavailable.txt")).Length, discoveredBytes);
+        Assert.Equal(0, copiedBytes);
         Guid[] revisions, artifacts, activities;
         await using (var before = source.Factory.CreateDbContext())
         {
@@ -468,6 +470,7 @@ public sealed class PhysicalSourceConvergenceTests(NativeSqlServerFixture fixtur
             Entered.TrySetResult();
             return acquiring;
         }
+        public ValueTask<ISourceArtifactPublicationBatchLease?> TryAcquireExclusiveBatchAsync(IReadOnlyList<string> hashes, CancellationToken token) => inner.TryAcquireExclusiveBatchAsync(hashes, token);
         public ValueTask<ISourceArtifactPublicationLease?> TryAcquireExclusiveAsync(string hash, CancellationToken token) =>
             inner.TryAcquireExclusiveAsync(hash, token);
     }

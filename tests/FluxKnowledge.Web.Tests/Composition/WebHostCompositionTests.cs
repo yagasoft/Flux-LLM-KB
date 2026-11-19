@@ -142,6 +142,7 @@ public sealed class WebHostCompositionTests : IDisposable
         var background = application.Services.GetServices<IHostedService>().OfType<BackgroundService>().ToArray();
         Assert.Contains(background, service => service is SourceReconciliationService);
         Assert.Contains(background, service => service is GpuSchedulerService);
+        Assert.Contains(background, service => service is OutlookWatchedExportPublisher);
         readiness.ExpectedWaiters = background.Length;
 
         await application.StartAsync().WaitAsync(TimeSpan.FromSeconds(5));
@@ -200,6 +201,44 @@ public sealed class WebHostCompositionTests : IDisposable
     }
 
     [Fact]
+    public async Task Outlook_watched_publication_does_not_access_SQL_during_deployment_validation()
+    {
+        var configuration = CreateOutlookRecoveryConfiguration(enabled: true);
+        var database = new ForbiddenStartupContextFactory();
+        var hold = new ControlledDeploymentHold();
+        var services = new ServiceCollection();
+        services.AddLogging();
+        WebHostComposition.AddFluxKnowledgeServices(services, configuration);
+        services.AddSingleton<IDbContextFactory<FluxKnowledgeDbContext>>(database);
+        services.AddSingleton<IDeploymentValidationHold>(hold);
+        using var provider = services.BuildServiceProvider();
+        var publisher = Assert.Single(provider.GetServices<IHostedService>().OfType<OutlookWatchedExportPublisher>());
+
+        await publisher.StartAsync(CancellationToken.None);
+        try
+        {
+            await hold.Entered.Task.WaitAsync(TimeSpan.FromSeconds(5));
+            Assert.Equal(0, database.Attempts);
+        }
+        finally
+        {
+            await publisher.StopAsync(CancellationToken.None).WaitAsync(TimeSpan.FromSeconds(5));
+        }
+    }
+
+    private sealed class ControlledDeploymentHold : IDeploymentValidationHold
+    {
+        public bool IsHeld => true;
+        public TaskCompletionSource Entered { get; } = new(TaskCreationOptions.RunContinuationsAsynchronously);
+
+        public ValueTask WaitUntilReleasedAsync(CancellationToken cancellationToken)
+        {
+            Entered.TrySetResult();
+            return new(Task.Delay(Timeout.InfiniteTimeSpan, cancellationToken));
+        }
+    }
+
+    [Fact]
     public async Task Hybrid_runtime_composes_shared_slot_exact_profiles_and_both_executors_without_loading_models()
     {
         var configuration = new ConfigurationBuilder().AddConfiguration(CreateProductionConfiguration())
@@ -238,6 +277,7 @@ public sealed class WebHostCompositionTests : IDisposable
         Assert.IsType<HybridPassageRetrievalEngine>(scope.ServiceProvider.GetRequiredService<HybridPassageRetrievalEngine>());
         Assert.IsType<GpuFirstPassageInference>(provider.GetRequiredService<IScheduledPassageInference>());
         Assert.Single(provider.GetServices<IHostedService>().OfType<BgeCpuWarmupService>());
+        Assert.Single(provider.GetServices<IHostedService>().OfType<TextChunkWindowBackfillService>());
         Assert.Single(provider.GetServices<IHostedService>().OfType<DerivedIndexRecoveryService>());
         Assert.IsType<PassageSearchService>(scope.ServiceProvider.GetRequiredService<ISearchService>());
         Assert.True(provider.GetRequiredService<CorpusRetrievalOptions>().CoherentPassagesEnabled);
@@ -443,10 +483,8 @@ public sealed class WebHostCompositionTests : IDisposable
         Assert.Same(store, scope.ServiceProvider.GetRequiredService<ISourceVerificationExecutionStore>());
         Assert.Same(store, scope.ServiceProvider.GetRequiredService<ISourceVerificationScheduler>());
         Assert.IsType<SourceWorkScanner>(scope.ServiceProvider.GetRequiredService<ISourceScanner>());
-        Assert.IsType<WindowsSourceVerificationContentReader>(scope.ServiceProvider.GetRequiredService<ISourceVerificationContentReader>());
         Assert.IsType<WindowsSourceVerificationReaderSlot>(scope.ServiceProvider.GetRequiredService<ISourceVerificationReaderSlot>());
         var artifacts = provider.GetRequiredService<ISourceArtifactStore>();
-        Assert.Same(artifacts, provider.GetRequiredService<ISourceVerificationRetainedStore>());
         Assert.Same(artifacts, provider.GetRequiredService<ISourceRetainedObservationStore>());
     }
 
@@ -491,9 +529,11 @@ public sealed class WebHostCompositionTests : IDisposable
 
         WebHostComposition.AddProductionFluxKnowledgeServicesForTests(services, configuration);
 
-        Assert.Equal(8, services.Count(descriptor => descriptor.ServiceType == typeof(IHostedService)));
+        Assert.Equal(9, services.Count(descriptor => descriptor.ServiceType == typeof(IHostedService)));
         Assert.Contains(services, descriptor => descriptor.ServiceType == typeof(IHostedService) &&
             descriptor.ImplementationType == typeof(SourceWorkRecoveryService));
+        Assert.Contains(services, descriptor => descriptor.ServiceType == typeof(IHostedService) &&
+            descriptor.ImplementationType == typeof(OutlookWatchedExportPublisher));
         WebHostComposition.ValidateNativeGoLiveComposition(services, configuration);
     }
 
@@ -700,6 +740,7 @@ public sealed class WebHostCompositionTests : IDisposable
         Assert.IsType<CodexPromptContextService>(retrievalScope.ServiceProvider.GetRequiredService<ICodexPromptContextService>());
         Assert.True(provider.GetRequiredService<CodexPromptContextOptions>().Enabled);
         Assert.Empty(provider.GetServices<IHostedService>().OfType<OutlookCaptureRecoveryService>());
+        Assert.Empty(provider.GetServices<IHostedService>().OfType<OutlookWatchedExportPublisher>());
         Assert.DoesNotContain(
             typeof(WebHostComposition).Assembly.GetReferencedAssemblies(),
             reference => reference.Name?.Contains("OutlookHost", StringComparison.Ordinal) == true);
@@ -798,7 +839,7 @@ public sealed class WebHostCompositionTests : IDisposable
     }
 
     [Fact]
-    public void Enabled_options_register_only_durable_Outlook_recovery()
+    public void Enabled_options_register_SQL_backed_Outlook_recovery_and_watched_publication()
     {
         var configuration = CreateOutlookRecoveryConfiguration(enabled: true);
         var services = new ServiceCollection();
@@ -814,6 +855,7 @@ public sealed class WebHostCompositionTests : IDisposable
         Assert.Equal(TimeSpan.FromMinutes(1), options.RecoveryCadence);
         Assert.Equal(TimeSpan.FromMinutes(10), options.StaleLeaseAge);
         Assert.Single(provider.GetServices<IHostedService>().OfType<OutlookCaptureRecoveryService>());
+        Assert.Single(provider.GetServices<IHostedService>().OfType<OutlookWatchedExportPublisher>());
         using var scope = provider.CreateScope();
         Assert.IsType<SqlOutlookCaptureStore>(
             scope.ServiceProvider.GetRequiredService<IOutlookCaptureRecoveryStore>());
@@ -1486,6 +1528,7 @@ public sealed class WebHostCompositionTests : IDisposable
 
         private sealed class Lease : IDerivedIndexRecoveryLease
         {
+            public ValueTask<bool> IsHeldAsync(CancellationToken cancellationToken) => ValueTask.FromResult(true);
             public ValueTask DisposeAsync() => ValueTask.CompletedTask;
         }
     }

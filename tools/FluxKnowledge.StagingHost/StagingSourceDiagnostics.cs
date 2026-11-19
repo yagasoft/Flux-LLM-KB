@@ -9,7 +9,7 @@ using FluxKnowledge.Integrations.Files;
 /// <summary>Read-only, model-free staging measurements. No production registration or SQL/source text logging.</summary>
 internal sealed class StagingSourceDiagnostics : ILoggerProvider
 {
-    private long _enumerationSource, _retentionSource, _verificationSource, _retained, _sql, _sqlFailed, _queries, _reads, _records;
+    private long _enumerationSource, _retentionSource, _retained, _sql, _sqlFailed, _queries, _reads, _records;
     private readonly ConcurrentQueue<ScanMeasurement> _scans = new();
     internal sealed record Counters(long EnumerationSourceBytes, long RetentionSourceBytes, long VerificationSourceBytes,
         long RetainedBytes, long SqlCommands, long SqlFailedCommands, long JournalQueries, long JournalReads, long JournalRecords);
@@ -43,13 +43,6 @@ internal sealed class StagingSourceDiagnostics : ILoggerProvider
             reader.SourceBytesRead = bytes => Interlocked.Add(ref metrics._enumerationSource, bytes);
             return reader;
         });
-        services.AddSingleton<ISourceVerificationContentReader>(provider =>
-        {
-            if (!OperatingSystem.IsWindows()) throw new PlatformNotSupportedException("Native source verification diagnostics require Windows.");
-            var reader = ActivatorUtilities.CreateInstance<WindowsSourceVerificationContentReader>(provider);
-            reader.SourceBytesRead = bytes => Interlocked.Add(ref metrics._verificationSource, bytes);
-            return reader;
-        });
         services.AddScoped<SourceWorkScanner>();
         services.AddScoped<ISourceScanner>(provider => new ScanMeasurements(provider.GetRequiredService<SourceWorkScanner>(),
             (LocalSourceEnumerator)provider.GetRequiredService<ISourceFileEnumerator>(), metrics));
@@ -57,13 +50,13 @@ internal sealed class StagingSourceDiagnostics : ILoggerProvider
     }
 
     private Counters Snapshot() => new(Interlocked.Read(ref _enumerationSource), Interlocked.Read(ref _retentionSource),
-        Interlocked.Read(ref _verificationSource), Interlocked.Read(ref _retained), Interlocked.Read(ref _sql),
+        0, Interlocked.Read(ref _retained), Interlocked.Read(ref _sql),
         Interlocked.Read(ref _sqlFailed), Interlocked.Read(ref _queries), Interlocked.Read(ref _reads), Interlocked.Read(ref _records));
 
     internal object Read() => new
     {
         observedAtUtc = DateTimeOffset.UtcNow,
-        scope = "Process-wide logical checksum bytes during each interval; overlapping scan deltas must not be summed. Enumeration counts managed entries processed, not native directory buffers. SQL counts EF command completion/failure events, not all SQL operations.",
+        scope = "Process-wide logical file-body bytes during each interval; overlapping scan deltas must not be summed. Retired verification bytes remain zero. Enumeration counts managed entries processed, not native directory buffers. SQL counts EF command completion/failure events, not all SQL operations.",
         counters = Snapshot(), scans = _scans.ToArray()
     };
 

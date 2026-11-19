@@ -1,24 +1,29 @@
 using FluxKnowledge.Application.Ports;
+using FluxKnowledge.Application.Gpu;
 using FluxKnowledge.Application.Sources;
+using FluxKnowledge.Domain.Gpu;
 using FluxKnowledge.Domain.Sources;
 using FluxKnowledge.Infrastructure.SqlServer.Persistence.Entities;
 using FluxKnowledge.Integrations.Files;
 using Microsoft.EntityFrameworkCore;
+using Microsoft.EntityFrameworkCore.Storage;
+using System.Data;
 
 namespace FluxKnowledge.Infrastructure.SqlServer.Persistence;
 
-/// <summary>Retains bounded publication-recovery progress across hosted service scopes.</summary>
-public sealed class SqlGitPublicationRecoveryProgress
+/// <summary>Retains process-local recovery progress across hosted service scopes.</summary>
+public sealed class SqlSourceWorkRecoveryProgress
 {
     internal System.Collections.Concurrent.ConcurrentDictionary<Guid, Guid> After { get; } = new();
+    internal System.Collections.Concurrent.ConcurrentDictionary<SourceWorkAdmittedRoot, byte> AnnouncedAdmissions { get; } = new();
 }
 
 public sealed class SqlSourceWorkRecovery(IDbContextFactory<FluxKnowledgeDbContext> factory, SourceWorkAdmission admission,
     ISourceRemovalReconciler removals, ISourceObservationReader observations, TimeProvider clock,
     ISourceWorkRetirement? retirement = null, Guid? targetRootId = null,
-    SqlGitPublicationRecoveryProgress? gitPublicationProgress = null) : ISourceWorkRecovery
+    SqlSourceWorkRecoveryProgress? recoveryProgress = null, IGpuSchedulerWakeSignal? schedulerWake = null) : ISourceWorkRecovery
 {
-    private readonly SqlGitPublicationRecoveryProgress _gitPublicationProgress = gitPublicationProgress ?? new();
+    private readonly SqlSourceWorkRecoveryProgress _progress = recoveryProgress ?? new();
 
     public async ValueTask AdvanceAsync(CancellationToken cancellationToken)
     {
@@ -54,19 +59,44 @@ public sealed class SqlSourceWorkRecovery(IDbContextFactory<FluxKnowledgeDbConte
                     (x.ReasonFlags & SourcePendingReasons.RemovalPending) != 0, cancellationToken).ConfigureAwait(false))
                 admission.Admit(root.Id, root.ConfigurationRevision);
         }
+        await AnnounceAdmissionsAsync(cancellationToken).ConfigureAwait(false);
         foreach (var root in roots.Where(x => x.CrawlMode == (int)SourceDiscoveryMode.GitTracked &&
             admission.IsAdmitted(x.Id, x.ConfigurationRevision)))
         {
-            Guid? after = _gitPublicationProgress.After.TryGetValue(root.Id, out var cursor) ? cursor : null;
+            Guid? after = _progress.After.TryGetValue(root.Id, out var cursor) ? cursor : null;
             var next = await SqlGitTextSelection.RestorePublishedAsync(factory, root.Id, root.ConfigurationRevision,
                 clock.GetUtcNow(), cancellationToken, after).ConfigureAwait(false);
-            if (next is { } value) _gitPublicationProgress.After[root.Id] = value;
-            else _gitPublicationProgress.After.TryRemove(root.Id, out _);
+            if (next is { } value) _progress.After[root.Id] = value;
+            else _progress.After.TryRemove(root.Id, out _);
         }
         if (targetRootId is null)
-            foreach (var id in _gitPublicationProgress.After.Keys.Where(id => !roots.Any(root => root.Id == id)))
-                _gitPublicationProgress.After.TryRemove(id, out _);
+            foreach (var id in _progress.After.Keys.Where(id => !roots.Any(root => root.Id == id)))
+                _progress.After.TryRemove(id, out _);
         if (retirement is not null) await retirement.RetireAsync(cancellationToken).ConfigureAwait(false);
+    }
+
+    private async Task AnnounceAdmissionsAsync(CancellationToken ct)
+    {
+        var admitted = admission.ReadAdmittedRoots().ToHashSet();
+        foreach (var prior in _progress.AnnouncedAdmissions.Keys.Where(prior => !admitted.Contains(prior)))
+            _progress.AnnouncedAdmissions.TryRemove(prior, out _);
+        var pending = admitted.Where(root => !_progress.AnnouncedAdmissions.ContainsKey(root)).ToArray();
+        if (pending.Length == 0) return;
+        // Startup admission can finish after the scheduler's no-candidate decision.
+        // Publish a durable wake after admission opens; a local signal alone is not authority.
+        await using var execution = await factory.CreateDbContextAsync(ct).ConfigureAwait(false);
+        await execution.Database.CreateExecutionStrategy().ExecuteAsync(async () =>
+        {
+            await using var db = await factory.CreateDbContextAsync(ct).ConfigureAwait(false);
+            await using var transaction = await db.Database.BeginTransactionAsync(IsolationLevel.Serializable, ct).ConfigureAwait(false);
+            await SqlGpuSchedulerStore.AcquireMutationLockAsync(db, transaction.GetDbTransaction(), ct).ConfigureAwait(false);
+            await SqlGpuSchedulerStore.RecordWakeAsync(db, GpuSchedulerWakeReason.Reconciliation, clock.GetUtcNow(), ct).ConfigureAwait(false);
+            await db.SaveChangesAsync(ct).ConfigureAwait(false);
+            await transaction.CommitAsync(ct).ConfigureAwait(false);
+        }).ConfigureAwait(false);
+        // A failed or uncertain commit leaves these exact revisions unacknowledged.
+        foreach (var root in pending) _progress.AnnouncedAdmissions.TryAdd(root, 0);
+        schedulerWake?.Notify(GpuSchedulerWakeReason.Reconciliation);
     }
 
     private Task PrepareScopesAsync(SourceRootConfigurationEntity expected, bool fullSweep, CancellationToken ct) =>

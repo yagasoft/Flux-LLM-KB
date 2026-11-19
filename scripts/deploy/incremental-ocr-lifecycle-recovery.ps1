@@ -2,6 +2,7 @@
 . (Join-Path $PSScriptRoot 'verify-ocr-stopped-maintenance.ps1')
 . (Join-Path $PSScriptRoot 'ocr-desktop-classification.ps1')
 . (Join-Path $PSScriptRoot 'incremental-segmented-index-iis.ps1')
+. (Join-Path $PSScriptRoot 'incremental-ocr-stored-execution.ps1')
 
 function Get-OcrLifecycleMigrationContract {
     [ordered]@{ Baseline='20261021010911_AddIndexRecoveryReferenceAudit';Target='20261024061418_AddDocumentOcrExecutionLifecycle';
@@ -10,7 +11,7 @@ function Get-OcrLifecycleMigrationContract {
         DatabaseCollation='SQL_Latin1_General_CP1_CI_AS' }
 }
 
-function Get-OcrReviewedMigrationPrefix([string]$Root) {
+function Get-OcrReviewedMigrationPrefix([string]$Root,[switch]$All) {
     # InitialPhase1.cs has no timestamp in its filename. EF's declared IDs in
     # the generated metadata are authoritative for it and subsequent migrations.
     $ids=@(foreach ($file in Get-ChildItem -LiteralPath (Join-Path $Root 'src/FluxKnowledge.Infrastructure.SqlServer/Persistence/Migrations') -Filter '*.Designer.cs') {
@@ -22,7 +23,7 @@ function Get-OcrReviewedMigrationPrefix([string]$Root) {
     if ($ids -cnotcontains $target -or @($ids | Sort-Object -Unique).Count -ne $ids.Count) {
         throw 'document-ocr-maintenance-migration-metadata-ambiguous'
     }
-    @($ids | Where-Object { $_ -clt $target } | Sort-Object)
+    if($All){@($ids|Sort-Object)}else{@($ids | Where-Object { $_ -clt $target } | Sort-Object)}
 }
 
 function Write-OcrRecoveryJson([string]$Path,$Value) {
@@ -84,6 +85,14 @@ function Assert-OcrLifecycleSchema($State,$Plan,[switch]$RequireOriginal) {
     if ($State.Identity -cne $Plan.DatabaseIdentity) { throw 'document-ocr-maintenance-database-binding-changed' }
     if ($State.Collation -cne $contract.DatabaseCollation) { throw 'document-ocr-maintenance-unreviewed-database-collation' }
     $actual=@($State.History);$baseline=@($Plan.OriginalHistory)
+    if($Plan.Version -in @(2,3)){
+        $expectedMode=if($Plan.Version -eq 2){'CleanupOnly'}else{'StoredExecution'}
+        if($Plan.Mode -cne $expectedMode -or $baseline.Count -ne 80 -or $baseline[-1] -cne '20261117210606_PersistPassageWindowEligibility' -or
+            ($actual -join '|') -cne ($baseline -join '|') -or $State.SchemaSha256 -cne $contract.TargetSchemaSha256 -or
+            @($State.Schema.Columns).Count -ne 19 -or @($State.Schema.Constraints).Count -ne 5 -or
+            @($State.Schema.Constraints|Where-Object {$_.is_disabled -or $_.is_not_trusted}).Count){throw 'document-ocr-maintenance-schema-or-history-changed'}
+        return $true # Current schema is pinned; this mode never applies DDL.
+    }
     $old=($actual -join '|') -ceq ($baseline -join '|') -and $actual[-1] -ceq $contract.Baseline -and
         @($State.Schema.Columns).Count -eq 0 -and @($State.Schema.Constraints).Count -eq 0
     $new=($actual -join '|') -ceq ((@($baseline)+@($contract.Target)) -join '|') -and
@@ -118,6 +127,124 @@ FOR JSON PATH,INCLUDE_NULL_VALUES;
                 CapacityOwnerKey=$r.CapacityOwnerKey;ResultDigest=[Convert]::ToBase64String([Convert]::FromHexString($r.ResultDigestHex));
                 RecoveryInstanceId=$RecoveryInstanceId.ToString()};StoredJsonSha256=$r.StoredJsonSha256}
     } finally { $connection.Dispose() }
+}
+
+function Get-OcrTerminalCleanupBinding([string]$ConnectionString,[Guid]$BatchId,[Guid]$RecoveryInstanceId) {
+    $connection=[Data.SqlClient.SqlConnection]::new($ConnectionString)
+    try{
+        $connection.Open()
+        $rows=@((Invoke-OcrJsonScalar $connection @'
+SELECT d.BatchId,d.DispatchId,d.CapacitySlotKey,d.ExecutorKey,d.AdmissionGeneration,t.Id AS MiniTaskId,r.ParentJobId,
+ r.PipelineRecordId,root.Id AS SourceRootId,root.ConfigurationRevision AS RootConfigurationRevision,b.OwnerKey AS CapacityOwnerKey,
+ CONVERT(varchar(16),CONVERT(binary(8),r.RowVersion),2) AS RequestRowVersionHex,CONVERT(varchar(16),CONVERT(binary(8),t.RowVersion),2) AS TaskRowVersionHex,
+ CONVERT(varchar(16),CONVERT(binary(8),job.RowVersion),2) AS JobRowVersionHex
+FROM dbo.GpuBatches b JOIN dbo.GpuExecutorDispatches d ON d.BatchId=b.Id JOIN dbo.GpuMiniTasks t ON t.BatchId=b.Id
+JOIN dbo.DocumentOcrRequests r ON r.MiniTaskId=t.Id JOIN dbo.GpuCapacitySlots slot ON slot.SlotKey=b.CapacitySlotKey
+JOIN dbo.Jobs job ON job.Id=r.ParentJobId JOIN dbo.PipelineRecords record ON record.Id=r.PipelineRecordId
+JOIN dbo.SourceRevisions revision ON revision.Id=record.SourceRevisionId JOIN dbo.SourceRootConfigurations root ON root.Id=revision.SourceRootId
+WHERE b.Id=@batch AND b.State=3 AND t.State=3 AND d.State=3 AND b.ItemCount=1 AND root.State=2
+ AND ((slot.State=0 AND slot.ActiveBatchId IS NULL AND slot.OwnerKey IS NULL) OR
+      (slot.State=1 AND slot.ActiveBatchId<>b.Id AND EXISTS (
+        SELECT 1 FROM dbo.GpuBatches currentBatch JOIN dbo.GpuExecutorDispatches currentDispatch ON currentDispatch.BatchId=currentBatch.Id
+        WHERE currentBatch.Id=slot.ActiveBatchId AND currentBatch.State=0 AND currentBatch.CapacitySlotKey=slot.SlotKey
+          AND currentBatch.OwnerKey=slot.OwnerKey AND currentBatch.AdmissionGeneration>0
+          AND currentDispatch.CapacitySlotKey=slot.SlotKey AND currentDispatch.OwnerKey=currentBatch.OwnerKey
+          AND currentDispatch.AdmissionGeneration=currentBatch.AdmissionGeneration AND currentDispatch.State IN(0,1,2)
+          AND EXISTS(SELECT 1 FROM dbo.GpuMiniTasks activeTask WHERE activeTask.BatchId=currentBatch.Id
+            AND activeTask.AdmissionGeneration=currentBatch.AdmissionGeneration AND activeTask.State=1))))
+ AND b.OwnerKey=d.OwnerKey
+ AND b.CapacitySlotKey=d.CapacitySlotKey AND b.AdmissionGeneration=d.AdmissionGeneration AND t.AdmissionGeneration=d.AdmissionGeneration
+ AND t.ParentJobId=job.Id AND job.PipelineRecordId=record.Id AND job.SourceRevision=record.Revision AND r.SourceRevision=job.SourceRevision
+ AND r.RetainedSourceRevisionId=revision.Id AND t.ModelRuntimeKey=r.ModelRuntimeKey AND t.SettingsFingerprint=r.SettingsFingerprint
+ AND b.ModelRuntimeKey=t.ModelRuntimeKey AND b.SettingsFingerprint=t.SettingsFingerprint
+ AND d.ExecutorKey=N'paddleocr-vl-local-gpu-0' AND d.CapacitySlotKey=N'paddleocr-vl-local-gpu-0'
+ AND (SELECT COUNT_BIG(*) FROM dbo.GpuMiniTasks member WHERE member.BatchId=b.Id)=1
+ AND r.ExecutionPhase=0 AND r.ExecutionInstanceId IS NULL AND r.ExecutionDispatchId IS NULL AND r.ExecutionBatchId IS NULL
+ AND r.ExecutionAdmissionGeneration IS NULL AND r.ExecutionMachineFingerprint IS NULL AND r.SupervisorInstanceId IS NULL
+ AND r.SupervisorProcessId IS NULL AND r.SupervisorProcessStartedAtUtc IS NULL AND r.ExecutionClaimedAtUtc IS NULL
+ AND r.ExecutionDeadlineAtUtc IS NULL AND r.NativeProcessId IS NULL AND r.NativeProcessStartedAtUtc IS NULL
+ AND r.NativeCleanupConfirmedAtUtc IS NULL AND r.CleanupProofKind IS NULL AND r.PhysicalCleanupEvidenceSha256 IS NULL
+ AND r.RecoveryStartedAtUtc IS NULL AND r.RecoveryReason IS NULL AND r.RecoveryUpdatedAtUtc IS NULL
+FOR JSON PATH;
+'@ $null @{'@batch'=$BatchId})|ConvertFrom-Json -AsHashtable|Where-Object {$null -ne $_})
+        if($rows.Count -ne 1 -or $rows[0] -isnot [Collections.IDictionary]){throw 'document-ocr-maintenance-terminal-binding-not-exact'}
+        $r=$rows[0]
+        foreach($name in @('RequestRowVersionHex','TaskRowVersionHex','JobRowVersionHex')){
+            if($r[$name] -cnotmatch '^[A-F0-9]{16}$'){throw "document-ocr-maintenance-terminal-binding-not-exact:$name"}
+        }
+        [ordered]@{Handle=[ordered]@{BatchId=$r.BatchId;CapacitySlotKey=$r.CapacitySlotKey;ExecutorKey=$r.ExecutorKey;
+            AdmissionGeneration=$r.AdmissionGeneration;DispatchId=$r.DispatchId};MiniTaskId=$r.MiniTaskId;ParentJobId=$r.ParentJobId;
+            PipelineRecordId=$r.PipelineRecordId;SourceRootId=$r.SourceRootId;RootConfigurationRevision=$r.RootConfigurationRevision;
+            CapacityOwnerKey=$r.CapacityOwnerKey;RequestRowVersion=[Convert]::ToBase64String([Convert]::FromHexString($r.RequestRowVersionHex));
+            TaskRowVersion=[Convert]::ToBase64String([Convert]::FromHexString($r.TaskRowVersionHex));
+            JobRowVersion=[Convert]::ToBase64String([Convert]::FromHexString($r.JobRowVersionHex));RecoveryInstanceId=$RecoveryInstanceId.ToString()}
+    }finally{$connection.Dispose()}
+}
+
+function Assert-OcrRecoveryPlanMode($Plan) {
+    # True means current-schema maintenance and ordinary recovery-packet layout.
+    if($Plan.Version -eq 1 -and !$Plan.Mode -and $Plan.Binding -and !$Plan.TerminalBinding -and !$Plan['StoredExecutionBinding']){return $false}
+    if($Plan.Version -eq 2 -and $Plan.Mode -ceq 'CleanupOnly' -and $Plan.TerminalBinding -and !$Plan.Binding -and !$Plan['StoredExecutionBinding']){return $true}
+    if($Plan.Version -eq 3 -and $Plan.Mode -ceq 'StoredExecution' -and $Plan['StoredExecutionBinding'] -and !$Plan.Binding -and !$Plan.TerminalBinding){return $true}
+    throw 'document-ocr-maintenance-plan-mode-invalid'
+}
+
+function Get-OcrRecoveryBackupPath([string]$Release,[string]$Role,[bool]$CleanupOnly) {
+    if($CleanupOnly){Join-Path $Release $(if($Role -ceq 'Web'){'previous'}elseif($Role -ceq 'OutlookHost'){'previous-interactive-host'}else{throw 'document-ocr-maintenance-payload-role-invalid'})}
+    else{Join-Path $Release ('previous-'+$Role)}
+}
+
+function Get-OcrRecoveryReleaseId([string]$Commit,[bool]$CleanupOnly) {
+    [DateTime]::UtcNow.ToString('yyyyMMddTHHmmssZ')+'-'+$Commit.Substring(0,12)+$(if(!$CleanupOnly){'-ocrlifecycle'}else{''})
+}
+
+function Select-OcrDesktopGpuProcesses($Driver,$OwnedWorkerIds,$Before,$After) {
+    $entries=@($Driver.SelectNodes('//gpu/processes/process_info'))
+    foreach($workerId in @($OwnedWorkerIds|Where-Object {$null -ne $_})){
+        $prior=@($Before|Where-Object Pid -eq $workerId);$current=@($After|Where-Object Pid -eq $workerId)
+        if($prior.Count -ne 1 -or $current.Count -ne 1 -or !$prior[0].StartedUtc -or !$prior[0].Path -or
+            $prior[0].Name -ine 'w3wp.exe' -or $current[0].Name -ine 'w3wp.exe' -or
+            $prior[0].StartedUtc -cne $current[0].StartedUtc -or $prior[0].Path -ine $current[0].Path){
+            throw 'document-ocr-maintenance-owned-gpu-identity-changed'
+        }
+        $gpu=@($entries|Where-Object {[int]$_.pid -eq $workerId})
+        if($gpu.Count -gt 1 -or ($gpu.Count -eq 1 -and [string]$gpu[0].process_name -ine $prior[0].Path)){
+            throw 'document-ocr-maintenance-owned-gpu-identity-changed'
+        }
+    }
+    $entries|Where-Object {[int]$_.pid -notin @($OwnedWorkerIds)}
+}
+
+function Start-OcrApplicationOwners {
+    Invoke-DeploymentIndexAdmission -Action {
+        Start-WebAppPool -Name $SiteName
+        Wait-IisAppPoolState -Name $SiteName -ExpectedState Started -TimeoutSeconds $ReadinessTimeoutSeconds
+    }
+}
+
+function Set-OcrCleanupAdmissionBindings($Plan) {
+    if(!(Assert-OcrRecoveryPlanMode $Plan)){return}
+    if($Plan.PreservedHelperPayload.Root -cne 'I:\FluxKnowledgeSourceAccess\payload' -or
+        $Plan.PreservedHelperPayload.Sha256 -cnotmatch '^[A-F0-9]{64}$' -or
+        (Get-HybridPayloadFingerprint (Assert-OcrPlainLocalPath $Plan.PreservedHelperPayload.Root)) -cne $Plan.PreservedHelperPayload.Sha256){
+        throw 'document-ocr-maintenance-preserved-helper-changed'
+    }
+    $pins=@(foreach($role in @('Web','OutlookHost')){
+        $entries=@($Plan.Payloads|Where-Object Role -ceq $role)
+        if($entries.Count -ne 1 -or $entries[0].Sha256 -cnotmatch '^[A-F0-9]{64}$'){throw 'document-ocr-maintenance-payload-set-invalid'}
+        $role+'='+$entries[0].Sha256
+    })+@('Cli='+$Plan.PreservedHelperPayload.Sha256)
+    Set-Variable -Scope Script -Name ReviewedSourceJournalPayloads -Value $pins
+    Set-Variable -Scope Script -Name ExpectedSourceJournalDatabaseIdentity -Value $Plan.DatabaseIdentity
+}
+
+function New-OcrApplicationManifest($Plan) {
+    $cleanupOnly=Assert-OcrRecoveryPlanMode $Plan
+    $manifest=[ordered]@{commit=$Plan.Commit;staged_at_utc=$Plan.CreatedAtUtc;application_root=$CanonicalDeployRoot;
+        migrations=(!$cleanupOnly);clean_slate=$false;reviewed_legacy_index_payloads=@()}
+    if($cleanupOnly){$manifest.vector_publication_metadata=$null}
+    else{$manifest.ocr_recovery_plan_sha256=$ExpectedPlanSha256}
+    $manifest
 }
 
 function Invoke-OcrLifecycleMigration([string]$ConnectionString,$Plan,[scriptblock]$AssertStopped,
@@ -168,7 +295,7 @@ function Invoke-OcrRecoveryFlow([string]$StatePath,[string]$PlanSha256,$Ports,[s
     if ($state.Phase -ne 'Prepared' -and !$Resume) { throw 'document-ocr-maintenance-explicit-resume-required' }
     $origin=if ($state.Phase -ceq 'FailedHeld') { $state.FailedAt } else { $state.Phase }
     if ($origin -cin @('PayloadActivationIntent','StartIntent','HoldReleaseIntent')) { $state.ActivationStarted=$true }
-    $save={param($phase) $state.Phase=$phase;Write-OcrRecoveryJson $StatePath $state}.GetNewClosure()
+    $save={param($phase) $state.Phase=$phase;Write-OcrRecoveryJson $StatePath $state}
     & $Ports.AssertBindings
     try {
         & $save 'HoldIntent'; & $Ports.EnsureHold
@@ -194,7 +321,7 @@ function Invoke-OcrRecoveryFlow([string]$StatePath,[string]$PlanSha256,$Ports,[s
 }
 
 function Get-OcrRecoveryImplementationHash {
-    $names=@('update-native-iis-incremental.ps1','incremental-ocr-lifecycle-recovery.ps1','verify-ocr-stopped-maintenance.ps1',
+    $names=@('update-native-iis-incremental.ps1','incremental-ocr-lifecycle-recovery.ps1','incremental-ocr-stored-execution.ps1','verify-ocr-stopped-maintenance.ps1',
         'ocr-lifecycle-schema-up.sql','ocr-desktop-classification.ps1','incremental-iis-payload-swap.psm1','incremental-segmented-index-iis.ps1',
         'incremental-segmented-index-update.psm1','incremental-repository-recovery-migration.psm1',
         'incremental-hybrid-passage-rebuild.psm1','index-format-admission.psm1','IndexEntryMetadata.cs','recovery-reference-writer.psm1')
@@ -209,6 +336,7 @@ function Get-OcrInstalledPayloadHash([string]$Path,[bool]$AllowPartial) {
 }
 
 function Assert-OcrRecoveryCompletedBindings($Plan) {
+    Set-OcrCleanupAdmissionBindings $Plan
     if ([IO.File]::Exists($ValidationHoldPath)) { throw 'document-ocr-maintenance-completed-hold-present' }
     foreach ($pair in @(@($Plan.ConfigurationPath,$Plan.ConfigurationSha256),@($Plan.CompanionConfigurationPath,$Plan.CompanionConfigurationSha256))) {
         if ((Get-FileHash -LiteralPath $pair[0]).Hash -cne $pair[1]) { throw 'document-ocr-maintenance-completed-configuration-changed' }
@@ -236,7 +364,12 @@ function Confirm-OcrRecoveryBackup([string]$Installed,[string]$Backup,[string]$E
     Copy-SegmentedIndexPayload -Source $Installed -Destination $Backup -ExpectedSha256 $ExpectedSha256
 }
 
-function New-OcrLifecycleRecoveryPlan([string]$Root,[string]$OperationRoot,[Guid]$BatchId,[string]$DesktopClassificationsPath) {
+function New-OcrLifecycleRecoveryPlan([string]$Root,[string]$OperationRoot,[Guid]$BatchId,[string]$DesktopClassificationsPath,[switch]$CleanupOnly,
+    [switch]$StoredExecution,[string]$PredecessorBindingPath='',[string]$ExpectedPredecessorBindingSha256='') {
+    if(($CleanupOnly -and $StoredExecution) -or (!$StoredExecution -and ($PredecessorBindingPath -or $ExpectedPredecessorBindingSha256))){
+        throw 'document-ocr-maintenance-incompatible-mode'
+    }
+    $sameSchema=$CleanupOnly -or $StoredExecution
     $desktop=Read-OcrReviewedDesktopClassifications $DesktopClassificationsPath
     $operation=Assert-OcrPlainLocalPath $OperationRoot
     if (!$operation.StartsWith('I:\Codex Workspaces\',[StringComparison]::OrdinalIgnoreCase) -or [IO.Directory]::Exists($operation)) {
@@ -249,11 +382,49 @@ function New-OcrLifecycleRecoveryPlan([string]$Root,[string]$OperationRoot,[Guid
     if ($database.Identity -cne (Get-OcrLifecycleDatabaseState (Get-RepositoryRecoveryCompanionConnectionString)).Identity) {
         throw 'document-ocr-maintenance-companion-database-mismatch'
     }
-    $expected=@(Get-OcrReviewedMigrationPrefix $Root)
+    $expected=@(Get-OcrReviewedMigrationPrefix $Root -All:$sameSchema)
     if (($database.History -join '|') -cne ($expected -join '|')) { throw 'document-ocr-maintenance-unreviewed-migration-prefix' }
     if ((Get-FileHash -LiteralPath (Join-Path $PSScriptRoot 'ocr-lifecycle-schema-up.sql')).Hash -cne (Get-OcrLifecycleMigrationContract).ScriptSha256) {
         throw 'document-ocr-maintenance-migration-script-changed'
     }
+    $smiPaths=@(Get-Command nvidia-smi.exe -ErrorAction SilentlyContinue | ForEach-Object Source)
+    if (!$smiPaths.Count) { $smiPaths=@(Get-ChildItem -LiteralPath (Join-Path $env:SystemRoot 'System32/DriverStore/FileRepository') -Recurse -Filter 'nvidia-smi.exe' -File | ForEach-Object FullName) }
+    if ($smiPaths.Count -ne 1) { throw 'document-ocr-maintenance-driver-tool-ambiguous' }
+    $smi=$smiPaths[0];[void](Assert-OcrPlainLocalPath $smi)
+    $beforeGpu=if($sameSchema){@(Get-OcrOsSnapshot)}else{@()}
+    $ownedGpuWorkers=if($sameSchema){@(Get-HybridIisWorkerIds -AppCmdPath (Join-Path $env:SystemRoot 'System32/inetsrv/appcmd.exe') -PoolName $SiteName)}else{@()}
+    $raw=& $smi -q -x
+    if ($LASTEXITCODE -ne 0) { throw 'document-ocr-maintenance-driver-query-failed' }
+    [xml]$driver=$raw -join "`n"
+    if (@($driver.nvidia_smi_log.gpu).Count -ne 1 -or !$driver.nvidia_smi_log.gpu.uuid) { throw 'document-ocr-maintenance-single-gpu-required' }
+    $gpuEntries=@($driver.SelectNodes('//gpu/processes/process_info'))
+    if($sameSchema){
+        $afterGpu=@(Get-OcrOsSnapshot)
+        $afterWorkers=@(Get-HybridIisWorkerIds -AppCmdPath (Join-Path $env:SystemRoot 'System32/inetsrv/appcmd.exe') -PoolName $SiteName)
+        if((@($ownedGpuWorkers|Sort-Object) -join ',') -cne (@($afterWorkers|Sort-Object) -join ',')){throw 'document-ocr-maintenance-owned-gpu-identity-changed'}
+        $gpuEntries=@(Select-OcrDesktopGpuProcesses $driver $ownedGpuWorkers $beforeGpu $afterGpu)
+    }
+    $excluded=@(foreach ($path in @($gpuEntries | ForEach-Object process_name | Sort-Object -Unique)) {
+        if ((Test-OcrExecutionBoundary $path ([IO.Path]::GetFileName($path)) '') -or
+            [IO.Path]::GetFileName($path) -match '^(?i:dotnet|pwsh|powershell|cmd|node|rundll32|mshta|wscript|cscript)\.exe$') {
+            throw 'document-ocr-maintenance-live-gpu-process-needs-classification'
+        }
+        $classified=@($desktop.Entries | Where-Object Path -ieq $path)
+        if ($classified.Count -ne 1) { throw 'document-ocr-maintenance-desktop-process-needs-classification' }
+        $classified[0]
+    })
+    $legacy=if(!$sameSchema){Get-OcrLegacyBinding (Get-DeploymentSqlConnectionString) $BatchId ([Guid]::NewGuid())}else{$null}
+    $terminal=if($CleanupOnly){Get-OcrTerminalCleanupBinding (Get-DeploymentSqlConnectionString) $BatchId ([Guid]::NewGuid())}else{$null}
+    $stored=if($StoredExecution){Get-OcrStoredExecutionBinding (Get-DeploymentSqlConnectionString) $BatchId ([Guid]::NewGuid())}else{$null}
+    $forward=$null
+    if($StoredExecution){
+        if([IO.File]::Exists($ValidationHoldPath) -or $PredecessorBindingPath -or $ExpectedPredecessorBindingSha256){
+            $forward=Read-OcrForwardHoldBinding $PredecessorBindingPath $ExpectedPredecessorBindingSha256 $database.Identity
+        }
+        $guard=[Data.SqlClient.SqlConnection]::new((Get-DeploymentSqlConnectionString))
+        try{$guard.Open();if([long](Invoke-OcrScalar $guard 'SELECT COUNT_BIG(*) FROM IndexRecoveryWriters;') -ne 0){throw 'document-ocr-maintenance-recovery-writers-present'}}finally{$guard.Dispose()}
+    }
+    $task=Get-RepositoryRecoveryTaskObservation
     [void][IO.Directory]::CreateDirectory($operation)
     $payloads=@(foreach ($role in @('Web','OutlookHost','Cli')) {
         $destination=Join-Path $operation $role
@@ -264,26 +435,7 @@ function New-OcrLifecycleRecoveryPlan([string]$Root,[string]$OperationRoot,[Guid
         Assert-RepositoryRecoveryCandidateCommit $destination $commit
         [ordered]@{Role=$role;Root=$destination;Sha256=(Get-HybridPayloadFingerprint $destination)}
     })
-    $smiPaths=@(Get-Command nvidia-smi.exe -ErrorAction SilentlyContinue | ForEach-Object Source)
-    if (!$smiPaths.Count) { $smiPaths=@(Get-ChildItem -LiteralPath (Join-Path $env:SystemRoot 'System32/DriverStore/FileRepository') -Recurse -Filter 'nvidia-smi.exe' -File | ForEach-Object FullName) }
-    if ($smiPaths.Count -ne 1) { throw 'document-ocr-maintenance-driver-tool-ambiguous' }
-    $smi=$smiPaths[0];[void](Assert-OcrPlainLocalPath $smi)
-    $raw=& $smi -q -x
-    if ($LASTEXITCODE -ne 0) { throw 'document-ocr-maintenance-driver-query-failed' }
-    [xml]$driver=$raw -join "`n"
-    if (@($driver.nvidia_smi_log.gpu).Count -ne 1 -or !$driver.nvidia_smi_log.gpu.uuid) { throw 'document-ocr-maintenance-single-gpu-required' }
-    $excluded=@(foreach ($path in @($driver.SelectNodes('//gpu/processes/process_info') | ForEach-Object process_name | Sort-Object -Unique)) {
-        if ((Test-OcrExecutionBoundary $path ([IO.Path]::GetFileName($path)) '') -or
-            [IO.Path]::GetFileName($path) -match '^(?i:dotnet|pwsh|powershell|cmd|node|rundll32|mshta|wscript|cscript)\.exe$') {
-            throw 'document-ocr-maintenance-live-gpu-process-needs-classification'
-        }
-        $classified=@($desktop.Entries | Where-Object Path -ieq $path)
-        if ($classified.Count -ne 1) { throw 'document-ocr-maintenance-desktop-process-needs-classification' }
-        $classified[0]
-    })
-    $legacy=Get-OcrLegacyBinding (Get-DeploymentSqlConnectionString) $BatchId ([Guid]::NewGuid())
-    $task=Get-RepositoryRecoveryTaskObservation
-    $releaseId=[DateTime]::UtcNow.ToString('yyyyMMddTHHmmssZ')+'-'+$commit.Substring(0,12)+'-ocrlifecycle'
+    $releaseId=Get-OcrRecoveryReleaseId $commit ([bool]$sameSchema)
     $plan=[ordered]@{Version=1;ReleaseId=$releaseId;CreatedAtUtc=[DateTimeOffset]::UtcNow.ToString('O');Commit=$commit;SourceRoot=$Root;
         OperationRoot=$operation;DatabaseIdentity=$database.Identity;OriginalHistory=$database.History;
         MigrationSha256=(Get-OcrLifecycleMigrationContract).ScriptSha256;ImplementationSha256=(Get-OcrRecoveryImplementationHash);
@@ -298,11 +450,24 @@ function New-OcrLifecycleRecoveryPlan([string]$Root,[string]$OperationRoot,[Guid
         DriverVersion=[string]$driver.nvidia_smi_log.driver_version;SmiPath=$smi;SmiSha256=(Get-FileHash -LiteralPath $smi).Hash;
         DesktopClassificationInputSha256=$desktop.InputSha256;ExcludedGpuExecutables=$excluded;VerifierScriptPath=(Join-Path $PSScriptRoot 'verify-ocr-stopped-maintenance.ps1');
         VerifierScriptSha256=(Get-FileHash -LiteralPath (Join-Path $PSScriptRoot 'verify-ocr-stopped-maintenance.ps1')).Hash}
+    if($sameSchema){
+        $plan.Version=if($StoredExecution){3}else{2};$plan.Mode=if($StoredExecution){'StoredExecution'}else{'CleanupOnly'}
+        $plan.TerminalBinding=$terminal;$plan.StoredExecutionBinding=$stored;$plan.Binding=$null;$plan.StoredJsonSha256=$null
+        if($StoredExecution){$plan.PredecessorHoldBinding=$forward}
+        $helper=@(Get-DeploymentSourceJournalPayloads|Where-Object Role -ceq 'Cli')
+        if($helper.Count -ne 1 -or $helper[0].Root -cne 'I:\FluxKnowledgeSourceAccess\payload'){throw 'document-ocr-maintenance-preserved-helper-unavailable'}
+        $plan.PreservedHelperPayload=[ordered]@{Root=$helper[0].Root;Sha256=(Get-HybridPayloadFingerprint $helper[0].Root)}
+        $plan.OwnedGpuStopTargets=@($beforeGpu|Where-Object {$_.Pid -in $ownedGpuWorkers}|ForEach-Object {@{Pid=$_.Pid;StartedUtc=$_.StartedUtc;Path=$_.Path}})
+    }
     [void](Assert-OcrLifecycleSchema $database $plan -RequireOriginal)
     $path=Join-Path $operation 'plan.json';Write-OcrRecoveryJson $path $plan
     [ordered]@{plan=$path;sha256=(Get-FileHash -LiteralPath $path).Hash;commit=$commit;database=$database.Identity;batch=$BatchId;
-        actions=@('hold admissions','stop exact IIS and companion owners','prove native cleanup','apply pinned additive migration',
-            'settle exact legacy reservation preserving result','activate matching payloads','validate held, release, validate queue progress');
+        actions=$(if($StoredExecution){@('retain or transfer the exact held owner','stop exact IIS and companion owners','prove native cleanup',
+            'pin unchanged schema80; no migration','record cleanup for the original execution and settle its saved result; no requeue or inference',
+            'activate matching payloads','validate held, release, validate normal continuation')}elseif($CleanupOnly){@('hold admissions','stop exact IIS and companion owners','prove native cleanup',
+            'pin unchanged schema80; no migration','record cleanup proof only; preserve task/job/results; no requeue',
+            'activate matching payloads','validate held, release, validate native deletion')}else{@('hold admissions','stop exact IIS and companion owners','prove native cleanup','apply pinned additive migration',
+            'settle exact legacy reservation preserving result','activate matching payloads','validate held, release, validate queue progress')});
         failure='hold retained and owners stopped; prior matching payloads restored only before start intent; no Down migration or settlement reversal'}
 }
 
@@ -374,7 +539,15 @@ function Invoke-OcrLegacySettlement($Plan,[string]$PlanPath,[string]$PlanSha256)
         [IO.File]::WriteAllText((Join-Path $Plan.OperationRoot 'settlement-output.json'),$output)
         if ($process.ExitCode -ne 0) { throw 'document-ocr-maintenance-settlement-refused: '+$errorText.Trim() }
         $result=$output | ConvertFrom-Json -AsHashtable
-        if (!$result.Settled -or [Guid]$result.BatchId -ne [Guid]$Plan.Binding.Handle.BatchId) { throw 'document-ocr-maintenance-settlement-unconfirmed' }
+        $cleanupOnly=Assert-OcrRecoveryPlanMode $Plan
+        $stored=$Plan.Mode -ceq 'StoredExecution'
+        $binding=if($stored){$Plan.StoredExecutionBinding}elseif($cleanupOnly){$Plan.TerminalBinding}else{$Plan.Binding}
+        $handle=if($stored){$binding.Lease.Handle}else{$binding.Handle}
+        if([Guid]$result.BatchId -ne [Guid]$handle.BatchId -or
+            ($stored -and (!$result.CleanupConfirmed -or !$result.StoredExecution -or !$result.Settled -or $result.Requeued -or
+                [Guid]$result.OperationId -ne [Guid]$binding.OperationId -or [Guid]$result.ExecutionInstanceId -ne [Guid]$binding.Lease.ExecutionInstanceId)) -or
+            (!$stored -and $cleanupOnly -and (!$result.CleanupConfirmed -or !$result.CleanupOnly -or $result.Settled -or $result.Requeued)) -or
+            (!$cleanupOnly -and !$result.Settled)){throw 'document-ocr-maintenance-settlement-unconfirmed'}
     } finally { $process.Dispose() }
 }
 
@@ -384,14 +557,16 @@ function Invoke-OcrLifecycleRecoveryUpdate([string]$PlanPath,[string]$ExpectedPl
         throw 'document-ocr-maintenance-reviewed-plan-required'
     }
     $plan=Get-Content -Raw -LiteralPath $PlanPath | ConvertFrom-Json -AsHashtable -DateKind String
-    if ($plan.Version -ne 1 -or $plan.OperationRoot -cne (Split-Path -Parent $PlanPath) -or
-        $plan.ReleaseId -cnotmatch '^\d{8}T\d{6}Z-[0-9a-f]{12}-ocrlifecycle$' -or
+    $cleanupOnly=Assert-OcrRecoveryPlanMode $plan
+    if ($plan.OperationRoot -cne (Split-Path -Parent $PlanPath) -or
+        $plan.ReleaseId -cnotmatch $(if($cleanupOnly){'^\d{8}T\d{6}Z-[0-9a-f]{12}$'}else{'^\d{8}T\d{6}Z-[0-9a-f]{12}-ocrlifecycle$'}) -or
         $plan.HoldPath -cne $ValidationHoldPath -or $plan.IisPool -cne $SiteName -or $plan.TaskName -cne $InteractiveHostTaskName -or
         $plan.ConfigurationPath -cne (Join-Path $CanonicalLiveRoot 'Config/appsettings.Production.json') -or
         $plan.CompanionConfigurationPath -cne (Join-Path (Split-Path -Parent $InteractiveHostRoot) 'appsettings.Production.json') -or
         $plan.ImplementationSha256 -cne (Get-OcrRecoveryImplementationHash)) { throw 'document-ocr-maintenance-plan-binding-changed' }
     $release=Join-Path $IncrementalRecoveryRoot $plan.ReleaseId
     [void](Assert-OcrPlainLocalPath $release)
+    Set-OcrCleanupAdmissionBindings $plan
     $mutex=[Threading.Mutex]::new($false,'Global\FluxKnowledge.IncrementalIisUpdate.v1');$owns=$false
     try {
         try { $owns=$mutex.WaitOne(0) } catch [Threading.AbandonedMutexException] { $owns=$true }
@@ -429,7 +604,8 @@ function Invoke-OcrLifecycleRecoveryUpdate([string]$PlanPath,[string]$ExpectedPl
                     try {
                         $result=Invoke-OcrScalar $connection "DECLARE @r int;EXEC @r=sp_getapplock @Resource=N'FluxKnowledge.GpuScheduler.Admission',@LockMode=N'Exclusive',@LockOwner=N'Transaction',@LockTimeout=10000;SELECT @r;" $transaction
                         if ([int]$result -lt 0) { throw 'document-ocr-maintenance-admission-lock-unavailable' }
-                        [void](New-DeploymentValidationHold -Path $ValidationHoldPath -ReleaseId $plan.ReleaseId)
+                        if($plan.Mode -ceq 'StoredExecution'){Move-OcrStoredExecutionHold $plan $connection $transaction $ExpectedPlanSha256}
+                        else{[void](New-DeploymentValidationHold -Path $ValidationHoldPath -ReleaseId $plan.ReleaseId)}
                         $transaction.Commit()
                     } finally { $transaction.Dispose() }
                 } finally { $connection.Dispose() }
@@ -447,6 +623,8 @@ function Invoke-OcrLifecycleRecoveryUpdate([string]$PlanPath,[string]$ExpectedPl
             }
             Settle={Invoke-OcrLegacySettlement $plan $PlanPath $ExpectedPlanSha256}
             BackupAndActivate={
+                Set-OcrCleanupAdmissionBindings $plan
+                [void](Assert-OcrLifecycleSchema (Get-OcrLifecycleDatabaseState (Get-DeploymentSqlConnectionString)) $plan)
                 [void][IO.Directory]::CreateDirectory($release)
                 $writer=Start-RecoveryReferenceWrite -ConnectionString (Get-DeploymentSqlConnectionString) -RecoveryRoot $CanonicalRecoveryRoot -OwnerExitSufficient
                 try {
@@ -454,14 +632,13 @@ function Invoke-OcrLifecycleRecoveryUpdate([string]$PlanPath,[string]$ExpectedPl
                         $entry=@($plan.Payloads | Where-Object Role -ceq $role)[0]
                         $destination=if ($role -eq 'Web') {$CanonicalDeployRoot}else{$InteractiveHostRoot}
                         $originalHash=if ($role -eq 'Web') {$plan.OriginalWebSha256}else{$plan.OriginalCompanionSha256}
-                        $backup=Join-Path $release ('previous-'+$role)
+                        $backup=Get-OcrRecoveryBackupPath $release $role $cleanupOnly
                         Confirm-OcrRecoveryBackup $destination $backup $originalHash {
                             $stop=Get-Content -Raw -LiteralPath (Join-Path $plan.OperationRoot 'stopped-owners.json') | ConvertFrom-Json -AsHashtable -DateKind String
                             Assert-OcrOwnersStopped $plan $stop @(Get-OcrOsSnapshot)
                         }
                     }
-                    Write-OcrRecoveryJson (Join-Path $release 'manifest.json') ([ordered]@{commit=$plan.Commit;staged_at_utc=$plan.CreatedAtUtc;
-                        application_root=$CanonicalDeployRoot;migrations=$true;clean_slate=$false;ocr_recovery_plan_sha256=$ExpectedPlanSha256;reviewed_legacy_index_payloads=@()})
+                    Write-OcrRecoveryJson (Join-Path $release 'manifest.json') (New-OcrApplicationManifest $plan)
                     foreach ($role in @('Web','OutlookHost')) {
                         $entry=@($plan.Payloads | Where-Object Role -ceq $role)[0]
                         $destination=if ($role -eq 'Web') {$CanonicalDeployRoot}else{$InteractiveHostRoot}
@@ -474,7 +651,7 @@ function Invoke-OcrLifecycleRecoveryUpdate([string]$PlanPath,[string]$ExpectedPl
             }
             RestorePriorPayloads={
                 foreach ($role in @('Web','OutlookHost')) {
-                    $backup=Join-Path $release ('previous-'+$role)
+                    $backup=Get-OcrRecoveryBackupPath $release $role $cleanupOnly
                     if ([IO.Directory]::Exists($backup)) {
                         $destination=if ($role -eq 'Web') {$CanonicalDeployRoot}else{$InteractiveHostRoot}
                         $hash=if ($role -eq 'Web') {$plan.OriginalWebSha256}else{$plan.OriginalCompanionSha256}
@@ -482,10 +659,7 @@ function Invoke-OcrLifecycleRecoveryUpdate([string]$PlanPath,[string]$ExpectedPl
                     }
                 }
             }
-            Start={
-                Invoke-DeploymentIndexAdmission -Action { Start-WebAppPool -Name $SiteName }
-                Wait-IisAppPoolState -Name $SiteName -ExpectedState Started -TimeoutSeconds $ReadinessTimeoutSeconds
-            }
+            Start={Start-OcrApplicationOwners}
             ValidateHeld={
                 Invoke-RequiredLoopbackProbes -Origin $loopbackOrigin.Origin -TimeoutSeconds $ReadinessTimeoutSeconds
                 if (([IO.File]::ReadAllText($ValidationHoldPath)) -cne ($plan.ReleaseId | ConvertTo-Json -Compress)) { throw 'document-ocr-maintenance-hold-changed' }
@@ -504,10 +678,15 @@ function Invoke-OcrLifecycleRecoveryUpdate([string]$PlanPath,[string]$ExpectedPl
                 [void](Assert-OcrLifecycleSchema (Get-OcrLifecycleDatabaseState (Get-DeploymentSqlConnectionString)) $plan)
             }
         }
-        foreach ($key in @($ports.Keys)) { $ports[$key]=$ports[$key].GetNewClosure() }
+        # These ports run synchronously while this scope is active. A dynamic
+        # module closure hides helpers dot-sourced by the canonical updater.
         $result=Invoke-OcrRecoveryFlow -StatePath (Join-Path $plan.OperationRoot 'deployment-state.json') -PlanSha256 $ExpectedPlanSha256 -Ports $ports -Resume:$Resume
-        [ordered]@{completed=$result.Completed;commit=$plan.Commit;batch=$plan.Binding.Handle.BatchId;release=$release;
-            state=(Join-Path $plan.OperationRoot 'deployment-state.json');models='unchanged; no acquisition';next='validate original continuation and subsequent queued GPU work'}
+        $stored=$plan.Mode -ceq 'StoredExecution'
+        $binding=if($stored){$plan.StoredExecutionBinding}elseif($cleanupOnly){$plan.TerminalBinding}else{$plan.Binding}
+        $handle=if($stored){$binding.Lease.Handle}else{$binding.Handle}
+        [ordered]@{completed=$result.Completed;commit=$plan.Commit;batch=$handle.BatchId;release=$release;
+            state=(Join-Path $plan.OperationRoot 'deployment-state.json');models='unchanged; no acquisition';
+            next=$(if($stored){'validate normal consumption of the original saved result and subsequent queued work'}elseif($cleanupOnly){'validate normal source deletion; no replay or requeue'}else{'validate original continuation and subsequent queued GPU work'})}
     } finally { if ($owns) { $mutex.ReleaseMutex() };$mutex.Dispose() }
 }
 
@@ -520,7 +699,9 @@ function Assert-OcrRecoveryResumePreflight([string]$PlanPath,[string]$ExpectedPl
     $statePath=Join-Path $p.OperationRoot 'deployment-state.json'
     [void](Assert-OcrPlainLocalPath $statePath)
     $state=Get-Content -Raw -LiteralPath $statePath | ConvertFrom-Json -AsHashtable -DateKind String
-    if ($state.Version -ne 1 -or $state.PlanSha256 -cne $ExpectedPlanSha256 -or $p.Version -ne 1 -or
+    $cleanupOnly=Assert-OcrRecoveryPlanMode $p
+    Set-OcrCleanupAdmissionBindings $p
+    if ($state.Version -ne 1 -or $state.PlanSha256 -cne $ExpectedPlanSha256 -or
         $p.OperationRoot -cne (Split-Path -Parent $PlanPath) -or $p.ImplementationSha256 -cne (Get-OcrRecoveryImplementationHash)) {
         throw 'document-ocr-maintenance-resume-binding-changed'
     }
@@ -536,7 +717,12 @@ function Assert-OcrRecoveryResumePreflight([string]$PlanPath,[string]$ExpectedPl
     $entering=$phase -cin @('Prepared','HoldIntent','StopIntent') -and !$activationStarted
     $releaseInterrupted=$phase -ceq 'HoldReleaseIntent' -or ($state.Contains('HoldReleaseIntent') -and $state.HoldReleaseIntent)
     $holdExists=[IO.File]::Exists($ValidationHoldPath)
-    if (($holdExists -and [IO.File]::ReadAllText($ValidationHoldPath) -cne ($p.ReleaseId | ConvertTo-Json -Compress)) -or
+    $forward=$p['PredecessorHoldBinding']
+    $priorHeld=$entering -and $p.Mode -ceq 'StoredExecution' -and $forward -and $holdExists -and
+        (Get-FileHash -LiteralPath $ValidationHoldPath).Hash -ceq $forward.HoldSha256 -and
+        (Get-Content -Raw -LiteralPath $ValidationHoldPath|ConvertFrom-Json) -ceq $forward.ReleaseId
+    if (($holdExists -and [IO.File]::ReadAllText($ValidationHoldPath) -cne ($p.ReleaseId | ConvertTo-Json -Compress) -and !$priorHeld) -or
+        ($forward -and !$holdExists -and !$releaseInterrupted) -or
         (!$holdExists -and !$entering -and !$releaseInterrupted)) {
         throw 'document-ocr-maintenance-resume-hold-unproven'
     }
@@ -563,7 +749,7 @@ function Assert-OcrRecoveryResumePreflight([string]$PlanPath,[string]$ExpectedPl
     if ($partial) {
         if ((Get-WebAppPoolState -Name $SiteName).Value -ne 'Stopped') { throw 'document-ocr-maintenance-partial-payload-pool-not-stopped' }
         foreach ($role in @('Web','OutlookHost')) {
-            $backup=Join-Path (Join-Path $IncrementalRecoveryRoot $p.ReleaseId) ('previous-'+$role)
+            $backup=Get-OcrRecoveryBackupPath (Join-Path $IncrementalRecoveryRoot $p.ReleaseId) $role $cleanupOnly
             $expected=if ($role -eq 'Web') {$p.OriginalWebSha256}else{$p.OriginalCompanionSha256}
             if ((Get-HybridPayloadFingerprint (Assert-OcrPlainLocalPath $backup)) -cne $expected) { throw 'document-ocr-maintenance-resume-rollback-payload-unproven' }
         }

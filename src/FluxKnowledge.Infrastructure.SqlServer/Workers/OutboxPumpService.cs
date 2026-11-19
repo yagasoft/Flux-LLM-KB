@@ -111,8 +111,11 @@ public sealed class OutboxPumpService(
                 throw;
             }
             catch (Exception exception) when (job.Stage == dispatch.Stage && job.Operation == dispatch.Operation &&
-                (job.Stage == PipelineStage.Normalise && job.Operation == PipelineOperations.NormaliseText ||
-                 job.Stage == PipelineStage.CanonicalIndex && job.Operation == PipelineOperations.CanonicalIndex) &&
+                (job.Stage == PipelineStage.Extract && job.Operation == PipelineOperations.ExtractDocument ||
+                 job.Stage == PipelineStage.Normalise && job.Operation == PipelineOperations.NormaliseText ||
+                 job.Stage == PipelineStage.CanonicalIndex && job.Operation == PipelineOperations.CanonicalIndex ||
+                 job.Stage == PipelineStage.Embed && job.Operation == PipelineOperations.Embed ||
+                 job.Stage == PipelineStage.Publish && job.Operation == PipelineOperations.Publish) &&
                 new SqlRetainedProcessorFailureClassifier().TryClassify(exception, out _))
             {
                 // The transaction may have committed before its acknowledgement failed.

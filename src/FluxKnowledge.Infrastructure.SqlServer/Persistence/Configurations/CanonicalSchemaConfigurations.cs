@@ -135,6 +135,12 @@ public sealed class OutlookCaptureProfileConfiguration : IEntityTypeConfiguratio
         SchemaConfiguration.ConfigureImmutableAfterInsert(builder.Property(x => x.SourceRootId));
         SchemaConfiguration.ConfigureRowVersion(builder.Property(x => x.RowVersion));
         builder.HasIndex(x => x.SourceRootId).IsUnique();
+        builder.HasIndex(x => x.WatchedSourceRootId).IsUnique();
+        builder.Property(x => x.WatchedRootPath).HasMaxLength(2048).UseCollation(SchemaConfiguration.SchedulerFenceCollation);
+        builder.Property(x => x.WatchedStagingPath).HasMaxLength(2048).UseCollation(SchemaConfiguration.SchedulerFenceCollation);
+        builder.Property(x => x.WatchedRootIdentity).HasMaxLength(128).IsUnicode(false);
+        builder.Property(x => x.WatchedStagingIdentity).HasMaxLength(128).IsUnicode(false);
+        builder.HasOne<SourceRootConfigurationEntity>().WithMany().HasForeignKey(x => x.WatchedSourceRootId).OnDelete(DeleteBehavior.Restrict);
         builder.HasOne<SourceRootConfigurationEntity>().WithMany().HasForeignKey(x => x.SourceRootId).OnDelete(DeleteBehavior.Restrict);
     }
 }
@@ -187,6 +193,9 @@ public sealed class OutlookCaptureExportConfiguration : IEntityTypeConfiguration
         SchemaConfiguration.ConfigureRowVersion(builder.Property(x => x.RowVersion));
         SchemaConfiguration.ConfigureImmutableAfterInsert(builder.Property(x => x.CatchUpId));
         SchemaConfiguration.ConfigureImmutableAfterInsert(builder.Property(x => x.FencingToken));
+        builder.HasIndex(x => new { x.ProfileId, x.WatchedPublishedAtUtc });
+        builder.HasIndex(x => new { x.ProfileId, x.WatchedRetryAfterUtc, x.Id })
+            .HasFilter($"[WatchedPublishedAtUtc] IS NULL AND [State] = {(int)FluxKnowledge.Domain.Outlook.OutlookExportState.Ingested}");
         builder.HasIndex(x => new { x.FolderId, x.EntryIdFingerprint })
             .HasFilter($"[State] <> {(int)FluxKnowledge.Domain.Outlook.OutlookExportState.Blocked}")
             .IsUnique();
@@ -407,6 +416,7 @@ public sealed class ArtifactConfiguration : IEntityTypeConfiguration<ArtifactEnt
         builder.Property(entity => entity.ContentType).HasMaxLength(256).IsRequired();
         builder.Property(entity => entity.SearchText).HasColumnType("nvarchar(max)").IsRequired();
         builder.Property(entity => entity.DocumentMetadataJson).HasColumnType("nvarchar(max)");
+        builder.Property(entity => entity.WindowEligibilityVersion).HasDefaultValueSql("NEWID()");
         builder.Property(entity => entity.CreatedAtUtc).HasColumnType("datetimeoffset(7)");
         builder.HasAlternateKey(entity => new { entity.Id, entity.SourceRevision });
         builder.HasIndex(entity => new { entity.PipelineRecordId, entity.SourceRevision, entity.Stage }).IsUnique();
@@ -1693,6 +1703,9 @@ public sealed class KnowledgeItemConfiguration : IEntityTypeConfiguration<Knowle
         builder.Property(value => value.ForgottenAtUtc).HasColumnType("datetimeoffset(7)");
         SchemaConfiguration.ConfigureRowVersion(builder.Property(value => value.RowVersion));
         builder.HasIndex(value => new { value.ForgottenAtUtc, value.Title });
+        builder.HasIndex(value => new { value.CodexWorkspaceRootId, value.CreatedAtUtc, value.Id })
+            .IsDescending(false, true, false)
+            .HasFilter("[CodexWorkspaceRootId] IS NOT NULL AND [ForgottenAtUtc] IS NULL");
     }
 }
 

@@ -1,6 +1,8 @@
 using FluxKnowledge.Application.Ports;
 using FluxKnowledge.Application.Sources;
 using FluxKnowledge.Infrastructure.SqlServer.Persistence.Entities;
+using System.Data;
+using System.Text.Json;
 using Microsoft.Data.SqlClient;
 using Microsoft.EntityFrameworkCore;
 using Microsoft.EntityFrameworkCore.Storage;
@@ -9,7 +11,11 @@ namespace FluxKnowledge.Infrastructure.SqlServer.Persistence;
 
 public sealed partial class SqlSourceDeletionStore
 {
-    private const int MembershipBatchSize = 1000;
+    private const int MembershipVectorPageSize = 1000;
+    private const int MembershipDeleteBatchSize = 16000;
+    private const int PayloadBatchSize = 4096;
+    // Amortise the full historical proof without changing initial withdrawal.
+    private const int PurgePayloadBatchSize = 16000;
 
     private static Task<SourceDeletionOperationEntity?> ReadOperationForUpdateAsync(
         FluxKnowledgeDbContext context, Guid operationId, CancellationToken ct) =>
@@ -67,19 +73,22 @@ public sealed partial class SqlSourceDeletionStore
         where revision.SourceRootId == rootId
         select vector;
 
-    private static Task<bool> HasOwnedMembershipsAsync(FluxKnowledgeDbContext context, Guid rootId, CancellationToken ct) =>
-        OwnedVectors(context, rootId).AnyAsync(vector => context.IndexGenerationVectors.Any(member => member.VectorId == vector.VectorId) ||
-            context.IndexSegmentVectors.Any(member => member.VectorId == vector.VectorId) ||
-            context.CurrentIndexMembers.Any(member => member.VectorId == vector.VectorId), ct);
+    private static async Task<bool> HasOwnedMembershipsAsync(FluxKnowledgeDbContext context, Guid rootId, CancellationToken ct)
+    {
+        var ids=OwnedVectors(context,rootId).Select(value => value.VectorId);
+        return await context.IndexGenerationVectors.AnyAsync(member => ids.Contains(member.VectorId),ct) ||
+            await context.IndexSegmentVectors.AnyAsync(member => ids.Contains(member.VectorId),ct) ||
+            await context.CurrentIndexMembers.AnyAsync(member => ids.Contains(member.VectorId),ct);
+    }
 
     private async Task<SourceDeletionRunResult> DeleteMembershipUnitAsync(FluxKnowledgeDbContext context,
         IDbContextTransaction transaction, SourceDeletionOperationEntity operation, CancellationToken ct)
     {
         var cursor = operation.MembershipVectorCursor ?? 0;
-        var vector = await OwnedVectors(context, operation.SourceRootId).Where(value => value.VectorId > cursor)
+        var page = await OwnedVectors(context, operation.SourceRootId).Where(value => value.VectorId > cursor)
             .OrderBy(value => value.VectorId).Select(value => new { value.VectorId, value.IsDeleted })
-            .FirstOrDefaultAsync(ct).ConfigureAwait(false);
-        if (vector is null)
+            .Take(MembershipVectorPageSize).ToArrayAsync(ct).ConfigureAwait(false);
+        if (page.Length == 0)
         {
             if (await context.SourceDeletionCleanupItems.AnyAsync(value => value.SourceDeletionOperationId == operation.Id &&
                 (value.StorageKind == 3 || value.StorageKind == 4) && value.State != 1, ct))
@@ -89,26 +98,49 @@ public sealed partial class SqlSourceDeletionStore
                 return await RefuseAsync(context, transaction, operation, "source-delete-membership-changed", ct).ConfigureAwait(false);
             return await CommitUnitAsync(context, transaction, operation, "purge-records", ct).ConfigureAwait(false);
         }
-        if (!vector.IsDeleted)
+        if (page.Any(vector => !vector.IsDeleted))
             return await RefuseAsync(context, transaction, operation, "source-delete-vector-not-withdrawn", ct).ConfigureAwait(false);
-        if (await context.IndexSegmentVectors.AnyAsync(value => value.VectorId == vector.VectorId, ct) ||
-            await context.CurrentIndexMembers.AnyAsync(value => value.VectorId == vector.VectorId, ct))
+        var ids = page.Select(vector => vector.VectorId).ToArray();
+        if (await context.IndexSegmentVectors.AnyAsync(value => ids.Contains(value.VectorId), ct) ||
+            await context.CurrentIndexMembers.AnyAsync(value => ids.Contains(value.VectorId), ct))
             return await CommitUnitAsync(context, transaction, operation, operation.Phase, ct,
                 "source-delete-segment-retirement-pending", progressed: false, continueImmediately: false);
         var activeGeneration = await context.IndexState.Where(value => value.Id == 1)
             .Select(value => value.ActiveIndexGenerationId).SingleAsync(ct).ConfigureAwait(false);
-        if (await context.IndexGenerationVectors.Where(member => member.VectorId == vector.VectorId)
-            .AnyAsync(member => member.Generation.RetiredAtUtc == null || member.GenerationId == activeGeneration, ct).ConfigureAwait(false))
+        // Keep the exact page proof fresh in this transaction, but read each
+        // generation's status once rather than once per historical membership.
+        // Fixed parameter types also preserve the plan across short/long ID values.
+        var vectorPage = new SqlParameter("@vectorPage",SqlDbType.NVarChar,-1) {Value=JsonSerializer.Serialize(ids)};
+        var activeGenerationParameter = new SqlParameter("@activeGeneration",SqlDbType.UniqueIdentifier)
+            {Value=(object?)activeGeneration ?? DBNull.Value};
+        var protectedMembership = await context.Database.SqlQueryRaw<bool>("""
+            -- source-delete-membership-generation-guard
+            DECLARE @ReferencedGenerations TABLE ([Id] uniqueidentifier NOT NULL PRIMARY KEY);
+            INSERT @ReferencedGenerations ([Id])
+            SELECT DISTINCT [member].[GenerationId]
+            FROM OPENJSON(@vectorPage) WITH ([Value] bigint '$') AS [requested]
+            INNER JOIN [IndexGenerationVectors] AS [member] WITH (FORCESEEK) ON [member].[VectorId]=[requested].[Value];
+            SELECT CAST(CASE WHEN EXISTS (
+                SELECT 1 FROM @ReferencedGenerations AS [referenced]
+                INNER JOIN [IndexGenerations] AS [generation] ON [generation].[Id]=[referenced].[Id]
+                WHERE [generation].[RetiredAtUtc] IS NULL OR [generation].[Id]=@activeGeneration
+            ) THEN 1 ELSE 0 END AS bit) AS [Value]
+            OPTION (USE HINT('DISABLE_OPTIMIZER_ROWGOAL'))
+            """,vectorPage,activeGenerationParameter).ToArrayAsync(ct).ConfigureAwait(false);
+        if (protectedMembership.Single())
             return await RefuseAsync(context, transaction, operation, "source-delete-membership-generation-not-retired", ct).ConfigureAwait(false);
 
-        // The existing VectorId index serves one scalar equality. Work and lock
-        // footprint are bounded independently of the vector's historical fan-out.
+        // Bound both vectors inspected and rows removed. DELETE TOP can choose
+        // any row order; the cursor advances only through the cleared prefix.
         var deleted = await context.Database.ExecuteSqlInterpolatedAsync($"""
-            DELETE TOP ({MembershipBatchSize}) FROM [IndexGenerationVectors] WHERE [VectorId] = {vector.VectorId}
+            DELETE TOP ({MembershipDeleteBatchSize}) FROM [IndexGenerationVectors]
+            WHERE [VectorId] IN (SELECT [Value] FROM OPENJSON({JsonSerializer.Serialize(ids)}) WITH ([Value] bigint '$'))
             """, ct).ConfigureAwait(false);
         operation.MembershipRowsDeleted = checked(operation.MembershipRowsDeleted + deleted);
-        if (!await context.IndexGenerationVectors.AnyAsync(member => member.VectorId == vector.VectorId, ct).ConfigureAwait(false))
-            operation.MembershipVectorCursor = vector.VectorId;
+        var firstRemaining = await context.IndexGenerationVectors.Where(member => ids.Contains(member.VectorId))
+            .Select(member => (long?)member.VectorId).MinAsync(ct).ConfigureAwait(false);
+        var cleared = firstRemaining is null ? ids[^1] : ids.Where(id => id < firstRemaining.Value).DefaultIfEmpty(cursor).Max();
+        if (cleared > cursor) operation.MembershipVectorCursor = cleared;
         return await CommitUnitAsync(context, transaction, operation, operation.Phase, ct).ConfigureAwait(false);
     }
 
@@ -117,6 +149,31 @@ public sealed partial class SqlSourceDeletionStore
         try { return await operation().ConfigureAwait(false); }
         catch (SqlException exception) { throw SqlFailure(exception); }
         catch (DbUpdateException exception) when (exception.InnerException is SqlException sql) { throw SqlFailure(sql); }
+    }
+
+    private static async Task<bool> HasForeignBatchTaskAsync(FluxKnowledgeDbContext context,
+        Guid[] miniTaskIds,Guid[] batchIds,CancellationToken ct)
+    {
+        // Repeated JSON anti-membership scans become quadratic in execution
+        // history. Materialise both complete sets once while the caller retains
+        // its serializable ownership/publication fence, including foreign tasks.
+        var tasks=new SqlParameter("@ownedTasks",SqlDbType.NVarChar,-1){Value=JsonSerializer.Serialize(miniTaskIds)};
+        var batches=new SqlParameter("@ownedBatches",SqlDbType.NVarChar,-1){Value=JsonSerializer.Serialize(batchIds)};
+        var result=await context.Database.SqlQueryRaw<bool>("""
+            -- source-delete-shared-batch-guard
+            DECLARE @Tasks TABLE ([Id] uniqueidentifier NOT NULL PRIMARY KEY);
+            DECLARE @Batches TABLE ([Id] uniqueidentifier NOT NULL PRIMARY KEY);
+            INSERT @Tasks ([Id]) SELECT [Value] FROM OPENJSON(@ownedTasks) WITH ([Value] uniqueidentifier '$');
+            INSERT @Batches ([Id]) SELECT [Value] FROM OPENJSON(@ownedBatches) WITH ([Value] uniqueidentifier '$');
+            SELECT CAST(CASE WHEN EXISTS (
+                SELECT 1 FROM [GpuMiniTasks] AS [task]
+                INNER JOIN @Batches AS [batch] ON [batch].[Id]=[task].[BatchId]
+                LEFT JOIN @Tasks AS [owned] ON [owned].[Id]=[task].[Id]
+                WHERE [owned].[Id] IS NULL
+            ) THEN 1 ELSE 0 END AS bit) AS [Value]
+            OPTION (USE HINT('DISABLE_OPTIMIZER_ROWGOAL'))
+            """,tasks,batches).ToArrayAsync(ct).ConfigureAwait(false);
+        return result.Single();
     }
 
     private static SourceDeletionFailureException SqlFailure(SqlException exception) => new(exception.Number switch

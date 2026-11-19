@@ -2459,7 +2459,7 @@ public sealed class SqlRetainedProcessorBranchStore(IDbContextFactory<FluxKnowle
         if (request.ExpectedProcessorFingerprint == ImageDocumentInputProcessor.Capability.ProcessorFingerprint ||
             request.ExpectedProcessorFingerprint == PdfDocumentProcessor.Capability.ProcessorFingerprint &&
             (request.FailedExtractJobId is not null || request.ExpectedRootConfigurationRevision is not null))
-            return await ExecuteWithRetryAsync(() => SqlDocumentInputRecovery.RequestAsync(contextFactory, request, cancellationToken), cancellationToken).ConfigureAwait(false);
+            return await ExecuteWithRetryAsync(() => SqlDocumentInputRecovery.RequestAsync(contextFactory, request, cancellationToken, sourceAdmission), cancellationToken).ConfigureAwait(false);
         if (request.FailedExtractJobId is not null || request.ExpectedRootConfigurationRevision is not null)
             return DocumentReprocessRequestResult.NotEligible;
         if (!TryGetExactDocumentDescriptor(request.ExpectedProcessorFingerprint, out var descriptor) ||

@@ -102,7 +102,7 @@ public sealed class LocalRetainedDetailReaderIntegrationTests(NativeSqlServerFix
     }
 
     [NativeSqlServerFact]
-    public async Task Read_rejects_same_length_retained_file_corruption_before_presenting_local_detail()
+    public async Task Read_rejects_a_changed_retained_file_length_before_presenting_local_detail()
     {
         var bytes = "retained local detail"u8.ToArray();
         var hash = Convert.ToHexStringLower(SHA256.HashData(bytes));
@@ -111,7 +111,7 @@ public sealed class LocalRetainedDetailReaderIntegrationTests(NativeSqlServerFix
         {
             var ids = await SeedAsync(hash, bytes.Length, null, artifactRoot);
             var path = Path.Combine(artifactRoot, "sha256", hash[..2], $"{hash}.bin");
-            await File.WriteAllBytesAsync(path, "retained local detaiX"u8.ToArray());
+            await File.WriteAllBytesAsync(path, "shortened"u8.ToArray());
 
             await Assert.ThrowsAsync<InvalidDataException>(() => CreateReader(artifactRoot)
                 .ReadAsync(ids.BranchId, CancellationToken.None).AsTask());

@@ -10,6 +10,8 @@ public sealed record KnowledgeGraphResult(Guid ClaimId, string Subject, string P
 public interface IKnowledgeQueryService
 {
     ValueTask<IReadOnlyList<KnowledgeSearchResult>> SearchAsync(string query, int limit, CancellationToken cancellationToken);
+    ValueTask<IReadOnlyList<KnowledgeSearchResult>> SearchCodexWorkspaceAsync(
+        string query, string cwd, int limit, CancellationToken cancellationToken);
     ValueTask<IReadOnlyList<KnowledgeGraphResult>> GraphAsync(string node, int maxDepth, int maxResults, CancellationToken cancellationToken);
 }
 
@@ -36,6 +38,15 @@ public sealed class KnowledgeQueryService(IKnowledgeStore store, ISearchService 
             if (result.Count < limit && index < knowledgeRows.Length) result.Add(knowledgeRows[index]);
         }
         return result;
+    }
+
+    public async ValueTask<IReadOnlyList<KnowledgeSearchResult>> SearchCodexWorkspaceAsync(
+        string query, string cwd, int limit, CancellationToken cancellationToken)
+    {
+        if (limit is < 1 or > 100) throw new ArgumentOutOfRangeException(nameof(limit));
+        var canonicalQuery = NativeV1ContractLimits.CanonicalizeKnowledgeQuery(query);
+        var rows = await store.SearchCodexWorkspaceAsync(canonicalQuery, cwd, limit, cancellationToken).ConfigureAwait(false);
+        return rows.Select(Safe).Where(static row => row is not null).Cast<KnowledgeSearchResult>().ToArray();
     }
 
     public async ValueTask<IReadOnlyList<KnowledgeGraphResult>> GraphAsync(string node, int maxDepth, int maxResults, CancellationToken cancellationToken)

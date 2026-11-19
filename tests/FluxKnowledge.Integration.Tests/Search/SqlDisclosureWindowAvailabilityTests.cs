@@ -38,8 +38,12 @@ public sealed class SqlDisclosureWindowAvailabilityTests(NativeSqlServerFixture 
         var rows = await context.Database.SqlQuery<Flag>(SqlDisclosureWindowAvailability.Select(capture, "i.VectorId")).ToArrayAsync();
         Assert.Equal(cases.Count, rows.Length);
         foreach (var row in rows)
+        {
             Assert.True(row.WindowAvailable == NativeAvailable(cases[checked((int)row.VectorId - 1)]),
                 "SQL/native availability differs: " + cases[checked((int)row.VectorId - 1)].Name);
+            var item = cases[checked((int)row.VectorId-1)];
+            Assert.Equal(row.WindowAvailable, CanonicalWindowEligibility.Evaluate(item.Text,item.StartOffset,item.Length,item.Body));
+        }
         // A constructed window can still contain credentials: actual disclosure remains a separate gate.
         Assert.True(rows[^1].WindowAvailable);
         Assert.True(new FluxKnowledge.Infrastructure.SqlServer.Visibility.LocalPrivateContentDisclosure().Evaluate(

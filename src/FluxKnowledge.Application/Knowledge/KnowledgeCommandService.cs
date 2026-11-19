@@ -1,6 +1,7 @@
 using System.Security.Cryptography;
 using System.Text;
 using System.Text.Json;
+using System.Text.Json.Serialization;
 using FluxKnowledge.Application.IntegrationV1;
 using FluxKnowledge.Application.Ports;
 using FluxKnowledge.Application.Visibility;
@@ -11,7 +12,8 @@ namespace FluxKnowledge.Application.Knowledge;
 public sealed record KnowledgeMutation(
     string Action, string? ItemId, string? Title, string? Body,
     string? Subject, string? Predicate, string? ObjectText,
-    string? Transition, string? RelatedClaimId, string? Reason, decimal? Confidence = null);
+    string? Transition, string? RelatedClaimId, string? Reason, decimal? Confidence = null,
+    [property: JsonIgnore(Condition = JsonIgnoreCondition.WhenWritingNull)] Guid? CodexWorkspaceRootId = null);
 
 public sealed record KnowledgeTarget(string TargetId, string RowVersion);
 
@@ -49,13 +51,13 @@ public sealed class KnowledgeCommandService : IKnowledgeCommandService
 
     public ValueTask<NativeActionPreview> PreviewAsync(KnowledgeMutation command, string surface, CancellationToken cancellationToken)
     {
-        var canonical = Canonicalise(command, _disclosure);
+        var canonical = Canonicalise(command, _disclosure, surface);
         return _operations.PreviewAsync(new NativeActionPreviewRequest(canonical.Action, Serialize(canonical), surface), cancellationToken);
     }
 
     public ValueTask<NativeActionReceipt> CommitAsync(KnowledgeMutation command, string confirmationId, string idempotencyKey, string surface, CancellationToken cancellationToken)
     {
-        var canonical = Canonicalise(command, _disclosure);
+        var canonical = Canonicalise(command, _disclosure, surface);
         return _operations.CommitAsync(new NativeActionCommitRequest(canonical.Action, Serialize(canonical), confirmationId, idempotencyKey, surface), cancellationToken);
     }
 
@@ -76,7 +78,7 @@ public sealed class KnowledgeCommandService : IKnowledgeCommandService
         return ValueTask.FromResult<NativeActionCommitOperation>(new KnowledgeMutationCommitOperation(Parse(payload)));
     }
 
-    internal static KnowledgeMutation Canonicalise(KnowledgeMutation command, ILocalPrivateContentDisclosure disclosure)
+    internal static KnowledgeMutation Canonicalise(KnowledgeMutation command, ILocalPrivateContentDisclosure disclosure, string? surface = null)
     {
         ArgumentNullException.ThrowIfNull(command);
         var action = NativeOperationCanonicalization.CanonicalizeAction(command.Action);
@@ -84,6 +86,10 @@ public sealed class KnowledgeCommandService : IKnowledgeCommandService
         {
             throw new NativeOperationException("action-not-allowed");
         }
+
+        if (command.CodexWorkspaceRootId is { } rootId &&
+            (rootId == Guid.Empty || action != "note_create" || surface != "codex-hook"))
+            throw new NativeOperationException("invalid-knowledge-mutation");
 
         static string? Scan(string? value, ILocalPrivateContentDisclosure policy)
         {

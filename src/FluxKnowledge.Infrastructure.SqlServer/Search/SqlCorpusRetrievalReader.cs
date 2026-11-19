@@ -3,6 +3,7 @@ using System.Security.Cryptography;
 using System.Text;
 using System.Runtime.CompilerServices;
 using FluxKnowledge.Application.Ports;
+using FluxKnowledge.Application.Sources;
 using FluxKnowledge.Domain.Pipeline;
 using FluxKnowledge.Domain.Sources;
 using FluxKnowledge.Infrastructure.SqlServer.Persistence;
@@ -12,11 +13,14 @@ namespace FluxKnowledge.Infrastructure.SqlServer.Search;
 
 /// <summary>Reads bounded canonical chunks from completed, currently eligible publications.</summary>
 public sealed partial class SqlCorpusRetrievalReader(IDbContextFactory<FluxKnowledgeDbContext> contextFactory,
-    CorpusAnnBindingCache? bindingCache = null)
+    CorpusAnnBindingCache? bindingCache = null, string eligibilityRuleVersion = CanonicalWindowEligibility.RuleVersion,
+    ICorpusAnnPreparationSignal? preparationSignal = null, ITextChunkWindowBackfillSignal? windowBackfillSignal = null,
+    IDeploymentValidationHold? deploymentHold = null)
     : ICorpusRetrievalReader, IHybridPassageCandidateReader, ICorpusAnnScopeSelection, ICorpusAnnBindingPreparation
 {
     private const int CandidateBudget = 100;
     private readonly CorpusAnnBindingCache _bindingCache = bindingCache ?? new();
+    private string EligibilityRuleVersion => eligibilityRuleVersion;
 
     public async ValueTask<CorpusLexicalReadiness> GetLexicalReadinessAsync(CancellationToken cancellationToken)
     {
@@ -327,7 +331,7 @@ public sealed partial class SqlCorpusRetrievalReader(IDbContextFactory<FluxKnowl
             proofs[1], disclosureText is null ? null : proofs[2]);
     }
 
-    private static string? BuildDisclosureWindow(
+    internal static string? BuildDisclosureWindow(
         string joined, int joinedStart, int start, int end,
         bool hasDocumentStart, bool hasDocumentEnd, out int guardStart)
     {
@@ -389,7 +393,7 @@ public sealed partial class SqlCorpusRetrievalReader(IDbContextFactory<FluxKnowl
     private static string Hash(string value) => Convert.ToHexStringLower(
         SHA256.HashData(Encoding.UTF8.GetBytes(value)));
 
-    private static bool TryCanonicalCwd(string? cwd, out string canonical)
+    internal static bool TryCanonicalCwd(string? cwd, out string canonical)
     {
         canonical = string.Empty;
         if (string.IsNullOrWhiteSpace(cwd) || cwd.Length > 2048 ||
@@ -410,7 +414,7 @@ public sealed partial class SqlCorpusRetrievalReader(IDbContextFactory<FluxKnowl
         }
     }
 
-    private static bool IsContained(string root, string path)
+    internal static bool IsContained(string root, string path)
     {
         var basePath = Path.TrimEndingDirectorySeparator(root);
         return string.Equals(basePath, path, StringComparison.OrdinalIgnoreCase) ||

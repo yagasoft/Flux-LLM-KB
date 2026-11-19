@@ -99,12 +99,11 @@ public sealed class MediaMetadataRetainedProcessor(
         if (retained.ByteLength > MaximumInputBytes || retained.Bytes.LongLength > MaximumInputBytes)
             throw new RetainedProcessorException("media-metadata-input-too-large");
         if (retained.SourceRevisionId != claim.SourceRevisionId || retained.ByteLength != retained.Bytes.LongLength ||
-            !string.Equals(retained.ContentSha256, claim.InputSha256, StringComparison.Ordinal) ||
-            !string.Equals(Convert.ToHexStringLower(SHA256.HashData(retained.Bytes)), claim.InputSha256, StringComparison.Ordinal))
+            !string.Equals(retained.ContentSha256, claim.InputSha256, StringComparison.Ordinal))
         {
             throw new RetainedProcessorException("retained-artifact-checksum-invalid");
         }
-        await using var lease = await RetainedSourceReadLease.VerifyAsync(retained.SourceRevisionId,
+        await using var lease = await RetainedSourceReadLease.OpenAsync(retained.SourceRevisionId,
             new MemoryStream(retained.Bytes, writable: false), retained.ContentSha256, retained.ByteLength,
             MaximumInputBytes, cancellationToken).ConfigureAwait(false);
         return await ProcessAsync(claim, lease, cancellationToken).ConfigureAwait(false);

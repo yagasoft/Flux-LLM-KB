@@ -2095,6 +2095,7 @@ public sealed partial class SqlToUsearchRebuildTests(NativeSqlServerFixture fixt
         public ValueTask AppendAuditAsync(DerivedIndexRecoveryAuditEvent audit, CancellationToken ct) => inner.AppendAuditAsync(audit, ct);
         private sealed class BoundaryLease(IDerivedIndexRecoveryLease innerLease, Func<Task> afterRelease) : IDerivedIndexRecoveryLease
         {
+            public ValueTask<bool> IsHeldAsync(CancellationToken cancellationToken) => innerLease.IsHeldAsync(cancellationToken);
             private int _disposed;
             public async ValueTask DisposeAsync()
             {

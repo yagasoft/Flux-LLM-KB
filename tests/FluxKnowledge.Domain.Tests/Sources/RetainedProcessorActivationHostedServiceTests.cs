@@ -17,8 +17,12 @@ namespace FluxKnowledge.Domain.Tests.Sources;
 
 public sealed class RetainedProcessorActivationHostedServiceTests
 {
-    [Fact]
-    public async Task Prelogin_failure_during_inspection_defers_without_claiming_and_revalidates_in_a_fresh_scope()
+    [Theory]
+    [InlineData(-2146893055)]
+    [InlineData(258)]
+    [InlineData(4060)]
+    [InlineData(10054)]
+    public async Task Prelogin_failure_during_inspection_defers_without_claiming_and_revalidates_in_a_fresh_scope(int failureNumber)
     {
         var clock = new ManualClock();
         var scopesDisposed = 0;
@@ -26,7 +30,7 @@ public sealed class RetainedProcessorActivationHostedServiceTests
         var candidate = new RetainedProcessorPromotionCandidate(Guid.NewGuid(), new(Guid.NewGuid()),
             Convert.ToHexStringLower(SHA256.HashData(bytes)), ".zip");
         var branches = new InspectionBranches(candidate);
-        var reader = new InspectionReader(candidate, bytes);
+        var reader = new InspectionReader(candidate, bytes, failureNumber);
         var services = new ServiceCollection();
         services.AddScoped(_ => new ScopeOwner(() => Interlocked.Increment(ref scopesDisposed)));
         services.AddScoped(provider =>
@@ -40,7 +44,8 @@ public sealed class RetainedProcessorActivationHostedServiceTests
         using var provider = services.BuildServiceProvider();
         var logger = new RecordingLogger();
         using var service = new RetainedProcessorActivationHostedService(provider.GetRequiredService<IServiceScopeFactory>(),
-            failureClassifier: new SqlRetainedProcessorFailureClassifier(), logger: logger, timeProvider: clock);
+            failureClassifier: new SqlRetainedProcessorFailureClassifier(), logger: logger, timeProvider: clock,
+            databaseFailureClassifier: new SqlHostedDatabaseFailureClassifier());
         using var timeout = new CancellationTokenSource(TimeSpan.FromSeconds(5));
         await service.StartAsync(timeout.Token);
         try
@@ -60,7 +65,7 @@ public sealed class RetainedProcessorActivationHostedServiceTests
             Assert.Equal(1, reader.ByteReads);
             Assert.Equal(1, branches.Promotions);
             Assert.Equal(1, branches.Claims);
-            Assert.Contains("SQL error -2146893055", Assert.Single(logger.Messages));
+            Assert.Contains($"SQL error {failureNumber}", Assert.Single(logger.Messages));
         }
         finally { await service.StopAsync(timeout.Token); }
         Assert.True(service.ExecuteTask!.IsCompletedSuccessfully);
@@ -131,16 +136,21 @@ public sealed class RetainedProcessorActivationHostedServiceTests
     }
 
     [Theory]
-    [InlineData(2627)]
-    [InlineData(1222)]
-    [InlineData(4060)]
-    [InlineData(0)]
-    public async Task Unexpected_failures_remain_host_faults(int sqlError)
+    [InlineData(2627, false)]
+    [InlineData(1222, false)]
+    [InlineData(4060, false)]
+    [InlineData(0, false)]
+    [InlineData(2627, true)]
+    [InlineData(1222, true)]
+    [InlineData(18456, true)]
+    [InlineData(0, true)]
+    public async Task Unexpected_failures_remain_host_faults(int sqlError, bool includeHostedClassifier)
     {
         var failure = sqlError == 0 ? new InvalidOperationException("synthetic invariant violation") : (Exception)SqlFailure(sqlError);
         using var provider = new ServiceCollection().AddScoped(_ => Activation(new Branches(() => failure), TimeProvider.System)).BuildServiceProvider();
         using var service = new RetainedProcessorActivationHostedService(provider.GetRequiredService<IServiceScopeFactory>(),
-            failureClassifier: new SqlRetainedProcessorFailureClassifier());
+            failureClassifier: new SqlRetainedProcessorFailureClassifier(),
+            databaseFailureClassifier: includeHostedClassifier ? new SqlHostedDatabaseFailureClassifier() : null);
         await service.StartAsync(CancellationToken.None);
         var thrown = await Assert.ThrowsAnyAsync<Exception>(() => service.ExecuteTask!.WaitAsync(TimeSpan.FromSeconds(5)));
         Assert.Same(failure, thrown);
@@ -149,7 +159,7 @@ public sealed class RetainedProcessorActivationHostedServiceTests
     private static RetainedProcessorActivationService Activation(IRetainedProcessorBranchStore branches, TimeProvider clock) => new(
         null!, branches, null!, new ZipArchiveRetainedProcessor(null!), new RetainedProcessorOptions { CsharpCodeEnabled = false }, clock);
 
-    private static SqlException SqlFailure(params int[] numbers)
+    internal static SqlException SqlFailure(params int[] numbers)
     {
         var flags = BindingFlags.Instance | BindingFlags.NonPublic;
         var errors = (SqlErrorCollection)Activator.CreateInstance(typeof(SqlErrorCollection), flags, null, null, null)!;
@@ -169,14 +179,14 @@ public sealed class RetainedProcessorActivationHostedServiceTests
         public ValueTask<RegisteredSourceCapability> RegisterAsync(RegisteredSourceCapability value, CancellationToken ct) => ValueTask.FromResult(value);
         public ValueTask<RegisteredSourceCapability?> FindAsync(Guid id, CancellationToken ct) => ValueTask.FromResult<RegisteredSourceCapability?>(null);
     }
-    private sealed class InspectionReader(RetainedProcessorPromotionCandidate candidate, byte[] bytes) : IRetainedSourceReader
+    private sealed class InspectionReader(RetainedProcessorPromotionCandidate candidate, byte[] bytes, int failureNumber) : IRetainedSourceReader
     {
         public int Inspections { get; private set; }
         public int ByteReads { get; private set; }
         public ValueTask<RetainedArtifactInspection> InspectAsync(SourceRevisionId id, CancellationToken ct)
         {
             Assert.Equal(candidate.SourceRevisionId, id);
-            return ++Inspections == 1 ? ValueTask.FromException<RetainedArtifactInspection>(SqlFailure(-2146893055)) :
+            return ++Inspections == 1 ? ValueTask.FromException<RetainedArtifactInspection>(SqlFailure(failureNumber)) :
                 ValueTask.FromResult(new RetainedArtifactInspection(id, candidate.InputSha256, bytes.Length));
         }
         public ValueTask<RetainedSourceBytes> ReadBytesAsync(SourceRevisionId id, CancellationToken ct)
@@ -225,7 +235,7 @@ public sealed class RetainedProcessorActivationHostedServiceTests
         public ValueTask<bool> FailAsync(RetainedProcessorClaim claim, RetainedProcessorFailure failure, CancellationToken ct) => throw new NotSupportedException();
     }
 
-    private sealed class ManualClock : TimeProvider
+    internal sealed class ManualClock : TimeProvider
     {
         private readonly Channel<ManualTimer> _timers = Channel.CreateUnbounded<ManualTimer>();
         private ManualTimer? _current;

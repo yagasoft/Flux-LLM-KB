@@ -62,26 +62,30 @@ public sealed class SqlGpuMaintenanceDrainTests(NativeSqlServerFixture fixture) 
         var drain = await SqlGpuMaintenanceDrainLease.AcquireAsync(factory, CancellationToken.None);
         var atFence = new TaskCompletionSource(TaskCreationOptions.RunContinuationsAsynchronously);
         var next = new SqlGpuSchedulerStore(factory, beforeAdmissionLockAttempt: _ => { atFence.TrySetResult(); return ValueTask.CompletedTask; }, sourceAdmission: new global::FluxKnowledge.Integration.Tests.Support.FixtureSourceAdmission(factory));
+        var operation = Guid.NewGuid();
         Task<GpuSchedulerAdmissionRoundResult>? pending = null;
         try
         {
             Assert.False(await drain.IsDrainedAsync("slot-a", CancellationToken.None));
             await seed.AddReadyAsync(factory, GpuPriorityLane.DocumentIndexing, "ocr-runtime", "ocr-settings", 10);
-            pending = next.RunAdmissionRoundAsync(GpuSchedulerWakeReason.WorkReady,
+            pending = next.RunAdmissionRoundAsync(operation, GpuSchedulerWakeReason.WorkReady,
                 new(1, 100, TimeSpan.FromMinutes(5), TimeSpan.FromMinutes(1), TimeSpan.FromMinutes(10)),
                 SqlGpuAdmissionTests.Admit("slot-a"), CancellationToken.None).AsTask();
             await atFence.Task.WaitAsync(TimeSpan.FromSeconds(2));
-            Assert.False(pending.IsCompleted);
+            await Assert.ThrowsAsync<SqlGpuAdmissionDeferredException>(() => pending.WaitAsync(TimeSpan.FromSeconds(1)));
             Assert.True((await lifecycle.RecordReceiptAsync(new(Guid.NewGuid(), handle, first,
                 GpuMiniTaskBoundaryDisposition.Completed, null, GpuExecutorEvidenceClass.TaskOutcomeConfirmed), CancellationToken.None)).Committed);
             Assert.True((await lifecycle.ApplyBatchCallbackAsync(Guid.NewGuid(), new(handle, GpuBatchCallbackKind.Completed,
                 [new(first, GpuMiniTaskBoundaryDisposition.Completed)], true), CancellationToken.None)).Committed);
             Assert.True(await drain.IsDrainedAsync("slot-a", CancellationToken.None));
-            Assert.False(pending.IsCompleted);
+            await using var verify = factory.CreateDbContext();
+            Assert.Empty(await verify.GpuSchedulerOperationReceipts.Where(value => value.OperationId == operation).ToArrayAsync());
         }
         finally { await drain.DisposeAsync(); }
         Assert.NotNull(pending);
-        Assert.True((await pending.WaitAsync(TimeSpan.FromSeconds(3))).Committed);
+        Assert.True((await next.RunAdmissionRoundAsync(operation, GpuSchedulerWakeReason.WorkReady,
+            new(1, 100, TimeSpan.FromMinutes(5), TimeSpan.FromMinutes(1), TimeSpan.FromMinutes(10)),
+            SqlGpuAdmissionTests.Admit("slot-a"), CancellationToken.None)).Committed);
     }
 
     [NativeSqlServerFact]

@@ -90,6 +90,20 @@ public static class VisioDocumentCommand
     {
         // Recheck before any claim or crash recovery. An existing user instance must remain untouched.
         if (extractor.GetUnavailableReason() is { } reason) throw new RetainedProcessorException(reason);
+        var retainedRoot = testRetainedRoot ?? LiveRootLayout.Production.RetainedRoot;
+        await using (var prepared = await factory.CreateDbContextAsync(cancellationToken).ConfigureAwait(false))
+        {
+            // Discovery prepares current inputs without the legacy supersession relation.
+            // Reuse the exact runner, including its fresh physical admission and lease checks.
+            if (await prepared.SourceProcessorBranches.AsNoTracking().AnyAsync(branch =>
+                branch.SourceRevisionId == request.SourceRevisionId.Value &&
+                branch.InputSha256 == request.ExpectedInputSha256 &&
+                branch.ProcessorFingerprint == request.ExpectedProcessorFingerprint &&
+                branch.ProcessorVersion == DocumentProcessingInput.Visio.ParentProcessorVersion &&
+                branch.State == (int)RetainedProcessorBranchState.Completed, cancellationToken).ConfigureAwait(false))
+                return await VisioDocumentPipelineRunner.ExecuteAsync(request, factory, sourceReader, extractor,
+                    output, cancellationToken, retainedRoot).ConfigureAwait(false);
+        }
         var transitions = new SqlStageTransitionStore(factory);
         if (await RecoverDrainingExecutionAsync(request, factory, transitions, cancellationToken).ConfigureAwait(false))
         {
@@ -99,7 +113,6 @@ public static class VisioDocumentCommand
         var processor = new VisioDocumentInputProcessor();
         var capabilityService = new SourceCapabilityService(new SqlSourceActivityStore(factory, TimeProvider.System),
             new LocalSourceCapabilityHandlerRegistry([processor]));
-        var retainedRoot = testRetainedRoot ?? LiveRootLayout.Production.RetainedRoot;
         var admission = await SourceCommandAdmission.PrepareAsync(factory, request.SourceRevisionId,
             request.ExpectedInputSha256, retainedRoot, cancellationToken).ConfigureAwait(false);
         transitions = new SqlStageTransitionStore(factory, sourceAdmission: admission);

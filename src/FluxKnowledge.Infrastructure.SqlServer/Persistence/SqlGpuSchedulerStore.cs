@@ -169,7 +169,9 @@ public sealed partial class SqlGpuSchedulerStore : IGpuSchedulerStore, IGpuExecu
         }
 
         await SqlPublishedPassageSelection.AcquireFenceAsync(context, cancellationToken).ConfigureAwait(false);
-        await AcquireAdmissionLockAsync(context, transaction.GetDbTransaction(), cancellationToken).ConfigureAwait(false);
+        // Maintenance owns Admission while existing OCR/embedding work settles.
+        // Never hold the publication fence waiting for that admission gate.
+        await AcquireAdmissionLockAsync(context, transaction.GetDbTransaction(), cancellationToken, deferIfBusy: true).ConfigureAwait(false);
         await AcquireMutationLockAsync(context, transaction.GetDbTransaction(), cancellationToken).ConfigureAwait(false);
         var receipt = await context.GpuSchedulerOperationReceipts
             .SingleOrDefaultAsync(candidate => candidate.OperationId == operationId, cancellationToken)
@@ -1601,14 +1603,18 @@ public sealed partial class SqlGpuSchedulerStore : IGpuSchedulerStore, IGpuExecu
     private static async Task AcquireAdmissionLockAsync(
         FluxKnowledgeDbContext context,
         DbTransaction transaction,
-        CancellationToken cancellationToken)
+        CancellationToken cancellationToken, bool deferIfBusy = false)
     {
         await context.Database.OpenConnectionAsync(cancellationToken).ConfigureAwait(false);
         await using var command = context.Database.GetDbConnection().CreateCommand();
         command.Transaction = transaction;
         command.CommandText =
-            "DECLARE @result int; EXEC @result = sp_getapplock @Resource = N'FluxKnowledge.GpuScheduler.Admission', @LockMode = N'Exclusive', @LockOwner = N'Transaction', @LockTimeout = 10000; SELECT @result;";
+            "DECLARE @result int; EXEC @result = sp_getapplock @Resource = N'FluxKnowledge.GpuScheduler.Admission', @LockMode = N'Exclusive', @LockOwner = N'Transaction', @LockTimeout = @timeout; SELECT @result;";
+        var timeout = command.CreateParameter();
+        timeout.ParameterName = "@timeout"; timeout.Value = deferIfBusy ? 0 : 10000;
+        command.Parameters.Add(timeout);
         var result = Convert.ToInt32(await command.ExecuteScalarAsync(cancellationToken).ConfigureAwait(false));
+        if (result == -1 && deferIfBusy) throw new SqlGpuAdmissionDeferredException();
         if (result < 0)
         {
             throw new InvalidOperationException("Could not acquire the GPU scheduler admission fence. Check SQL Server locking and permissions.");

@@ -12,14 +12,14 @@ public sealed class WindowsIndexProjectionFileStore(string indexRoot) : IIndexPr
     private readonly string _root = Path.TrimEndingDirectorySeparator(Path.GetFullPath(indexRoot));
     private readonly HandleRelativeNativeFileSystem _files = new();
     private const long MaximumManifestLength = 16 * 1024 * 1024;
+    private const string IntentFileName = ".retirement-intent.json";
 
     internal Action? BeforeUnlink { get; init; }
 
-    // Every existing constituent is read twice: once before any unlink, then
-    // again on the exact deletion handle. Reserve the full cost even on failure.
-    public long MaximumSegmentVerificationBytes(IndexSegmentDescriptor segment) =>
-        checked(2 * (segment.FileLength + SegmentMetadata(segment).LongLength));
-    public long MaximumManifestVerificationBytes(IndexGenerationDescriptor generation) => 2 * MaximumManifestLength;
+    // Metadata/identity checks do not read file bodies. Object-count and elapsed
+    // slice limits still bound retirement work.
+    public long MaximumSegmentVerificationBytes(IndexSegmentDescriptor segment) => 0;
+    public long MaximumManifestVerificationBytes(IndexGenerationDescriptor generation) => 0;
 
     public ValueTask DeleteSegmentAsync(IndexSegmentDescriptor segment, CancellationToken cancellationToken)
     {
@@ -67,18 +67,46 @@ public sealed class WindowsIndexProjectionFileStore(string indexRoot) : IIndexPr
         using (var directory = _files.OpenReadOnlyDirectory(parent, name))
         {
             if (directory.Identity != child.Identity) throw new UnauthorizedAccessException("index-retirement-directory-changed");
-            if (_files.EnumerateLiteralChildren(directory).Any(value => !proofs.Any(proof => proof.Name == value)))
+            if (_files.EnumerateLiteralChildren(directory).Any(value => value != IntentFileName && !proofs.Any(proof => proof.Name == value)))
                 throw new UnauthorizedAccessException("index-retirement-unrecognised-child");
-            // Validate all existing bytes before the first unlink. Each actual unlink revalidates on its own held handle.
-            foreach (var proof in proofs)
-                await _files.VerifyOrDeleteIndexFileAsync(directory, proof.Name, proof.Checksum, proof.Length, proof.MaximumLength, false, cancellationToken);
-            BeforeUnlink?.Invoke();
-            foreach (var proof in proofs)
-                await _files.VerifyOrDeleteIndexFileAsync(directory, proof.Name, proof.Checksum, proof.Length, proof.MaximumLength, true, cancellationToken);
+            // Snapshot every existing child's physical identity before the first
+            // unlink. Final handles must match; an absent child grants no authority.
+            var identities = new NativeFileIdentity?[proofs.Length];
+            for (var index = 0; index < proofs.Length; index++)
+            {
+                var proof = proofs[index];
+                identities[index] = await _files.VerifyOrDeleteIndexFileAsync(directory, proof.Name, proof.Checksum,
+                    proof.Length, proof.MaximumLength, false, cancellationToken);
+            }
+            var proposed = new RetirementIntent(1, area + "/" + name, directory.Identity,
+                proofs.Select((proof, index) => new IntentChild(proof.Name, identities[index])).ToArray());
+            using (var intentLease = await _files.OpenIndexRetirementIntentAsync(directory, IntentFileName,
+                JsonSerializer.SerializeToUtf8Bytes(proposed), cancellationToken))
+            {
+                RetirementIntent? intent;
+                try { intent = JsonSerializer.Deserialize<RetirementIntent>(intentLease.Content); }
+                catch (JsonException exception) { throw new InvalidDataException("index-retirement-intent-invalid", exception); }
+                if (intent is null || intent.Version != 1 || intent.ObjectName != proposed.ObjectName ||
+                    intent.DirectoryIdentity != directory.Identity || intent.Children is null || intent.Children.Length != proofs.Length ||
+                    intent.Children.Where((entry, index) => entry is null || entry.Name != proofs[index].Name).Any())
+                    throw new InvalidDataException("index-retirement-intent-invalid");
+                BeforeUnlink?.Invoke();
+                for (var index = 0; index < proofs.Length; index++)
+                {
+                    var proof = proofs[index];
+                    await _files.VerifyOrDeleteIndexFileAsync(directory, proof.Name, proof.Checksum, proof.Length,
+                        proof.MaximumLength, true, cancellationToken, intent.Children[index].Identity);
+                }
+                if (_files.EnumerateLiteralChildren(directory).Any(value => value != IntentFileName))
+                    throw new InvalidDataException("index-retirement-unrecognised-child");
+                intentLease.Complete();
+            }
         }
         var removed = await _files.DeleteLiteralChildAsync(parent, name, child.Identity, cancellationToken);
         if (!removed.Changed) throw new IOException(removed.Reason ?? "index-retirement-directory-delete-failed");
     }
 
     private sealed record FileProof(string Name, string Checksum, long? Length, long MaximumLength);
+    private sealed record IntentChild(string Name, NativeFileIdentity? Identity);
+    private sealed record RetirementIntent(int Version, string ObjectName, NativeFileIdentity DirectoryIdentity, IntentChild[] Children);
 }

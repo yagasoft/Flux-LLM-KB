@@ -13,7 +13,10 @@ public sealed record DerivedIndexRecoverySqlSnapshot(
     bool IsProjectionUnavailable = false,
     bool IsPublicationLag = false);
 
-public interface IDerivedIndexRecoveryLease : IAsyncDisposable;
+public interface IDerivedIndexRecoveryLease : IAsyncDisposable
+{
+    ValueTask<bool> IsHeldAsync(CancellationToken cancellationToken);
+}
 
 public sealed class DerivedIndexRecoverySqlSchemaException : Exception
 {

@@ -16,6 +16,12 @@ public sealed record SourceDeletionFileTarget(
     long? ByteLength)
 {
     public bool SharedReferenceExists { get; init; }
+
+    public bool MatchesBinding(SourceDeletionFileTarget other) =>
+        CleanupItemId == other.CleanupItemId && StorageKind == other.StorageKind &&
+        RelativePath == other.RelativePath && ContentSha256 == other.ContentSha256 && ByteLength == other.ByteLength;
 }
+
+public sealed record SourceDeletionFileOutcome(SourceDeletionFileTarget Target, SourceDeletionFileResult Result);
 
 public sealed record SourceDeletionFileResult(bool Completed, string? ReasonCode = null);

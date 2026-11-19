@@ -225,6 +225,34 @@ ordinary readiness window, and is refused without the exact stopped-release
 binding. Expiry retains the compatible payload and owned hold. A larger window
 does not guarantee that a projection refresh will complete.
 
+For durable passage-window decisions and bounded source withdrawal, use
+`-ApplyPassageWindowEligibilityMigration` with `-PlanOnly`, then the specifically
+authorised `-Apply`. Supply reviewed Web, OutlookHost and CLI payload hashes in
+`-ReviewedSourceJournalPayloads` and the exact database incarnation in
+`-ExpectedSourceJournalDatabaseIdentity`. The typed mode accepts exact schema 79
+or its complete schema 80 successor. It preserves source-helper policies,
+read grants and original task state, and completes the compatible helper payload
+update before additive DDL. Migration adds metadata, proof/progress tables and a
+withdrawal cursor; it performs no passage backfill. Held health checks retain
+the normal no-writes boundary. Bounded background backfill begins after hold
+release and excludes Deleting sources. All three payloads, exact schema 80 and
+unchanged helper bindings are checked before application start and hold release.
+Failure retains compatible payloads, stopped app/companion and the owned hold
+for reviewed forward recovery. It never replays uncertain DDL or starts the
+predecessor after a migration attempt. The DDL budget is 120 seconds; readiness
+retains the existing maximum of 300 seconds.
+
+If this typed release fails before migration intent and the helper has proved
+its rollback, `-RecoverUnattemptedPassageWindowRelease <release-id>` provides a
+separate pre-DDL abort. Supply the exact saved binding SHA-256 in
+`-ExpectedUnattemptedPassageWindowBindingSha256` and the database incarnation.
+Review `-PlanOnly` before an authorised `-Apply`. This path requires exact schema
+79, all three original payloads, unchanged configuration/helper policies and task
+bindings, an originally disabled companion and the owned hold. It starts only
+the original Web, validates it under the hold and releases the hold after normal
+probes and unchanged-state checks. Migration intent, schema changes or payload
+drift refuse recovery; no DDL or payload replacement occurs.
+
 For the additive publication-metadata index, use
 `-ApplyVectorPublicationMetadataMigration` in both `-PlanOnly` and the specifically
 authorised `-Apply`. Supply the reviewed source-journal payload hashes and exact

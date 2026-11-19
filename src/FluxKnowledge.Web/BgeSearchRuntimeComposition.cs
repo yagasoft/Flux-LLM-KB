@@ -22,7 +22,7 @@ internal static class BgeSearchRuntimeComposition
     // Provisional conservative admission estimate; real peak/latency gates still apply before activation.
     private const long EstimatedGpuBytes = 8L * 1024 * 1024 * 1024;
     private static readonly TimeSpan SearchExecutionTimeout = TimeSpan.FromSeconds(20);
-    internal static void Add(IServiceCollection services)
+    internal static void Add(IServiceCollection services, bool enableWindowBackfill)
     {
         var policy = new GpuWorkloadPolicy([
             new(PaddleOcrVlmRuntimeContract.ModelRuntimeKey, PaddleOcrVlmRuntimeContract.SettingsFingerprint, GpuWorkloadKind.Ocr),
@@ -109,6 +109,7 @@ internal static class BgeSearchRuntimeComposition
             provider.GetRequiredService<IHostApplicationLifetime>().StopApplication)));
         services.Replace(ServiceDescriptor.Scoped<ISearchService, PassageSearchService>());
         CorpusAnnPreparationService.Add(services);
+        if (enableWindowBackfill) TextChunkWindowBackfillService.Add(services);
     }
 
     private static DateTimeOffset RequestArrival(IServiceProvider provider) =>

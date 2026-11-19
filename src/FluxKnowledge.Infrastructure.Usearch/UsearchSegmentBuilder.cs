@@ -99,7 +99,7 @@ public sealed class UsearchSegmentBuilder(
                     index.Save(nativePath);
                 }
                 var metadata = new SegmentMetadata(new Guid(Convert.FromHexString(id)[..16]), fingerprint, "cos", dimensions,
-                    vectors.Count, membership, 2, id, OutputNativeFormat, HashFile(nativePath), new FileInfo(nativePath).Length);
+                    vectors.Count, membership, 2, id, OutputNativeFormat, IndexSegmentDescriptor.UncheckedFileChecksum, new FileInfo(nativePath).Length);
                 using var metadataFile = new FileStream(Path.Combine(staging, "metadata.json"), FileMode.CreateNew, FileAccess.Write, FileShare.None);
                 JsonSerializer.Serialize(metadataFile, metadata);
                 metadataFile.Flush(true);
@@ -152,7 +152,7 @@ public sealed class UsearchSegmentBuilder(
             ?? throw new IndexGenerationValidationException("segment-metadata-invalid");
         var nativePath = Path.Combine(directory, "index.usearch");
         if (metadata.FormatVersion != 2 || metadata.SegmentId != id || metadata.NativeFormat != OutputNativeFormat ||
-            metadata.FileLength != new FileInfo(nativePath).Length || metadata.FileChecksum != HashFile(nativePath))
+            metadata.FileLength != new FileInfo(nativePath).Length)
             throw new IndexGenerationValidationException("segment-file-proof-mismatch");
         var descriptor = new IndexGenerationDescriptor(new Guid(Convert.FromHexString(id)[..16]), fingerprint, dimensions,
             directory, membership, vectors.Count);
@@ -161,17 +161,10 @@ public sealed class UsearchSegmentBuilder(
             metadata.FileLength, vectors.Count, OutputNativeFormat, PhysicalIncarnation: incarnation);
     }
 
-    private static string HashFile(string path)
-    {
-        using var file = File.OpenRead(path);
-        return Convert.ToHexStringLower(SHA256.HashData(file));
-    }
-
     internal static void ValidateInput(CanonicalVector vector, string fingerprint, int dimensions, long previous)
     {
         if (vector.VectorId <= previous || vector.TextChunkId <= 0 || vector.ModelFingerprint != fingerprint ||
-            vector.Dimensions != dimensions || vector.Values.Length != dimensions * sizeof(float) ||
-            vector.PayloadChecksum != Convert.ToHexStringLower(SHA256.HashData(vector.Values)))
+            vector.Dimensions != dimensions || vector.Values.Length != dimensions * sizeof(float))
             throw new IndexGenerationValidationException("segment-canonical-vector-invalid");
         var nonzero = false;
         for (var offset = 0; offset < vector.Values.Length; offset += sizeof(float))

@@ -42,6 +42,17 @@ public sealed class CorpusRebuildPreparationTests(NativeSqlServerFixture fixture
         Assert.Equal(expected.Select(chunk => (chunk.Content, chunk.StartOffset, chunk.Length, chunk.SearchInputHash)),
             chunks.Select(chunk => (chunk.Content, chunk.StartOffset, chunk.Length, chunk.SearchInputHash)));
         Assert.All(chunks, chunk => Assert.Equal(input.CanonicalArtifactId, chunk.ArtifactId));
+        var proofs=await context.TextChunkWindowEligibilities.OrderBy(value => value.TextChunkId).ToArrayAsync();
+        Assert.Equal(chunks.Length,proofs.Length);
+        foreach(var chunk in chunks)
+        {
+            var proof=Assert.Single(proofs,value => value.TextChunkId==chunk.Id);
+            Assert.Equal(CanonicalWindowEligibility.RuleVersion,proof.RuleVersion);
+            Assert.Equal(canonical.ContentHash,proof.CanonicalContentHash);
+            Assert.Equal(chunk.StartOffset,proof.StartOffset);
+            Assert.Equal(chunk.Length,proof.Length);
+            Assert.Equal(CanonicalWindowEligibility.Evaluate(text,chunk.StartOffset,chunk.Length,chunk.Content),proof.Available);
+        }
         var job = await context.Jobs.SingleAsync(value => value.Id == input.EmbeddingJobId);
         Assert.Equal((int)PublicJobState.WorkerQueued, job.PublicState);
         Assert.Equal(PipelineOperations.Embed, job.Operation);

@@ -8,7 +8,7 @@ using Xunit;
 
 namespace FluxKnowledge.Domain.Tests.Sources;
 
-public sealed class SourceReconciliationServiceTests
+public sealed partial class SourceReconciliationServiceTests
 {
     [Theory]
     [InlineData(false)]
@@ -225,7 +225,9 @@ public sealed class SourceReconciliationServiceTests
             IndexGenerationCandidateSnapshot? survivorGeneration, CancellationToken cancellationToken) =>
             ValueTask.FromResult(new SourceDeletionRunResult(false, "draining"));
         public ValueTask<IReadOnlyList<SourceDeletionFileTarget>> ReadPendingCleanupAsync(SourceDeletionWorkItem workItem,
-            CancellationToken cancellationToken) => throw new NotSupportedException();
+            CancellationToken cancellationToken, int maxTargets = 1) => throw new NotSupportedException();
+        public ValueTask<bool> RecordCleanupResultsAsync(SourceDeletionWorkItem workItem,
+            IReadOnlyList<SourceDeletionFileOutcome> outcomes, CancellationToken cancellationToken) => throw new NotSupportedException();
         public ValueTask RecordCleanupResultAsync(SourceDeletionWorkItem workItem, Guid cleanupItemId,
             SourceDeletionFileResult result, CancellationToken cancellationToken) => throw new NotSupportedException();
         public ValueTask FailAsync(SourceDeletionWorkItem workItem, string reasonCode, CancellationToken cancellationToken) =>

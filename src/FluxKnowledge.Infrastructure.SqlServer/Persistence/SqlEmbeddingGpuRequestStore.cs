@@ -49,9 +49,34 @@ public sealed class SqlEmbeddingGpuRequestStore(IDbContextFactory<FluxKnowledgeD
 
     internal static Task<bool> HasContradictoryRequestsAsync(FluxKnowledgeDbContext context, IReadOnlyCollection<Guid> recordIds,
         IReadOnlyCollection<Guid> ownedTaskIds, CancellationToken ct)
-        => context.EmbeddingGpuRequests.AnyAsync(request => recordIds.Contains(request.PipelineRecordId) &&
-            context.GpuMiniTasks.Any(task => task.Id == request.MiniTaskId) && !ownedTaskIds.Contains(request.MiniTaskId) &&
-            !ArchivedTaskIds(context).Contains(request.MiniTaskId), ct);
+        => HasContradictoryRequestsCoreAsync(context,
+            context.EmbeddingGpuRequests.Where(request => recordIds.Contains(request.PipelineRecordId)), ownedTaskIds, ct);
+
+    internal static Task<bool> HasContradictoryRequestsAsync(FluxKnowledgeDbContext context, IQueryable<Guid> recordIds,
+        IReadOnlyCollection<Guid> ownedTaskIds, CancellationToken ct)
+        => HasContradictoryRequestsCoreAsync(context,
+            context.EmbeddingGpuRequests.Where(request => recordIds.Contains(request.PipelineRecordId)), ownedTaskIds, ct);
+
+    private static async Task<bool> HasContradictoryRequestsCoreAsync(FluxKnowledgeDbContext context,
+        IQueryable<EmbeddingGpuRequestEntity> requests, IReadOnlyCollection<Guid> ownedTaskIds, CancellationToken ct)
+    {
+        // Keep discovery scoped by the request's record: a task bound to a
+        // foreign parent is exactly the contradiction this guard must detect.
+        // A large SQL anti-join of all owned IDs repeatedly parsed that history
+        // inside the archive proof, holding the publication fence until timeout.
+        var requestTaskIds = await requests
+            .Where(request => context.GpuMiniTasks.Any(task => task.Id == request.MiniTaskId))
+            .Select(request => request.MiniTaskId).ToArrayAsync(ct).ConfigureAwait(false);
+        var owned = ownedTaskIds.ToHashSet();
+        foreach (var candidates in requestTaskIds.Where(id => !owned.Contains(id)).Chunk(128))
+        {
+            var archived = await ArchivedTaskIds(context).Where(id => candidates.Contains(id))
+                .ToArrayAsync(ct).ConfigureAwait(false);
+            var proven = archived.ToHashSet();
+            if (candidates.Any(id => !proven.Contains(id))) return true;
+        }
+        return false;
+    }
 
     // Source deletion also inventories task ownership after the rebuild has discarded
     // generation rows. Only exact supersession and terminal-cleanup provenance may

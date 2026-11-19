@@ -44,7 +44,7 @@ public sealed partial class SourceJournalSealIntegrationTests
                 SqlSourceIncrementalState.InvalidateCoverage(state, "fixture-lost-journal-history", state.CoveredUsn);
             await db.SaveChangesAsync();
         }
-        if (change == "later-edit") { scenario.Overwrite(0, 66); await scenario.SignalAsync(); } // Identified event forces capture even with matching metadata.
+        if (change == "later-edit") { scenario.Overwrite(0, 66); await scenario.SignalAsync(); } // A changed modification date requires a new capture.
         if (change == "qualification-lost") scenario.Options.SealQualifications = [];
         if (change == "new-seal-writes-disabled") scenario.Options.SealingEnabled = false;
         if (change == "partial-namespace")

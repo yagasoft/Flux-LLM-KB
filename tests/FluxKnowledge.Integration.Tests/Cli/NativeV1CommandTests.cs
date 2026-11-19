@@ -93,6 +93,7 @@ public sealed class NativeV1CommandTests
     }
     [Theory]
     [InlineData("knowledge search", "POST", "/api/v1/knowledge/search", "{\"query\":\"needle\",\"limit\":3}")]
+    [InlineData("knowledge search", "POST", "/api/v1/knowledge/search", """{"query":"needle","limit":3,"cwd":"C:\\example workspace"}""")]
     [InlineData("knowledge graph", "POST", "/api/v1/knowledge/graph/query", "{\"node\":\"n\",\"max_depth\":1,\"max_results\":3}")]
     [InlineData("code query", "POST", "/api/v1/code/query", "{\"view\":\"status\",\"limit\":3}")]
     [InlineData("corpus query", "POST", "/api/v1/corpus/query", "{\"view\":\"roots\",\"limit\":3}")]

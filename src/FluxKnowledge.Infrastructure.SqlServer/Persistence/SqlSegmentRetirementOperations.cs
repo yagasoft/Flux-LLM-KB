@@ -1,4 +1,5 @@
 using System.Data;
+using System.Text.Json;
 using FluxKnowledge.Application.Gpu;
 using FluxKnowledge.Application.Indexing;
 using FluxKnowledge.Application.Ports;
@@ -33,35 +34,49 @@ public sealed partial class SqlSegmentRetirementOperations(IDbContextFactory<Flu
             legacyProof?.ValidateConnection(context);
             await using var transaction = await context.Database.BeginTransactionAsync(IsolationLevel.Serializable, cancellationToken);
             if (!await EnterAsync(context, cancellationToken)) throw new InvalidOperationException("segment-retirement-query-owned");
-            await ValidateSourceDeletionAsync(context, sourceDeletion, 3, generationId.ToString("N"), cancellationToken);
-            var generation = await context.IndexGenerations.SingleAsync(value => value.Id == generationId, cancellationToken);
-            await CheckManifestPinsAsync(context, generation, cancellationToken, sourceDeletion?.OperationId);
-            if (generation.RetirementOperationId is not null && generation.RetirementOperationId != operationId)
-                throw new InvalidOperationException("segment-retirement-operation-conflict");
-            var ids = await context.IndexGenerationSegments.Where(value => value.GenerationId == generationId).Select(value => value.SegmentId).ToArrayAsync(cancellationToken);
-            generation.RetirementOperationId = operationId;
-            generation.RetiredAtUtc ??= clock.GetUtcNow();
-            await context.IndexGenerationSegments.Where(value => value.GenerationId == generationId).ExecuteDeleteAsync(cancellationToken);
-            foreach (var id in ids)
-            {
-                if(legacyProof is not null && id!=legacyProof.Scope.SegmentId)continue;
-                if (await context.IndexGenerationSegments.AnyAsync(value => value.SegmentId == id, cancellationToken)) continue;
-                if (sourceDeletion is not null && !await context.SourceDeletionCleanupItems.AnyAsync(value =>
-                    value.SourceDeletionOperationId == sourceDeletion.OperationId && value.StorageKind == 4 && value.RelativePath == id, cancellationToken))
-                    continue; // Unrelated newly unshared segments belong to ordinary retention, not this source's cleanup authority.
-                var segment = await context.IndexSegments.SingleAsync(value => value.Id == id, cancellationToken);
-                if (!await SegmentHasPinsAsync(context, segment, cancellationToken, sourceDeletion?.OperationId))
-                {
-                    if (segment.State == 2 && segment.RetirementOperationId == operationId) continue;
-                    if (segment.State != 1) throw new InvalidOperationException("segment-retirement-state-changed");
-                    segment.State = 2; segment.RetirementOperationId = operationId;
-                }
-            }
-            await context.SaveChangesAsync(cancellationToken);
-            var targets = await context.IndexSegments.AsNoTracking().Where(value => value.RetirementOperationId == operationId).OrderBy(value => value.Id).ToArrayAsync(cancellationToken);
+            var plan = await MarkManifestCoreAsync(context, generationId, operationId, sourceDeletion, null, cancellationToken);
             await transaction.CommitAsync(cancellationToken);
-            return new SegmentRetirementPlan(operationId, SqlSegmentedIndexStore.Describe(generation), targets.Select(SqlSegmentedIndexStore.Describe).ToArray());
+            return plan;
         });
+    }
+
+    private async Task<SegmentRetirementPlan> MarkManifestCoreAsync(FluxKnowledgeDbContext context, Guid generationId,
+        Guid operationId, SourceDeletionWorkItem? sourceDeletion, ManifestPinsProof? manifestPinsChecked, CancellationToken cancellationToken)
+    {
+        await ValidateSourceDeletionAsync(context, sourceDeletion, 3, generationId.ToString("N"), cancellationToken);
+        var generation = await context.IndexGenerations.SingleAsync(value => value.Id == generationId, cancellationToken);
+        await CheckManifestPinsAsync(context, generation, cancellationToken, sourceDeletion?.OperationId, manifestPinsChecked);
+        if (generation.RetirementOperationId is not null && generation.RetirementOperationId != operationId)
+            throw new InvalidOperationException("segment-retirement-operation-conflict");
+        var ids = await context.IndexGenerationSegments.Where(value => value.GenerationId == generationId).Select(value => value.SegmentId).ToArrayAsync(cancellationToken);
+        generation.RetirementOperationId = operationId;
+        generation.RetiredAtUtc ??= clock.GetUtcNow();
+        await context.IndexGenerationSegments.Where(value => value.GenerationId == generationId).ExecuteDeleteAsync(cancellationToken);
+        if (legacyProof is not null) ids=ids.Where(id => id==legacyProof.Scope.SegmentId).ToArray();
+        var shared=new HashSet<string>(StringComparer.Ordinal);
+        foreach (var page in ids.Chunk(256))
+            foreach (var id in await context.Database.SqlQuery<string>($"""
+                /* segment-retirement-shared-segments */
+                SELECT requested.Id AS Value FROM OPENJSON({JsonSerializer.Serialize(page)}) WITH(Id char(64) '$') requested
+                WHERE EXISTS(SELECT 1 FROM IndexGenerationSegments member WHERE member.SegmentId=requested.Id)
+                """).ToArrayAsync(cancellationToken)) shared.Add(id);
+        foreach (var id in ids)
+        {
+            if (shared.Contains(id)) continue;
+            if (sourceDeletion is not null && !await context.SourceDeletionCleanupItems.AnyAsync(value =>
+                value.SourceDeletionOperationId == sourceDeletion.OperationId && value.StorageKind == 4 && value.RelativePath == id, cancellationToken))
+                continue; // Unrelated newly unshared segments belong to ordinary retention, not this source's cleanup authority.
+            var segment = await context.IndexSegments.SingleAsync(value => value.Id == id, cancellationToken);
+            if (!await SegmentHasPinsAsync(context, segment, cancellationToken, sourceDeletion?.OperationId))
+            {
+                if (segment.State == 2 && segment.RetirementOperationId == operationId) continue;
+                if (segment.State != 1) throw new InvalidOperationException("segment-retirement-state-changed");
+                segment.State = 2; segment.RetirementOperationId = operationId;
+            }
+        }
+        await context.SaveChangesAsync(cancellationToken);
+        var targets = await context.IndexSegments.AsNoTracking().Where(value => value.RetirementOperationId == operationId).OrderBy(value => value.Id).ToArrayAsync(cancellationToken);
+        return new SegmentRetirementPlan(operationId, SqlSegmentedIndexStore.Describe(generation), targets.Select(SqlSegmentedIndexStore.Describe).ToArray());
     }
 
     public async ValueTask<bool> TryReclaimSegmentAsync(string segmentId, Guid operationId, CancellationToken cancellationToken,
@@ -74,6 +89,14 @@ public sealed partial class SqlSegmentRetirementOperations(IDbContextFactory<Flu
         var originalTransaction = (SqlTransaction)transaction.GetDbTransaction();
         if (!await EnterAsync(context, cancellationToken)) return false;
         if (FileOperationCheckpoint is { } admitted) await admitted("admitted", context, cancellationToken);
+        var reclaimed = await TryReclaimSegmentCoreAsync(context, originalTransaction, segmentId, operationId, sourceDeletion, cancellationToken);
+        if (reclaimed) await transaction.CommitAsync(cancellationToken);
+        return reclaimed;
+    }
+
+    private async Task<bool> TryReclaimSegmentCoreAsync(FluxKnowledgeDbContext context, SqlTransaction originalTransaction,
+        string segmentId, Guid operationId, SourceDeletionWorkItem? sourceDeletion, CancellationToken cancellationToken)
+    {
         await ValidateSourceDeletionAsync(context, sourceDeletion, 4, segmentId, cancellationToken);
         var segment = await context.IndexSegments.SingleAsync(value => value.Id == segmentId, cancellationToken);
         if (segment.RetirementOperationId != operationId || segment.State is not (2 or 3))
@@ -90,12 +113,12 @@ public sealed partial class SqlSegmentRetirementOperations(IDbContextFactory<Flu
         }
         RequireSegmentPath(segment);
         if (FileOperationCheckpoint is { } deleting) await deleting("before-delete", context, cancellationToken);
+        await ValidateSourceDeletionAsync(context, sourceDeletion, 4, segmentId, cancellationToken);
         await ProveOriginalOwnershipAsync(context, originalTransaction, cancellationToken);
         await files.DeleteSegmentAsync(SqlSegmentedIndexStore.Describe(segment), cancellationToken);
         await context.IndexSegmentVectors.Where(value => value.SegmentId == segmentId).ExecuteDeleteAsync(cancellationToken);
         segment.State = 3; segment.ReclaimedAtUtc = clock.GetUtcNow();
         await context.SaveChangesAsync(cancellationToken);
-        await transaction.CommitAsync(cancellationToken);
         return true;
     }
 
@@ -108,21 +131,29 @@ public sealed partial class SqlSegmentRetirementOperations(IDbContextFactory<Flu
         var originalTransaction = (SqlTransaction)transaction.GetDbTransaction();
         if (!await EnterAsync(context, cancellationToken)) return false;
         if (FileOperationCheckpoint is { } admitted) await admitted("admitted", context, cancellationToken);
+        var reclaimed = await TryReclaimManifestCoreAsync(context, originalTransaction, generationId, operationId, sourceDeletion, null, cancellationToken);
+        if (reclaimed) await transaction.CommitAsync(cancellationToken);
+        return reclaimed;
+    }
+
+    private async Task<bool> TryReclaimManifestCoreAsync(FluxKnowledgeDbContext context, SqlTransaction originalTransaction,
+        Guid generationId, Guid operationId, SourceDeletionWorkItem? sourceDeletion, ManifestPinsProof? manifestPinsChecked, CancellationToken cancellationToken)
+    {
         await ValidateSourceDeletionAsync(context, sourceDeletion, 3, generationId.ToString("N"), cancellationToken);
         var generation = await context.IndexGenerations.SingleAsync(value => value.Id == generationId, cancellationToken);
         if (generation.RetirementOperationId != operationId || generation.RetiredAtUtc is null)
             throw new InvalidOperationException("segment-retirement-intent-mismatch");
         if (generation.ReclaimedAtUtc is not null) return true;
-        await CheckManifestPinsAsync(context, generation, cancellationToken, sourceDeletion?.OperationId);
+        await CheckManifestPinsAsync(context, generation, cancellationToken, sourceDeletion?.OperationId, manifestPinsChecked);
         if (await context.IndexGenerationSegments.AnyAsync(value => value.GenerationId == generationId, cancellationToken) ||
             await context.IndexSegments.AnyAsync(value => value.RetirementOperationId == operationId && value.State != 3, cancellationToken)) return false;
         RequireManifestPath(generation);
         if (FileOperationCheckpoint is { } deleting) await deleting("before-delete", context, cancellationToken);
+        await ValidateSourceDeletionAsync(context, sourceDeletion, 3, generationId.ToString("N"), cancellationToken);
         await ProveOriginalOwnershipAsync(context, originalTransaction, cancellationToken);
         await files.DeleteManifestAsync(SqlSegmentedIndexStore.Describe(generation), cancellationToken);
         generation.ReclaimedAtUtc = clock.GetUtcNow();
         await context.SaveChangesAsync(cancellationToken);
-        await transaction.CommitAsync(cancellationToken);
         return true;
     }
 
@@ -130,14 +161,22 @@ public sealed partial class SqlSegmentRetirementOperations(IDbContextFactory<Flu
     {
         await SqlIndexRecoveryReferences.AcquireReadTransactionAsync(context, cancellationToken);
         if (!await SqlCorpusGenerationLeaseStore.TryAcquireCleanupTransactionAsync(context, probe, cancellationToken)) return false;
-        await SqlPublishedPassageSelection.AcquireFenceAsync(context, cancellationToken);
+        try { await SqlPublishedPassageSelection.AcquireFenceAsync(context, cancellationToken); }
+        catch (SqlException failure) when (!cancellationToken.IsCancellationRequested && failure.Errors.Count > 0 &&
+            failure.Errors.Cast<SqlError>().All(error => error.Number is -2 or 1205 or 1222))
+        {
+            // Admission has not granted any file authority. The caller defers the
+            // durable work; filesystem operations are never retried here.
+            return false;
+        }
         await SqlIndexRecoveryReferences.RequireCurrentAsync(context, recoveryRoot, indexRoot, cancellationToken,legacyProof);
         return true;
     }
 
     private static async Task CheckManifestPinsAsync(FluxKnowledgeDbContext context, IndexGenerationEntity generation, CancellationToken cancellationToken,
-        Guid? sourceDeletionOperation = null)
+        Guid? sourceDeletionOperation = null, ManifestPinsProof? manifestPinsChecked = null)
     {
+        if (manifestPinsChecked?.Covers(context,generation.Id) == true) return;
         if (generation.FormatVersion != 2 || generation.ValidatedAtUtc is null || generation.EmbeddingJobId is not null ||
             await context.IndexState.AnyAsync(value => value.ActiveIndexGenerationId == generation.Id || value.CorpusRebuildOperationId != null, cancellationToken) ||
             await context.CorpusQueryLeases.AnyAsync(value => value.GenerationId == generation.Id, cancellationToken) ||

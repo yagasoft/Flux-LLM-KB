@@ -84,7 +84,8 @@ public static class ServiceCollectionExtensions
             provider.GetRequiredService<TimeProvider>(),
             provider.GetService<IStatusEventPublisher>(),
             provider.GetRequiredService<DerivedIndexRecoveryOptions>(),
-            deploymentHold: provider.GetService<IDeploymentValidationHold>()));
+            deploymentHold: provider.GetService<IDeploymentValidationHold>(),
+            logger: provider.GetService<Microsoft.Extensions.Logging.ILogger<DerivedIndexRecoveryCoordinator>>()));
         services.AddSingleton<IDerivedIndexRecoveryStatus>(provider => provider.GetRequiredService<DerivedIndexRecoveryCoordinator>());
         services.AddSingleton<IDerivedIndexRecoverySignal>(provider => provider.GetRequiredService<DerivedIndexRecoveryCoordinator>());
         if (registerRecoveryBackgroundService)
@@ -105,7 +106,7 @@ public static class ServiceCollectionExtensions
                 new UsearchSegmentBuilder(provider.GetRequiredService<UsearchIndexOptions>(), provider.GetRequiredService<IIndexSegmentReadLeaseFactory>(),
                     provider.GetService<IndexSegmentBuildOptions>()),
                 new UsearchManifestValidator(provider.GetRequiredService<UsearchIndexOptions>(), provider.GetRequiredService<IIndexSegmentReadLeaseFactory>()),
-                segmentedEnabled)
+                segmentedEnabled, provider.GetService<IRetainedProcessorFailureClassifier>())
             : provider.GetRequiredService<UsearchGenerationBuilder>());
         if (segmentedEnabled)
         {

@@ -1,3 +1,4 @@
+using System.Text.Json;
 using FluxKnowledge.Application.Contracts;
 using FluxKnowledge.Application.Ports;
 using FluxKnowledge.Application.Sources;
@@ -50,14 +51,19 @@ public sealed class SourceRootProjectionReader(
         }
 
         var rootIds = roots.Select(root => root.Id).ToArray();
-        var requests = await context.SourceScanRequests.AsNoTracking()
-            .Where(request => rootIds.Contains(request.SourceRootId) && request.RequestKind != SqlSourceVerificationStore.RequestKind)
-            .OrderByDescending(request => request.RequestedAtUtc).ThenByDescending(request => request.Id)
-            .ToListAsync(cancellationToken).ConfigureAwait(false);
-        var lastFinishedByRoot = requests
-            .Where(request => request.State is (int)SourceScanRequestState.Completed or (int)SourceScanRequestState.Failed)
-            .GroupBy(request => request.SourceRootId)
-            .ToDictionary(group => group.Key, group => group.First());
+        // A scan manifest can contain the whole namespace. The list needs one
+        // scalar per root, never every historical request and its large JSON.
+        var lastFinishedByRoot = await context.SourceRootConfigurations.AsNoTracking()
+            .Where(root => rootIds.Contains(root.Id))
+            .Select(root => new
+            {
+                root.Id,
+                Errors = context.SourceScanRequests.Where(request => request.SourceRootId == root.Id &&
+                        request.RequestKind != SqlSourceVerificationStore.RequestKind &&
+                        (request.State == (int)SourceScanRequestState.Completed || request.State == (int)SourceScanRequestState.Failed))
+                    .OrderByDescending(request => request.RequestedAtUtc).ThenByDescending(request => request.Id)
+                    .Select(request => (int?)request.ErrorFileCount).FirstOrDefault() ?? 0
+            }).ToDictionaryAsync(value => value.Id, value => value.Errors, cancellationToken).ConfigureAwait(false);
         var summaries = await ReadStateSummariesAsync(context, rootIds, cancellationToken).ConfigureAwait(false);
         var deletions = await context.SourceDeletionOperations.AsNoTracking()
             .Where(operation => rootIds.Contains(operation.SourceRootId))
@@ -80,21 +86,29 @@ public sealed class SourceRootProjectionReader(
     public async ValueTask<SourceRootDetailProjection?> ReadRootAsync(Guid rootId, CancellationToken cancellationToken)
     {
         await using var context = await contextFactory.CreateDbContextAsync(cancellationToken).ConfigureAwait(false);
-        var root = await context.SourceRootConfigurations.AsNoTracking()
-            .SingleOrDefaultAsync(value => value.Id == rootId, cancellationToken).ConfigureAwait(false);
-        if (root is null)
+        var source = await context.SourceRootConfigurations.AsNoTracking().Where(value => value.Id == rootId)
+            .Select(value => new
+            {
+                Root = value,
+                IsOutlook = context.OutlookCaptureProfiles.Any(profile => profile.SourceRootId == value.Id)
+            })
+            .SingleOrDefaultAsync(cancellationToken).ConfigureAwait(false);
+        if (source is null)
         {
             return null;
         }
+        var root = source.Root;
 
-        var request = await context.SourceScanRequests.AsNoTracking()
+        var requestState = await context.SourceScanRequests.AsNoTracking()
             .Where(value => value.SourceRootId == rootId && value.RequestKind != SqlSourceVerificationStore.RequestKind)
             .OrderByDescending(value => value.RequestedAtUtc).ThenByDescending(value => value.Id)
+            .Select(value => (int?)value.State)
             .FirstOrDefaultAsync(cancellationToken).ConfigureAwait(false);
         var lastFinishedRequest = await context.SourceScanRequests.AsNoTracking()
             .Where(value => value.SourceRootId == rootId && value.RequestKind != SqlSourceVerificationStore.RequestKind &&
                 (value.State == (int)SourceScanRequestState.Completed || value.State == (int)SourceScanRequestState.Failed))
             .OrderByDescending(value => value.RequestedAtUtc).ThenByDescending(value => value.Id)
+            .Select(value => new { value.DiscoveredFileCount, value.ErrorFileCount, value.AuditEvidenceJson })
             .FirstOrDefaultAsync(cancellationToken).ConfigureAwait(false);
         var summary = (await ReadStateSummariesAsync(context, [rootId], cancellationToken).ConfigureAwait(false)).GetValueOrDefault(rootId)
             ?? SourceStateSummary.Empty;
@@ -131,15 +145,20 @@ public sealed class SourceRootProjectionReader(
             .ToDictionaryAsync(publication => publication.OwnerSourceRevisionId, cancellationToken)
             .ConfigureAwait(false);
         var logicalStates = await ReadLogicalOwnerStatesAsync(context, [rootId], cancellationToken).ConfigureAwait(false);
-        var unadmittedLegacyText = SqlCurrentSourceActivities.UnadmittedLegacyTextIds(context);
+        // The eligibility query returns unique activity IDs. A same-statement
+        // left join preserves its exact proof without a correlated probe per row.
+        var unadmittedLegacyText = SqlCurrentSourceActivities.UnadmittedLegacyTextIds(context)
+            .Select(id => new {ActivityId=(Guid?)id});
         var effectiveTextLimit = Math.Min(root.MaximumFileBytes, SourcePolicyDefaults.MaximumTextBytes);
         var activities = await (
                 from activity in SqlCurrentSourceActivities.Query(context)
                 join revision in context.SourceRevisions.AsNoTracking() on activity.SourceRevisionId equals revision.Id
+                join assessmentValue in unadmittedLegacyText on (Guid?)activity.Id equals assessmentValue.ActivityId into assessmentValues
+                from assessment in assessmentValues.DefaultIfEmpty()
                 join artifactValue in context.SourceArtifacts.AsNoTracking() on revision.Id equals artifactValue.SourceRevisionId into artifactValues
                 from artifact in artifactValues.DefaultIfEmpty()
                 where revision.SourceRootId == rootId && revision.SuppressedAtUtc == null
-                let needsAssessment = unadmittedLegacyText.Contains(activity.Id)
+                let needsAssessment = assessment.ActivityId != null
                 let oversizedLegacyRefusal = revision.OriginKind == 0 && revision.ByteLength > effectiveTextLimit &&
                     activity.State == (int)SourceActivityState.DeferredPolicy && activity.Reason == "File extension is unknown to local source ingestion."
                 select new SourceActivityRow(
@@ -267,13 +286,19 @@ public sealed class SourceRootProjectionReader(
         // Use the same current logical file projection as the table: derived OCR failures belong to
         // their source file, and completed/superseded work must not remain in current issue counts.
         var processingIssues = SourceIssuePresentation.GroupCurrentFiles(files);
+        var editableScope = !source.IsOutlook && root.State != (int)SourceRootState.Deleting &&
+            root.CrawlMode == (int)SourceDiscoveryMode.Filesystem
+            ? new SourceScopeProjection(root.ConfigurationRevision,
+                JsonSerializer.Deserialize<string[]>(root.IncludePatternsJson) ?? [],
+                JsonSerializer.Deserialize<string[]>(root.ExcludePatternsJson) ?? [])
+            : null;
 
         return new SourceRootDetailProjection(
             root.Id,
             root.DisplayName,
             root.CanonicalPath,
             ((SourceRootState)root.State).ToString(),
-            request is null ? "No scan requested" : ((SourceScanRequestState)request.State).ToString(),
+            requestState is null ? "No scan requested" : ((SourceScanRequestState)requestState.Value).ToString(),
             root.LastScanCompletedAtUtc,
             lastFinishedRequest?.DiscoveredFileCount ?? 0,
             summary.Indexed,
@@ -287,6 +312,7 @@ public sealed class SourceRootProjectionReader(
             ScanIssues = SourceScanIssueSummary.FromAudit(lastFinishedRequest?.AuditEvidenceJson, lastFinishedRequest?.ErrorFileCount ?? 0),
             CurrentProcessingIssues = processingIssues,
             Files = files,
+            EditableScope = editableScope,
             DeletionPhase = deletion?.Phase,
             DeletionReason = deletion?.ReasonCode,
             DeletionProgress = deletion is null ? null : new SourceDeletionProgressProjection(
@@ -373,7 +399,7 @@ public sealed class SourceRootProjectionReader(
 
     private static SourceRootListProjection ToListProjection(
         Infrastructure.SqlServer.Persistence.Entities.SourceRootConfigurationEntity root,
-        Infrastructure.SqlServer.Persistence.Entities.SourceScanRequestEntity? request,
+        int lastScanIssueCount,
         SourceStateSummary summary) =>
         new(
             root.Id,
@@ -386,7 +412,7 @@ public sealed class SourceRootProjectionReader(
             summary.Blocked,
             summary.Error)
         {
-            LastScanIssueCount = request?.ErrorFileCount ?? 0
+            LastScanIssueCount = lastScanIssueCount
         };
 
     internal static async ValueTask<IReadOnlyDictionary<Guid, SourceStateSummary>> ReadStateSummariesAsync(
@@ -408,11 +434,21 @@ public sealed class SourceRootProjectionReader(
         // Every summary/derived branch below joins this same current-owner set.
         // Empty roots need no branch plans; the overview still checks its fences.
         if (knownFiles.Length == 0) return new Dictionary<Guid, SourceStateSummary>();
-        var unadmittedLegacyText = SqlCurrentSourceActivities.UnadmittedLegacyTextIds(context);
-        var rows = await (
+        // Joining root policy into the bulk activity query makes its plan
+        // depend on estimates for a frequently replaced set of roots. Capture
+        // only the policy scalars under the caller's transaction or fence.
+        var effectiveTextLimits = await context.SourceRootConfigurations.AsNoTracking()
+            .Where(root => rootIds.Contains(root.Id))
+            .Select(root => new { root.Id, root.MaximumFileBytes })
+            .ToDictionaryAsync(root => root.Id, root => Math.Min(root.MaximumFileBytes, SourcePolicyDefaults.MaximumTextBytes),
+                cancellationToken).ConfigureAwait(false);
+        var unadmittedLegacyText = SqlCurrentSourceActivities.UnadmittedLegacyTextIds(context)
+            .Select(id => new { ActivityId = (Guid?)id });
+        var activityRows = await (
             from activity in SqlCurrentSourceActivities.Query(context)
             join revision in currentFiles on activity.SourceRevisionId equals revision.Id
-            join policy in context.SourceRootConfigurations.AsNoTracking() on revision.SourceRootId equals policy.Id
+            join assessmentValue in unadmittedLegacyText on (Guid?)activity.Id equals assessmentValue.ActivityId into assessmentValues
+            from assessment in assessmentValues.DefaultIfEmpty()
             join branch in context.SourceProcessorBranches.AsNoTracking() on activity.Id equals branch.SourceActivityId into branches
             from branch in branches.DefaultIfEmpty()
             join publicationValue in context.DocumentPublications.AsNoTracking() on revision.Id equals publicationValue.OwnerSourceRevisionId into publicationValues
@@ -425,15 +461,16 @@ public sealed class SourceRootProjectionReader(
                 on new { Id = (Guid?)record.Id, Revision = (long?)record.Revision }
                 equals new { Id = (Guid?)artifactValue.PipelineRecordId, Revision = (long?)artifactValue.SourceRevision } into artifactValues
             from artifact in artifactValues.DefaultIfEmpty()
-            let needsAssessment = unadmittedLegacyText.Contains(activity.Id)
-            let effectiveTextLimit = policy.MaximumFileBytes < SourcePolicyDefaults.MaximumTextBytes
-                ? policy.MaximumFileBytes : SourcePolicyDefaults.MaximumTextBytes
-            let oversizedLegacyRefusal = revision.OriginKind == 0 && revision.ByteLength > effectiveTextLimit &&
-                activity.State == (int)SourceActivityState.DeferredPolicy && activity.Reason == "File extension is unknown to local source ingestion."
-            select new SourceStateRow(
+            select new
+            {
+                NeedsAssessment = assessment.ActivityId != null,
+                IsLegacyRefusal = revision.OriginKind == 0 && activity.State == (int)SourceActivityState.DeferredPolicy &&
+                    activity.Reason == "File extension is unknown to local source ingestion.",
+                revision.ByteLength,
+                Row = new SourceStateRow(
                 revision.SourceRootId,
                 activity.SourceRevisionId,
-                needsAssessment ? (int)SourceActivityState.DeferredPolicy : activity.State,
+                activity.State,
                 record != null && record.CompletionCriteriaMet && !record.IsDeleted &&
                     record.SourceRevisionId == revision.Id &&
                     (activity.ResultingPipelineRecordRevision == null || record.Revision == activity.ResultingPipelineRecordRevision)
@@ -455,10 +492,25 @@ public sealed class SourceRootProjectionReader(
                     : record != null && record.CompletionCriteriaMet && !record.IsDeleted && record.SourceRevisionId == revision.Id &&
                         (activity.ResultingPipelineRecordRevision == null || record.Revision == activity.ResultingPipelineRecordRevision)
                         ? (DateTimeOffset?)artifact.CreatedAtUtc : null,
-                oversizedLegacyRefusal || needsAssessment && revision.ByteLength > effectiveTextLimit
-                    ? "File exceeds the effective UTF-8 text ingestion limit."
-                    : needsAssessment ? RetainedDefaultPolicy.UnadmittedLegacyTextReason : activity.Reason))
+                activity.Reason)
+            })
             .ToListAsync(cancellationToken).ConfigureAwait(false);
+        var rows = new List<SourceStateRow>(activityRows.Count);
+        foreach (var value in activityRows)
+        {
+            var row = value.Row;
+            if (!effectiveTextLimits.TryGetValue(row.SourceRootId, out var limit)) continue;
+            if (value.NeedsAssessment || value.IsLegacyRefusal && value.ByteLength > limit)
+            {
+                row = row with
+                {
+                    State = (int)SourceActivityState.DeferredPolicy,
+                    Reason = value.ByteLength > limit ? "File exceeds the effective UTF-8 text ingestion limit."
+                        : RetainedDefaultPolicy.UnadmittedLegacyTextReason
+                };
+            }
+            rows.Add(row);
+        }
         var logicalStates = await ReadLogicalOwnerStatesAsync(context, rootIds, cancellationToken).ConfigureAwait(false);
         foreach (var state in logicalStates.Values)
         {

@@ -121,6 +121,8 @@ public sealed record OutlookProfileSaveRequest(
     long? ExpectedConfigurationRevision = null,
     Guid? BrowseCorrelationId = null)
 {
+    public string? VerifyFolderPath { get; init; }
+
     public void Validate()
     {
         OutlookCaptureContractValidation.RequireOperation(OperationId, RequestFingerprint);
@@ -143,6 +145,15 @@ public sealed record OutlookProfileSaveRequest(
         if (ProfileId is not null && Enable && BrowseCorrelationId is null)
         {
             throw new ArgumentException("Enabling an Outlook profile requires a completed browse correlation.", nameof(BrowseCorrelationId));
+        }
+
+        if (VerifyFolderPath is not null)
+        {
+            OutlookCaptureContractValidation.RequireFolderPath(VerifyFolderPath, nameof(VerifyFolderPath));
+            if (Enable || BrowseCorrelationId is not null)
+            {
+                throw new ArgumentException("A profile awaiting folder verification cannot be enabled directly.");
+            }
         }
 
         OutlookCaptureContractValidation.RequireDisplayName(DisplayName, nameof(DisplayName));

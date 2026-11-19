@@ -180,6 +180,7 @@ public sealed partial class EmbeddingRetryTests
         public int Count { get; private set; }
         public double ExecuteToReaderMilliseconds { get; private set; }
         public long Rows { get; private set; }
+        public int VectorPayloadReaders { get; private set; }
         public override ValueTask<InterceptionResult<DbDataReader>> ReaderExecutingAsync(DbCommand command,
             CommandEventData eventData, InterceptionResult<DbDataReader> result, CancellationToken cancellationToken = default)
         {
@@ -190,6 +191,8 @@ public sealed partial class EmbeddingRetryTests
             DbDataReader result, CancellationToken cancellationToken = default)
         {
             ExecuteToReaderMilliseconds += eventData.Duration.TotalMilliseconds;
+            if (Enumerable.Range(0, result.FieldCount).Any(index => result.GetName(index) == "Values"))
+                VectorPayloadReaders++;
             return ValueTask.FromResult(result);
         }
         public override InterceptionResult DataReaderDisposing(DbCommand command, DataReaderDisposingEventData eventData, InterceptionResult result)

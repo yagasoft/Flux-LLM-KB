@@ -42,6 +42,19 @@ public sealed class PipelineFilesBrowserTests
                 Assert.Contains("Overview", await page.TitleAsync(), StringComparison.Ordinal);
                 await Assertions.Expect(page.GetByText("Published — ready to query", new() { Exact = true }).First).ToBeVisibleAsync();
                 await page.GetByLabel("Source scope").SelectOptionAsync(PipelineOverviewBrowserTests.ControlledOverviewReader.FirstRoot.ToString());
+                var runningTask = page.Locator(".running-task-row");
+                var visiblePath = runningTask.Locator(".file-path > code");
+                await Assertions.Expect(visiblePath).ToBeVisibleAsync();
+                Assert.Equal(FilesReader.RunningPath, await visiblePath.InnerTextAsync());
+                Assert.True(await visiblePath.EvaluateAsync<bool>(
+                    "path => path.clientWidth === path.parentElement.clientWidth && path.scrollWidth <= path.clientWidth"));
+                await runningTask.GetByText("Full path and copy", new() { Exact = true }).ClickAsync();
+                await Assertions.Expect(runningTask.GetByLabel("Full path", new() { Exact = true }))
+                    .ToHaveValueAsync(FilesReader.RunningPath);
+                await runningTask.GetByRole(AriaRole.Button, new() { Name = "Copy full path" }).ClickAsync();
+                await Assertions.Expect(runningTask.GetByRole(AriaRole.Status)).ToHaveTextAsync("Copied full path.");
+                Assert.Equal(FilesReader.RunningPath, await page.EvaluateAsync<string>("navigator.clipboard.readText()"));
+                await runningTask.GetByText("Full path and copy", new() { Exact = true }).ClickAsync();
                 await page.GetByRole(AriaRole.Button, new() { Name = "Embedding · Queued continuation: 4 files", Exact = true }).ClickAsync();
                 var explorer = page.GetByRole(AriaRole.Region, new() { Name = "Affected files" });
                 await Assertions.Expect(explorer).ToContainTextAsync("30 matching logical files");
@@ -79,6 +92,7 @@ public sealed class PipelineFilesBrowserTests
                 if (!string.IsNullOrWhiteSpace(screenshotRoot))
                 {
                     Directory.CreateDirectory(screenshotRoot);
+                    await runningTask.ScreenshotAsync(new() { Path = Path.Combine(screenshotRoot, $"running-task-path-{viewport.Width}-{viewport.Zoom}x.png") });
                     await explorer.GetByRole(AriaRole.Heading, new() { Name = "Affected files" }).ScrollIntoViewIfNeededAsync();
                     await page.ScreenshotAsync(new() { Path = Path.Combine(screenshotRoot, $"file-detail-{viewport.Width}-{viewport.Zoom}x.png") });
                 }
@@ -148,7 +162,11 @@ public sealed class PipelineFilesBrowserTests
 
     private sealed class FilesReader : IProjectionReader
     {
+        public static readonly string RunningPath = $"D:/workspace/incoming  files/{new string('a', 180)}/file.ext";
+
         private readonly PipelineOverviewBrowserTests.ControlledOverviewReader _base = new();
+        private readonly Guid _runningTaskId = Guid.NewGuid();
+        private readonly Guid _runningRecordId = Guid.NewGuid();
         public Guid? LastRoot { get; private set; }
         public PipelineFileFilter? LastFilter { get; private set; }
         public bool Unavailable { get; set; }
@@ -164,7 +182,7 @@ public sealed class PipelineFilesBrowserTests
                 FileStages = [new(root, "Embedding", "Queued continuation", 4)],
                 OcrDemand = [new(root, 0, 0, 0, 0, 0)],
                 RunningTaskCount = 1,
-                RunningTasks = [new(Guid.NewGuid(), root, Guid.NewGuid(), "Example workspace", "D:/test/sub1/long/path/to/file.ext", null,
+                RunningTasks = [new(_runningTaskId, root, _runningRecordId, "Example workspace", RunningPath, null,
                     "Embed", "Running", false, DateTimeOffset.UtcNow.AddMinutes(-3))]
             } };
         }

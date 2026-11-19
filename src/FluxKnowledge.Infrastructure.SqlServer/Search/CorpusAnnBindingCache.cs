@@ -4,7 +4,8 @@ namespace FluxKnowledge.Infrastructure.SqlServer.Search;
 
 internal readonly record struct CanonicalBindingKey(Guid ArtifactId, Guid PipelineRecordId, long SourceRevision);
 internal sealed record SegmentBindingGroups(IReadOnlyDictionary<CanonicalBindingKey, long[]> Groups,
-    IReadOnlySet<CanonicalBindingKey> DeletedBindings, long EstimatedBytes);
+    IReadOnlySet<CanonicalBindingKey> DeletedBindings, long EstimatedBytes,
+    IReadOnlyDictionary<Guid,Guid>? ArtifactVersions = null);
 
 /// <summary>
 /// Bounded immutable SQL projection metadata. It never grants publication/scope eligibility;
@@ -17,21 +18,22 @@ public sealed class CorpusAnnBindingCache(TimeProvider? timeProvider = null, lon
     private readonly TimeSpan _idle = idleLifetime ?? Timeout.InfiniteTimeSpan;
     private readonly SemaphoreSlim _gate = new(1, 1);
     private readonly object _sync = new();
-    private readonly Dictionary<(Guid Epoch, string Segment), Entry> _entries = [];
+    private readonly Dictionary<(Guid Epoch, string Segment, string Rule), Entry> _entries = [];
     internal long RetainedBytes { get; private set; }
     internal long MaximumRetainedBytes => maximumBytes;
 
     internal async ValueTask<SegmentBindingGroups> GetAsync(Guid epoch, IndexSegmentDescriptor descriptor,
-        Func<CancellationToken, ValueTask<SegmentBindingGroups>> load, CancellationToken cancellationToken)
+        Func<CancellationToken, ValueTask<SegmentBindingGroups>> load, CancellationToken cancellationToken,
+        string ruleVersion = CanonicalWindowEligibility.RuleVersion)
     {
         cancellationToken.ThrowIfCancellationRequested();
         if (epoch == Guid.Empty || maximumBytes <= 0 || _idle < TimeSpan.Zero && _idle != Timeout.InfiniteTimeSpan)
             throw new InvalidOperationException("segment-binding-cache-budget-invalid");
-        if (TryGet(epoch, descriptor) is { } ready) return ready;
+        if (TryGet(epoch, descriptor,ruleVersion) is { } ready) return ready;
         await _gate.WaitAsync(cancellationToken).ConfigureAwait(false);
         try
         {
-            if (TryGet(epoch, descriptor) is { } found) return found;
+            if (TryGet(epoch, descriptor,ruleVersion) is { } found) return found;
             // Serial loading prevents duplicate complete segment captures. A cancelled
             // or failed load publishes nothing; a later caller can load independently.
             var value = await load(cancellationToken).ConfigureAwait(false);
@@ -48,7 +50,7 @@ public sealed class CorpusAnnBindingCache(TimeProvider? timeProvider = null, lon
                         if (RetainedBytes <= maximumBytes - value.EstimatedBytes) break;
                         Remove(evict);
                     }
-                    _entries.Add((epoch, descriptor.Id), new(descriptor, value, now));
+                    _entries.Add((epoch, descriptor.Id,ruleVersion), new(descriptor, value, now));
                     RetainedBytes += value.EstimatedBytes;
                 }
             }
@@ -59,14 +61,14 @@ public sealed class CorpusAnnBindingCache(TimeProvider? timeProvider = null, lon
     }
 
     // Readiness never waits for a loader. Only complete immutable entries are visible.
-    internal SegmentBindingGroups? TryGet(Guid epoch, IndexSegmentDescriptor descriptor)
+    internal SegmentBindingGroups? TryGet(Guid epoch, IndexSegmentDescriptor descriptor,string ruleVersion = CanonicalWindowEligibility.RuleVersion)
     {
         lock (_sync)
         {
-            if (!_entries.TryGetValue((epoch, descriptor.Id), out var entry)) return null;
+            if (!_entries.TryGetValue((epoch, descriptor.Id,ruleVersion), out var entry)) return null;
             if (entry.Descriptor != descriptor) throw new InvalidOperationException("segment-binding-cache-proof-changed");
             var now = _clock.GetUtcNow();
-            if (Expired(entry, now)) { Remove((epoch, descriptor.Id)); return null; }
+            if (Expired(entry, now)) { Remove((epoch, descriptor.Id,ruleVersion)); return null; }
             entry.LastUsed = now;
             return entry.Value;
         }
@@ -74,7 +76,18 @@ public sealed class CorpusAnnBindingCache(TimeProvider? timeProvider = null, lon
 
     private bool Expired(Entry entry, DateTimeOffset now) => _idle != Timeout.InfiniteTimeSpan && now - entry.LastUsed >= _idle;
 
-    private void Remove((Guid Epoch, string Segment) key)
+    internal bool InvalidateChangedArtifacts(IReadOnlyDictionary<Guid,Guid> current)
+    {
+        lock (_sync)
+        {
+            var changed=_entries.Where(entry => entry.Value.Value.ArtifactVersions?.Any(pair =>
+                current.TryGetValue(pair.Key,out var version) && pair.Value!=version) == true).Select(entry => entry.Key).ToArray();
+            foreach (var key in changed) Remove(key);
+            return changed.Length>0;
+        }
+    }
+
+    private void Remove((Guid Epoch, string Segment, string Rule) key)
     { if (_entries.Remove(key, out var entry)) RetainedBytes -= entry.Value.EstimatedBytes; }
     private sealed class Entry(IndexSegmentDescriptor descriptor, SegmentBindingGroups value, DateTimeOffset now)
     {

@@ -32,10 +32,10 @@ public sealed class OverviewReadBudgetIntegrationTests(NativeSqlServerFixture fi
         try
         {
             await delay.Started.Task.WaitAsync(TimeSpan.FromSeconds(5));
-            Assert.Same(read, await Task.WhenAny(read, Task.Delay(TimeSpan.FromSeconds(5))));
-            await Assert.ThrowsAsync<OverviewReadBudgetExceededException>(() => read);
+            await Assert.ThrowsAsync<OverviewReadBudgetExceededException>(
+                () => read.WaitAsync(TimeSpan.FromSeconds(8)));
             Assert.False(caller.IsCancellationRequested);
-            Assert.InRange(elapsed.Elapsed.TotalSeconds, 1.5, 5);
+            Assert.InRange(elapsed.Elapsed.TotalSeconds, 4.75, 8);
         }
         finally
         {

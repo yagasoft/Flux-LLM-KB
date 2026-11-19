@@ -53,18 +53,13 @@ public class UsearchGenerationValidator : IIndexGenerationVerifier
         if (vectors.Count != expected.VectorCount || vectors.Count == 0 ||
             vectors.Select(vector => vector.VectorId).Distinct().Count() != vectors.Count)
             throw new IndexGenerationValidationException("SQL generation membership does not contain the expected distinct vector IDs.");
-        if (vectors.Any(vector =>
-                !string.Equals(
-                    vector.PayloadChecksum,
-                    Convert.ToHexStringLower(SHA256.HashData(vector.Values)),
-                    StringComparison.Ordinal)) ||
-            !string.Equals(
+        if (!string.Equals(
                 expected.MetadataChecksum,
                 ComputeChecksum(expected.ModelFingerprint, expected.Dimensions, vectors),
                 StringComparison.Ordinal))
         {
             throw new IndexGenerationValidationException(
-                "SQL vector payload checksums do not match the candidate generation metadata.");
+                "SQL membership metadata does not match the candidate generation.");
         }
         var metadataPath = Path.Combine(directory, MetadataFileName);
         var metadata = JsonSerializer.Deserialize<Metadata>(File.ReadAllText(metadataPath))

@@ -75,7 +75,8 @@ confirmation, canonical fingerprint and idempotency receipt. REST and
   requests a paced metadata reconciliation. This option and `fullContent` are
   mutually exclusive.
 - `source_sync`, payload `{ "rootId": "<guid>", "fullContent": true }`, explicitly
-  requests a full content rescan through normal ingestion and reindexes changes.
+  requests full metadata reconciliation. Files with unchanged size and modification
+  date are reused. The compatibility field does not force a checksum scan.
 - `root_resume` resumes event processing without requesting a full content scan.
 - `root_create` uses 604,800 seconds for metadata reconciliation. Its compatibility
   `reconciliationSeconds` field rejects other explicit values.
@@ -115,6 +116,21 @@ reverified; executed work is not reset. `root_update` accepts
 `applyDefaultPolicy: true` and `reconcile: false` to apply text defaults without
 queuing a workspace scan. Installation does not itself apply policy or replay
 items; production application requires explicit authority.
+
+The source details page has an **Edit source** control for filesystem roots.
+Saving inclusion or exclusion rules queues a reconciliation.
+Current files, including the Pending list, reflect the new scope as reconciliation
+runs. A paused source reconciles after it is resumed. Rules match paths relative
+to the root, with exclusions taking precedence. To exclude dot-prefixed folders
+at every depth, add both `.*/**` and `**/.*/**` as exclusions.
+
+The same edit is available through `root_update` with `rootId` and either or
+both of the optional `includePatterns` and `excludePatterns` arrays. An omitted
+array preserves its saved rules. An empty array clears them. Rule edits require
+reconciliation. Use `expectedConfigurationRevision` when saving from an earlier
+view of the source to reject concurrent configuration changes. Git-tracked rule
+edits require recovery support for existing processing bindings and for
+readmission after clearing rules.
 
 `corpus.write` also supports explicit terminal Publish recovery with
 `action: "publication_retry"` and `payload: { "jobId": "<guid>" }` through the same
@@ -279,6 +295,26 @@ verified exact citations and empty context for unregistered workspaces; an
 actual Codex CLI prompt from the public acceptance workspace recorded one
 injected context event. See the [design](design/workspace-codex-context.md) for
 release and validation evidence.
+
+### Search captured Codex replies by workspace
+
+Supply `cwd` to `knowledge.search` to search the saved assistant replies from
+the registered Windows workspace that most closely contains that directory.
+The search returns matching captures newest first. A separately registered
+nested workspace has its own captures. A malformed path or a directory outside any registered workspace
+returns `scope-unavailable`. Omitting `cwd` uses the existing global knowledge
+and source search.
+
+The following request works across MCP, REST and CLI.
+
+```json
+{"query":"retry budget","limit":10,"cwd":"E:\\LLM KB"}
+```
+
+The Codex `Stop` hook records the workspace ID when it saves the final assistant
+reply. Older captures and captures without a registered working directory
+remain available through global search. The automatic `UserPromptSubmit`
+hook continues to retrieve published workspace passages.
 
 ## On-demand workspace brief
 

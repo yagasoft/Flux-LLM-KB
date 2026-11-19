@@ -119,7 +119,7 @@ public sealed partial class SqlSourceIncrementalCoordinator(
                     targets.Any(x => x.RelativePath == "." && (x.ReasonFlags & SourcePendingReasons.NamespaceMetadata) != 0),
                 LeaseGeneration = request.Lease.Generation, RecoveryGeneration = state.RecoveryGeneration,
                 GitInventoryGeneration = git?.Generation,
-                DetectionPolicy = SourcePolicyDefaults.DetectionPolicy, ForceFullContent = row.RequestKind == 5,
+                DetectionPolicy = SourcePolicyDefaults.DetectionPolicy,
                 NamespaceGeneration = state.NamespaceGeneration, SupersedesManifestId = superseded?.ManifestId,
                 MetadataEntriesPerSecond = options.MetadataEntriesPerSecond
             };

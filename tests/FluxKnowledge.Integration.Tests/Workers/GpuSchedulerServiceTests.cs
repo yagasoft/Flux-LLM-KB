@@ -1599,6 +1599,9 @@ public sealed partial class GpuSchedulerServiceTests(NativeSqlServerFixture fixt
         public TaskCompletionSource PreCommitWakeConsumptionThenThrown { get; } = new(TaskCreationOptions.RunContinuationsAsynchronously);
         public Action? AfterConsumptionCompleted { get; set; }
         public Action<GpuSchedulerWakeReason>? AfterAdmission { get; set; }
+        public Func<Exception>? AdmissionFailureFactory { get; set; }
+        public List<Guid> AcknowledgedConsumptions { get; } = [];
+        public TaskCompletionSource WakeAcknowledged { get; } = new(TaskCreationOptions.RunContinuationsAsynchronously);
         public Func<long, GpuSchedulerWakeConsumption?>? ConsumeOverride { get; set; }
         public List<Guid> AdmissionOperationIds { get; } = [];
         public List<Guid> ConsumptionOperationIds { get; } = [];
@@ -1620,7 +1623,7 @@ public sealed partial class GpuSchedulerServiceTests(NativeSqlServerFixture fixt
             FirstAttempt.TrySetResult();
             if (Interlocked.Decrement(ref _remainingFailures) >= 0)
             {
-                throw new InvalidOperationException("test scheduler failure");
+                throw AdmissionFailureFactory?.Invoke() ?? new InvalidOperationException("test scheduler failure");
             }
 
             AdmissionCount++;
@@ -1719,6 +1722,8 @@ public sealed partial class GpuSchedulerServiceTests(NativeSqlServerFixture fixt
             }
 
             _wake = _wake with { Reasons = 0 };
+            AcknowledgedConsumptions.Add(consumptionOperationId);
+            WakeAcknowledged.TrySetResult();
             return ValueTask.FromResult(true);
         }
 

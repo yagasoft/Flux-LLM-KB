@@ -1,4 +1,3 @@
-using System.Security.Cryptography;
 using FluxKnowledge.Application.Ports;
 using FluxKnowledge.Integrations.Windows.NativeGoLive;
 
@@ -43,14 +42,13 @@ public sealed class WindowsSourceDeletionFileStore(string artifactRoot, string i
             using var root = _fileSystem.OpenReadOnlyDirectory(_artifactRoot);
             using var sha256 = _fileSystem.OpenReadOnlyDirectory(root, "sha256");
             using var shard = _fileSystem.OpenReadOnlyDirectory(sha256, hash[..2]);
-            var file = await _fileSystem.ReadLiteralFileAsync(shard, $"{hash}.bin", cancellationToken).ConfigureAwait(false);
+            var file = _fileSystem.ReadLiteralFileMetadata(shard, $"{hash}.bin", cancellationToken);
             if (file is null)
             {
                 return new SourceDeletionFileResult(true);
             }
 
-            if (file.Content.LongLength != byteLength || !CryptographicOperations.FixedTimeEquals(
-                    SHA256.HashData(file.Content), Convert.FromHexString(hash)))
+            if (file.ByteLength != byteLength)
             {
                 return new SourceDeletionFileResult(false, "source-delete-artifact-binding-invalid");
             }

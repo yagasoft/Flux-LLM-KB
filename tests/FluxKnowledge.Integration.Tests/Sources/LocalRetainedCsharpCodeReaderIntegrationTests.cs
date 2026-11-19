@@ -549,6 +549,21 @@ public sealed class LocalRetainedCsharpCodeReaderIntegrationTests(NativeSqlServe
                 CancellationToken.None);
             var cursor = Assert.IsType<LocalRetainedCsharpCodeSearchCursor>(first.NextCursor);
 
+            var protector = PrivatePcDataProtectionProviderFactory.CreateProviderForIsolatedTests(Path.Combine(keyRingRoot, "data-protection"), createIfMissing: false)
+                .CreateProtector("FluxKnowledge.LocalRetainedCsharpCodeSearchCursor/v1");
+            using var currentPayload = JsonDocument.Parse(protector.Unprotect(DecodeBase64Url(cursor.Token)));
+            var current = currentPayload.RootElement;
+            var previousPayload = JsonSerializer.SerializeToUtf8Bytes(new
+            {
+                version = 1, queryFingerprint = Convert.ToHexStringLower(SHA256.HashData(Encoding.UTF8.GetBytes(marker))),
+                branchId = current.GetProperty("branchId").GetGuid(), factKind = current.GetProperty("factKind").GetInt32(),
+                ordinal = current.GetProperty("ordinal").GetInt32(), factFingerprint = current.GetProperty("factFingerprint").GetString()
+            });
+            var previousCursor = new LocalRetainedCsharpCodeSearchCursor(EncodeBase64Url(protector.Protect(previousPayload)));
+            var previousContinuation = await reader.SearchPageAsync(new(marker, 256, previousCursor), CancellationToken.None);
+            Assert.Equal(8, previousContinuation.Results.Sum(value => value.References.Count + value.Symbols.Count));
+            await AssertCursorRejectedWithoutRetainedReadAsync(reader, detailReader, "Method", previousCursor);
+
             var tamperedToken = cursor.Token[..^1] + (cursor.Token[^1] == 'A' ? 'B' : 'A');
             await AssertCursorRejectedWithoutRetainedReadAsync(
                 reader,
@@ -645,6 +660,9 @@ public sealed class LocalRetainedCsharpCodeReaderIntegrationTests(NativeSqlServe
             static string CreateNonCanonicalBase64UrlAlias(string canonicalToken)
             {
                 const string alphabet = "ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789-_";
+                // Full triplets have no ignored padding bits. Whitespace is
+                // another decodable alias, which the canonical codec must reject.
+                if (canonicalToken.Length % 4 == 0) return canonicalToken.Insert(1, "    ");
                 var ignoredPaddingBitMask = (canonicalToken.Length % 4) switch
                 {
                     2 => 0b000011,

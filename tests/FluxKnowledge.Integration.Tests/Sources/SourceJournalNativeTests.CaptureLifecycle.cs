@@ -39,7 +39,7 @@ public sealed partial class SourceJournalNativeTests
                 var file = capture.Snapshot;
                 var receipt = await artifacts.PutCapturedFileAsync(capture, new(file.ContentSha256, "application/octet-stream", file.ByteLength), default);
                 using (var before = observations.Open(root, "one.txt")) before.ValidateCurrent();
-                var blob = await artifacts.OpenObservationAsync(receipt.StoreRelativePath, file.ContentSha256, file.ByteLength, true, default);
+                var blob = await artifacts.OpenObservationAsync(receipt.StoreRelativePath, file.ContentSha256, file.ByteLength, default);
                 var seal = await Assert.IsAssignableFrom<IJournalSealableSourceCapture>(capture).SealAsync(default);
                 var after = observations.Open(root, "one.txt");
                 var barrier = await native.QueryAsync(sourcePath, default);

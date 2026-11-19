@@ -122,14 +122,14 @@ public sealed class CorpusRetrievalService(
             if (passagesPerDocument.GetValueOrDefault(documentKey) >= 2) continue;
             if (candidate.Content.Length != candidate.Length || candidate.Length is < 1 or > 2048 ||
                 candidate.StartOffset < 0 ||
-                !string.Equals(Hash(candidate.Content), candidate.ChunkHash, StringComparison.Ordinal))
+                !PassageIntegrityVerifier.Shared.MatchesBody(candidate))
                 continue;
 
             var coherent = options?.CoherentPassagesEnabled == true;
             var searchInput = candidate.ContextHeader.Length == 0
                 ? candidate.Content : candidate.ContextHeader + "\n" + candidate.Content;
             if (coherent && (candidate.PassagePolicyFingerprint.Length != 64 ||
-                !string.Equals(Hash(searchInput), candidate.SearchInputHash, StringComparison.Ordinal))) continue;
+                !PassageIntegrityVerifier.Shared.MatchesSearchInput(candidate))) continue;
             if (disclosure.Evaluate(candidate.ContextHeader, LocalDisclosureKind.CorpusMetadata).Withheld) continue;
             if (coherent && (disclosure.EvaluateCode(searchInput, LocalDisclosureKind.RetainedDetail,
                 candidate.DisclosureProof, candidate.ContextHeader.Length == 0 ? 0 : candidate.ContextHeader.Length + 1).Withheld ||
@@ -248,7 +248,7 @@ public sealed class CorpusRetrievalService(
         var candidate = context.Candidate;
         var citedLocalStart = binding.CitedStart - candidate.StartOffset;
         if (candidate.Length != candidate.Content.Length || candidate.Length is < 1 or > 2048 ||
-            !string.Equals(Hash(candidate.Content), binding.ChunkHash, StringComparison.Ordinal) ||
+            !PassageIntegrityVerifier.Shared.MatchesBody(candidate, binding.ChunkHash) ||
             citedLocalStart < 0 || citedLocalStart + binding.CitedLength > candidate.Length ||
             binding.CitedStart < context.StartOffset ||
             binding.CitedStart + binding.CitedLength > context.StartOffset + context.Text.Length ||

@@ -350,7 +350,7 @@ public sealed partial class SqlDocumentOcrHandoffTests(NativeSqlServerFixture fi
     }
 
     [NativeSqlServerFact]
-    public Task Pause_during_inference_releases_capacity_without_replaying_the_uncertain_document() =>
+    public Task Pause_during_inference_preserves_the_result_and_defers_continuation() =>
         AssertResultStorageFailureReleasesCapacityAsync(pauseSource: true);
 
     [NativeSqlServerFact]
@@ -386,15 +386,19 @@ public sealed partial class SqlDocumentOcrHandoffTests(NativeSqlServerFixture fi
         try
         {
             executor.Release();
-            Assert.NotNull(await Record.ExceptionAsync(() => delivery.WaitAsync(TimeSpan.FromSeconds(10))));
+            var error = await Record.ExceptionAsync(() => delivery.WaitAsync(TimeSpan.FromSeconds(10)));
+            if (pauseSource) Assert.Null(error); else Assert.NotNull(error);
             Assert.Equal((int)GpuCapacitySlotState.Available,
                 await context.GpuCapacitySlots.Select(value => value.State).SingleAsync());
-            Assert.Equal((int)GpuMiniTaskExecutionState.OutcomeUncertain,
+            Assert.Equal((int)(pauseSource ? GpuMiniTaskExecutionState.Completed : GpuMiniTaskExecutionState.OutcomeUncertain),
                 await context.GpuMiniTasks.Where(value => value.Id == handoff.MiniTaskId)
                     .Select(value => value.ExecutionState).SingleAsync());
-            Assert.Equal((int)DocumentOcrRequestState.Pending,
+            Assert.Equal((int)(pauseSource ? DocumentOcrRequestState.ResultStored : DocumentOcrRequestState.Pending),
                 await context.DocumentOcrRequests.Select(value => value.State).SingleAsync());
-            Assert.Null(await store.ReadCompletedAsync(claim, hash, CancellationToken.None));
+            var privateResult = await store.ReadCompletedAsync(claim, hash, CancellationToken.None);
+            if (pauseSource) Assert.True(privateResult!.Succeeded); else Assert.Null(privateResult);
+            Assert.Equal((int)FluxKnowledge.Domain.Jobs.PublicJobState.GpuProcessing,
+                await context.Jobs.Where(value => value.Id == claim.JobId.Value).Select(value => value.PublicState).SingleAsync());
             Assert.Equal(0, signal.Notifications);
         }
         finally
@@ -415,6 +419,12 @@ public sealed partial class SqlDocumentOcrHandoffTests(NativeSqlServerFixture fi
 
         await adapter.DeliverAsync(handle, CancellationToken.None);
         Assert.Equal(1, executor.CallCount);
+        if (pauseSource)
+        {
+            await provider.GetRequiredService<PaddleOcrVlmCompletionCoordinator>().RecoverAsync(default);
+            Assert.True((await store.ReadCompletedAsync(claim, hash, default))!.Succeeded);
+            Assert.Equal(1, executor.CallCount);
+        }
         var (_, nextClaim, nextRevision, nextHash) = await CreateClaimedPdfAsync(clearData: false);
         await store.HandoffAsync(new(nextClaim, nextRevision, nextHash, [0]), CancellationToken.None);
         var nextHandle = await AdmitDocumentOcrTaskAsync(factory);

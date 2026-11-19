@@ -20,7 +20,7 @@ using Xunit;
 
 namespace FluxKnowledge.Integration.Tests.Outlook;
 
-public sealed class OutlookExportIngestionTests(NativeSqlServerFixture fixture) : IClassFixture<NativeSqlServerFixture>
+public sealed partial class OutlookExportIngestionTests(NativeSqlServerFixture fixture) : IClassFixture<NativeSqlServerFixture>
 {
     private static readonly DateTimeOffset Now = DateTimeOffset.Parse("2026-08-11T12:00:00+00:00");
     private const string RequestFingerprint = "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa";
@@ -467,6 +467,93 @@ public sealed class OutlookExportIngestionTests(NativeSqlServerFixture fixture) 
         }
     }
 
+    [NativeSqlServerTheory]
+    [InlineData("verified", "application/pdf")]
+    [InlineData("metadata", "application/pdf")]
+    [InlineData("missing", null)]
+    [InlineData("tampered", null)]
+    public async Task Watched_bundle_reads_owned_retained_bytes_and_only_verified_ready_metadata(
+        string readyManifestState,
+        string? expectedContentType)
+    {
+        var spoolRoot = CreateTemporaryDirectory();
+        var sharedArtifactRoot = CreateTemporaryDirectory();
+        try
+        {
+            var seed = await SeedCaptureAsync(spoolRoot);
+            var otherProfile = await SeedCaptureAsync(spoolRoot);
+            const string body = "  body with existing line endings\r\nمرحبا\n";
+            var prepared = await PrepareExportAsync(spoolRoot, seed, "entry-backfill", Now.AddMinutes(1), body,
+                [("private-first.pdf", "first attachment", "application/pdf"),
+                 ("private-second.docx", "second attachment", "application/vnd.openxmlformats-officedocument.wordprocessingml.document")],
+                recordDisplayMetadata: readyManifestState == "metadata");
+            var receipt = await CreateService(spoolRoot).IngestReadyAsync(prepared.Request, CancellationToken.None);
+            Assert.True(receipt.Accepted);
+
+            string requiredArtifact;
+            await using (var context = CreateContext())
+            {
+                var revisions = await context.SourceRevisions.Where(row => row.SourceRootId == seed.SourceRootId).ToListAsync();
+                foreach (var revision in revisions)
+                    revision.SuppressedAtUtc = Now.AddMinutes(2);
+                await context.SaveChangesAsync();
+                var firstAttachment = revisions.Single(row => row.StableSourceIdentity.EndsWith(":attachment-1", StringComparison.Ordinal));
+                requiredArtifact = await context.SourceArtifacts.Where(row => row.SourceRevisionId == firstAttachment.Id)
+                    .Select(row => row.StoreRelativePath).SingleAsync();
+            }
+
+            File.Delete(Path.Combine(prepared.ReadyDirectory, "body.txt"));
+            File.Delete(Path.Combine(prepared.ReadyDirectory, "private-first.pdf"));
+            var manifestPath = Path.Combine(prepared.ReadyDirectory, "manifest.json");
+            if (readyManifestState == "missing")
+                File.Delete(manifestPath);
+            if (readyManifestState == "tampered")
+            {
+                var original = await File.ReadAllTextAsync(manifestPath);
+                var tampered = original.Replace("entry-backfill", "entry-tampered", StringComparison.Ordinal);
+                Assert.NotEqual(original, tampered);
+                await File.WriteAllTextAsync(manifestPath, tampered, new UTF8Encoding(false));
+            }
+
+            var contextFactory = new ContextFactory(_fixture.ConnectionString);
+            var spoolPolicy = PersistedOutlookSpoolRootPolicy.CreateForIsolatedTests(spoolRoot);
+            using var retainedReader = new SqlRetainedSourceReader(contextFactory, sharedArtifactRoot, spoolPolicy);
+            var reader = new SqlOutlookWatchedBundleReader(contextFactory, retainedReader, spoolPolicy);
+            if (readyManifestState == "tampered")
+            {
+                await Assert.ThrowsAsync<InvalidDataException>(() =>
+                    reader.ReadAsync(seed.ProfileId, prepared.ExportId, CancellationToken.None));
+                return;
+            }
+            var bundle = await reader.ReadAsync(seed.ProfileId, prepared.ExportId, CancellationToken.None);
+
+            Assert.Equal(prepared.ExportId, bundle.ExportId);
+            Assert.Equal(body, bundle.Body);
+            var haveDisplayMetadata = readyManifestState == "metadata";
+            Assert.Equal(haveDisplayMetadata ? "Backfill subject" : null, bundle.Subject);
+            Assert.Equal(haveDisplayMetadata ? "Backfill sender" : null, bundle.Sender);
+            Assert.Equal(haveDisplayMetadata ? Now : (DateTimeOffset?)null, bundle.ReceivedAtUtc);
+            Assert.Equal(2, bundle.Attachments.Count);
+            var first = bundle.Attachments[0];
+            var second = bundle.Attachments[1];
+            Assert.Equal(haveDisplayMetadata ? "original-private-first.pdf" : null, first.FileName);
+            Assert.Equal(expectedContentType, first.ContentType);
+            Assert.Equal("first attachment"u8.ToArray(), (await first.ReadContentAsync(CancellationToken.None)).ToArray());
+            Assert.Equal(haveDisplayMetadata ? "original-private-second.docx" : null, second.FileName);
+            Assert.Equal("second attachment"u8.ToArray(), (await second.ReadContentAsync(CancellationToken.None)).ToArray());
+            await Assert.ThrowsAsync<InvalidDataException>(() =>
+                reader.ReadAsync(otherProfile.ProfileId, prepared.ExportId, CancellationToken.None));
+
+            File.Delete(Path.Combine(spoolRoot, requiredArtifact));
+            await Assert.ThrowsAsync<InvalidDataException>(() => first.ReadContentAsync(CancellationToken.None));
+        }
+        finally
+        {
+            Directory.Delete(sharedArtifactRoot, recursive: true);
+            Directory.Delete(spoolRoot, recursive: true);
+        }
+    }
+
     [NativeSqlServerFact]
     public async Task Hash_mismatch_records_blocked_evidence_without_advancing_cursor()
     {
@@ -802,7 +889,7 @@ public sealed class OutlookExportIngestionTests(NativeSqlServerFixture fixture) 
     }
 
     [NativeSqlServerFact]
-    public async Task Deferred_replay_blocks_before_claim_when_retained_artifact_checksum_is_invalid()
+    public async Task Deferred_replay_blocks_before_claim_when_retained_artifact_length_differs()
     {
         var contentType = $"text/x-flux-deferred-{Guid.NewGuid():N}";
         var requiredCapability = $"outlook-content:{contentType}";
@@ -831,7 +918,8 @@ public sealed class OutlookExportIngestionTests(NativeSqlServerFixture fixture) 
                     .Select(row => row.StoreRelativePath)
                     .SingleAsync();
             }
-            await File.WriteAllTextAsync(Path.Combine(spoolRoot, retainedPath), "tamper data", new UTF8Encoding(false));
+            // Retained replay validates the recorded byte length without rehashing the payload.
+            await File.WriteAllTextAsync(Path.Combine(spoolRoot, retainedPath), "tampered data with a different length", new UTF8Encoding(false));
 
             var capability = new RegisteredSourceCapability(
                 Guid.NewGuid(),
@@ -1437,7 +1525,8 @@ public sealed class OutlookExportIngestionTests(NativeSqlServerFixture fixture) 
         DateTimeOffset cursorUtc,
         string body,
         IReadOnlyList<(string FileName, string Contents, string ContentType)> attachments,
-        string sourceFingerprint = SourceFingerprint)
+        string sourceFingerprint = SourceFingerprint,
+        bool recordDisplayMetadata = false)
     {
         var exportId = Guid.NewGuid();
         var recovery = Recovery(seed, entryId, cursorUtc, sourceFingerprint);
@@ -1448,12 +1537,15 @@ public sealed class OutlookExportIngestionTests(NativeSqlServerFixture fixture) 
         foreach (var attachment in attachments)
         {
             await File.WriteAllTextAsync(Path.Combine(draft, attachment.FileName), attachment.Contents, new UTF8Encoding(false));
-            sidecars.Add(OutlookExportSidecar.Create(attachment.FileName, attachment.ContentType));
+            sidecars.Add(OutlookExportSidecar.Create(attachment.FileName, attachment.ContentType) with
+            {
+                OriginalFileName = recordDisplayMetadata ? $"original-{attachment.FileName}" : null
+            });
         }
-        await layout.WriteManifestAsync(
-            draft,
-            OutlookExportManifest.Create(exportId, "body.txt", sidecars, recovery),
-            CancellationToken.None);
+        var manifest = OutlookExportManifest.Create(exportId, "body.txt", sidecars, recovery);
+        if (recordDisplayMetadata)
+            manifest = manifest with { Subject = "Backfill subject", Sender = "Backfill sender", ReceivedAtUtc = Now };
+        await layout.WriteManifestAsync(draft, manifest, CancellationToken.None);
         var readyDirectory = await layout.PromoteAsync(exportId, CancellationToken.None);
         var manifestHash = await Sha256FileAsync(Path.Combine(readyDirectory, "manifest.json"));
         return new PreparedExport(

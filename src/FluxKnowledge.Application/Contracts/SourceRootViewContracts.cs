@@ -80,6 +80,11 @@ public sealed record SourceFileProjection(
     string? Reason,
     Guid? CorpusPipelineRecordId);
 
+public sealed record SourceScopeProjection(
+    long ConfigurationRevision,
+    IReadOnlyList<string> IncludePatterns,
+    IReadOnlyList<string> ExcludePatterns);
+
 public sealed record SourceRootDetailProjection(
     Guid Id,
     string DisplayName,
@@ -109,6 +114,9 @@ public sealed record SourceRootDetailProjection(
     public SourceDeletionProgressProjection? DeletionProgress { get; init; }
 
     public bool CanReprocessDeferredContent => ReprocessableActivities.Count > 0;
+
+    [System.Text.Json.Serialization.JsonIgnore]
+    public SourceScopeProjection? EditableScope { get; init; }
 
     // Local operator UI only: source filenames must not enter public JSON payloads.
     [System.Text.Json.Serialization.JsonIgnore]

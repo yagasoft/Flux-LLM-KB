@@ -23,9 +23,9 @@ public sealed class NativeV1McpTools
     }
 
     [McpServerTool(Name = "knowledge.search")]
-    [Description("Search retained native knowledge.")]
-    public Task<CallToolResult> KnowledgeSearch(string query, int limit, CancellationToken cancellationToken = default) =>
-        QueryAsync("knowledge.search", new { query, limit }, cancellationToken);
+    [Description("Search retained native knowledge. Supply cwd to search only saved Codex replies in that registered workspace.")]
+    public Task<CallToolResult> KnowledgeSearch(string query, int limit, CancellationToken cancellationToken = default, string? cwd = null) =>
+        QueryAsync("knowledge.search", new { query, limit, cwd }, cancellationToken);
 
     [McpServerTool(Name = "knowledge.graph")]
     [Description("Traverse bounded native knowledge relationships.")]

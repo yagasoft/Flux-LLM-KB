@@ -254,6 +254,7 @@ public sealed class SqlServerProvisioner
                 .Options;
             await using var context = new FluxKnowledgeDbContext(contextOptions);
             await context.Database.MigrateAsync(cancellationToken).ConfigureAwait(false);
+            await SqlSourceDeletionPendingQueueIndex.EnsureAsync(context, cancellationToken).ConfigureAwait(false);
         }
     }
 }

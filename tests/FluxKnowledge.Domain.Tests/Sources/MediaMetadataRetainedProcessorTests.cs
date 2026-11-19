@@ -18,7 +18,7 @@ public sealed class MediaMetadataRetainedProcessorTests
         await using var input = new SparseMovieStream(IsoBmff("isom"), Mp4(2_000).Skip(IsoBmff("isom").Length).ToArray());
         var hash = Convert.ToHexStringLower(SHA256.HashData(input));
         var revision = SourceRevisionId.New();
-        await using var retained = await RetainedSourceReadLease.VerifyAsync(revision, input, hash, input.Length,
+        await using var retained = await RetainedSourceReadLease.OpenAsync(revision, input, hash, input.Length,
             MediaMetadataRetainedProcessor.MaximumRetainedInputBytes, CancellationToken.None);
         Assert.Equal(0, retained.Stream.Position);
         var verificationReadBytes = input.ReadBytes;
@@ -35,13 +35,13 @@ public sealed class MediaMetadataRetainedProcessorTests
     [Theory]
     [InlineData(false)]
     [InlineData(true)]
-    public async Task Streaming_lease_rejects_checksum_mismatch_or_cancellation_and_disposes_the_input(bool cancelled)
+    public async Task Streaming_lease_rejects_length_mismatch_or_cancellation_and_disposes_the_input(bool cancelled)
     {
         var input = new MemoryStream(Png(), writable: false);
         using var cancellation = new CancellationTokenSource();
         if (cancelled) cancellation.Cancel();
-        await Assert.ThrowsAnyAsync<Exception>(() => RetainedSourceReadLease.VerifyAsync(SourceRevisionId.New(), input,
-            new string('0', 64), input.Length, 1024, cancellation.Token).AsTask());
+        await Assert.ThrowsAnyAsync<Exception>(() => RetainedSourceReadLease.OpenAsync(SourceRevisionId.New(), input,
+            new string('0', 64), input.Length + 1, 1024, cancellation.Token).AsTask());
         Assert.False(input.CanRead);
     }
 
@@ -189,6 +189,20 @@ public sealed class MediaMetadataRetainedProcessorTests
         _ = await processor.ProcessAsync(Claim(bytes), Retained(bytes), CancellationToken.None);
 
         Assert.Equal($"{{\"schema\":\"media-metadata-v1\",\"format\":\"{expectedFormat}\",\"container\":\"{expectedFormat}\",\"dimensions\":{{\"width\":43,\"height\":42}},\"duration_ms\":2000,\"audio\":null}}", writer.Text);
+    }
+
+    [Fact]
+    public async Task Process_reuses_the_claimed_parent_identity_without_rehashing_its_body()
+    {
+        var bytes = Png();
+        var parser = new RecordingParser(MediaMetadataParseResult.Png(1, 1));
+        var writer = new RecordingWriter();
+        var processor = new MediaMetadataRetainedProcessor(writer, new AllowingDisclosure(), parser);
+        var identity = new string('a', 64);
+        _ = await processor.ProcessAsync(Claim(bytes, inputSha256: identity),
+            Retained(bytes) with { ContentSha256 = identity }, CancellationToken.None);
+        Assert.Equal(1, parser.ParseCount);
+        Assert.Equal(1, writer.WriteCount);
     }
 
     [Fact]

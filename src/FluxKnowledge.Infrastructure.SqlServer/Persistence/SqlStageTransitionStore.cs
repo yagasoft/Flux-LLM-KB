@@ -12,6 +12,7 @@ using FluxKnowledge.Domain.Pipeline;
 using FluxKnowledge.Domain.Sources;
 using FluxKnowledge.Infrastructure.SqlServer.Persistence.Entities;
 using FluxKnowledge.Infrastructure.SqlServer.Persistence.Configurations;
+using FluxKnowledge.Infrastructure.SqlServer.Search;
 using Microsoft.Data.SqlClient;
 using Microsoft.EntityFrameworkCore;
 
@@ -890,7 +891,7 @@ public sealed partial class SqlStageTransitionStore : IStageTransitionStore
         {
             foreach (var chunk in output.Chunks)
             {
-                context.TextChunks.Add(new TextChunkEntity
+                var entity = new TextChunkEntity
                 {
                     ArtifactId = request.Artifact.Id,
                     SourceRevision = request.CurrentJob.SourceRevision,
@@ -902,7 +903,10 @@ public sealed partial class SqlStageTransitionStore : IStageTransitionStore
                     PassagePolicyFingerprint = chunk.PassagePolicyFingerprint,
                     ContextHeader = chunk.ContextHeader,
                     SearchInputHash = chunk.SearchInputHash
-                });
+                };
+                entity.WindowEligibility = CanonicalWindowEligibility.Bind(entity,
+                    context.Artifacts.Local.Single(value => value.Id == request.Artifact.Id), _timeProvider.GetUtcNow());
+                context.TextChunks.Add(entity);
             }
         }
 

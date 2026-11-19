@@ -499,8 +499,8 @@ public sealed partial class HybridPassageRetrievalEngine(ICorpusRetrievalReader 
 
     private bool Safe(EligiblePassageCandidate passage, ResolvedCorpusScope scope) =>
         passage.ChunkId > 0 && passage.CorpusEpoch != Guid.Empty && passage.Length is >= 1 and <= 1024 &&
-        passage.Content.Length == passage.Length && passage.StartOffset >= 0 && Hash(passage.Content) == passage.ChunkHash &&
-        passage.PassagePolicyFingerprint.Length == 64 && Hash(SearchText(passage)) == passage.SearchInputHash &&
+        passage.Content.Length == passage.Length && passage.StartOffset >= 0 && PassageIntegrityVerifier.Shared.MatchesBody(passage) &&
+        passage.PassagePolicyFingerprint.Length == 64 && PassageIntegrityVerifier.Shared.MatchesSearchInput(passage) &&
         (scope.Kind == "all" || passage.RootId.HasValue && scope.RootIds.Contains(passage.RootId.Value)) &&
         (scope.Kind != "workspace" || scope.CanonicalCwd is { } cwd &&
             (passage.SourceIdentity.Equals(cwd, StringComparison.OrdinalIgnoreCase) ||

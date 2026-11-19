@@ -7,6 +7,7 @@ using FluxKnowledge.Application.Gpu;
 using FluxKnowledge.Application.Indexing;
 using FluxKnowledge.Application.IntegrationV1;
 using FluxKnowledge.Application.Ports;
+using FluxKnowledge.Application.Pipeline;
 using FluxKnowledge.Application.Visibility;
 using FluxKnowledge.Domain.Gpu;
 using FluxKnowledge.Domain.Pipeline;
@@ -170,5 +171,44 @@ public sealed partial class EmbeddingRetryTests
         Assert.Equal(16, next.Chunks.Count);
         Assert.True(timer.Elapsed < TimeSpan.FromMinutes(1));
         Assert.True(nextWork.DispatchMessage.LeaseExpiresAtUtc > DateTimeOffset.UtcNow.AddMinutes(1));
+        // A fresh store and DbContexts model a restart: settled results already
+        // validated by the previous quantum must not reread historical vectors.
+        var resumedReads = new RecoveryReadCounter();
+        var resumedFactory = new RecoveryContextFactory(fixture.ConnectionString, resumedReads);
+        var resumedStore = new SqlEmbeddingCheckpointStore(resumedFactory, TimeProvider.System, Runtime,
+            new FixtureSourceAdmission(resumedFactory));
+        var resumed = await resumedStore.ReadNextAsync(nextWork, Profile, default);
+        Assert.Equal(next.Chunks.Select(chunk => chunk.Id), resumed.Chunks.Select(chunk => chunk.Id));
+        Assert.Equal(0, resumedReads.VectorPayloadReaders);
+        await using var proofCheck = environment.Factory.CreateDbContext();
+        Assert.Equal(groups, await proofCheck.GpuSchedulerOperationReceipts.CountAsync(receipt =>
+            receipt.OperationKind == "embedding-checkpoint-validation/v1"));
+        if (groups == 437)
+        {
+            var vector = await proofCheck.Vectors.AsNoTracking().OrderBy(value => value.VectorId)
+                .FirstAsync(value => value.IndexGenerationId == first.GenerationId);
+            await proofCheck.Vectors.Where(value => value.VectorId == vector.VectorId)
+                .ExecuteUpdateAsync(update => update.SetProperty(value => value.PayloadChecksum, new string('0', 64)));
+            await Assert.ThrowsAsync<RepositorySourceDeferredException>(() => resumedStore.ReadNextAsync(nextWork, Profile, default).AsTask());
+            Assert.Equal(groups, await proofCheck.GpuSchedulerOperationReceipts.CountAsync(receipt =>
+                receipt.OperationKind == "embedding-checkpoint-validation/v1"));
+            await proofCheck.Vectors.Where(value => value.VectorId == vector.VectorId)
+                .ExecuteUpdateAsync(update => update.SetProperty(value => value.PayloadChecksum, vector.PayloadChecksum));
+            var changedReads = new RecoveryReadCounter();
+            var changedFactory = new RecoveryContextFactory(fixture.ConnectionString, changedReads);
+            var changedStore = new SqlEmbeddingCheckpointStore(changedFactory, TimeProvider.System, Runtime,
+                new FixtureSourceAdmission(changedFactory));
+            _ = await changedStore.ReadNextAsync(nextWork, Profile, default);
+            Assert.Equal(1, changedReads.VectorPayloadReaders); // Only the changed group is reread.
+            var request = await proofCheck.EmbeddingGpuRequests.AsNoTracking()
+                .FirstAsync(value => value.ParentJobId == nextWork.Job.JobId.Value && value.ResultDigest != null);
+            var reordered = JsonSerializer.Serialize(JsonSerializer.Deserialize<LegacyGpuInput[]>(request.InputsJson)!.Reverse());
+            await proofCheck.EmbeddingGpuRequests.Where(value => value.MiniTaskId == request.MiniTaskId)
+                .ExecuteUpdateAsync(update => update.SetProperty(value => value.InputsJson, reordered)
+                    .SetProperty(value => value.InputDigest, CodeDisclosureIntegrity.Hash(reordered)));
+            await Assert.ThrowsAsync<RepositorySourceDeferredException>(() => changedStore.ReadNextAsync(nextWork, Profile, default).AsTask());
+            Assert.Equal(groups + 1, await proofCheck.GpuSchedulerOperationReceipts.CountAsync(receipt =>
+                receipt.OperationKind == "embedding-checkpoint-validation/v1"));
+        }
     }
 }

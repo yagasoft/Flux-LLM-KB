@@ -15,6 +15,30 @@ public sealed class UsearchSegmentBuilderTests : IDisposable
     private readonly string _root = Path.Combine(Path.GetTempPath(), "FluxKnowledgeSegments_" + Guid.NewGuid().ToString("N"));
 
     [Fact]
+    public async Task Cold_segment_open_uses_local_shape_without_verifying_a_file_checksum()
+    {
+        var segment = Assert.Single(await Builder(2).BuildAsync("synthetic-segment-profile", 4,
+            Stream([Vector(1), Vector(2)]), default));
+        var owners = new ConstructionOwners();
+        await using (var cache = new UsearchSegmentCache(UsearchIndexOptions.FromConfiguredRoot(_root),
+            new WindowsIndexSegmentReadLeaseFactory(_root), owners, TimeProvider.System))
+        {
+            await using var borrowed = await cache.BorrowAsync(segment with { FileChecksum = new string('f', 64) }, default);
+            Assert.Equal(2, (await borrowed.SearchAsync([1, 2, 3, 4], 2, new HashSet<long> { 1, 2 }, default)).Count);
+        }
+        Assert.Equal(1, owners.Opened);
+        Assert.Equal(1, owners.Released);
+    }
+
+    [Fact]
+    public async Task New_segments_do_not_compute_a_native_file_checksum()
+    {
+        var segment = Assert.Single(await Builder(2).BuildAsync("synthetic-segment-profile", 4,
+            Stream([Vector(1), Vector(2)]), default));
+        Assert.Equal(new string('0', 64), segment.FileChecksum);
+    }
+
+    [Fact]
     public async Task Construction_policy_has_distinct_resumable_identity_without_replacing_legacy_graphs()
     {
         var vectors = new[] { Vector(1), Vector(2) };
@@ -24,7 +48,6 @@ public sealed class UsearchSegmentBuilderTests : IDisposable
         var stronger = Assert.Single(await builder.BuildAsync("synthetic-segment-profile", 4, Stream(vectors), default));
         Assert.NotEqual(legacy.Id, stronger.Id);
         Assert.NotEqual(legacy.NativeFormat, stronger.NativeFormat);
-        Assert.NotEqual(legacy.FileChecksum, stronger.FileChecksum);
         Assert.Equal(legacy.MembershipChecksum, stronger.MembershipChecksum);
         Assert.Equal(UsearchSegmentBuilder.NativeFormat, legacy.NativeFormat);
         var timestamp = File.GetLastWriteTimeUtc(Path.Combine(stronger.DirectoryPath, "index.usearch"));
@@ -165,6 +188,63 @@ public sealed class UsearchSegmentBuilderTests : IDisposable
     }
 
     [Theory]
+    [InlineData(false)]
+    [InlineData(true)]
+    public async Task Retired_segment_deletion_preserves_replacements_and_newly_appeared_children(bool initiallyAbsent)
+    {
+        var segment = Assert.Single(await Builder(2).BuildAsync("synthetic-segment-profile", 4, Stream([Vector(1)]), CancellationToken.None));
+        var path = Path.Combine(segment.DirectoryPath, "index.usearch");
+        var bytes = await File.ReadAllBytesAsync(path);
+        if (initiallyAbsent) File.Delete(path);
+        var files = new WindowsIndexProjectionFileStore(_root)
+        {
+            BeforeUnlink = () =>
+            {
+                if (!initiallyAbsent) File.Move(path, Path.Combine(_root, "replaced-index.held"));
+                File.WriteAllBytes(path, bytes);
+            }
+        };
+        await Assert.ThrowsAsync<InvalidDataException>(() => files.DeleteSegmentAsync(segment, default).AsTask());
+        Assert.Equal(bytes, await File.ReadAllBytesAsync(path));
+        Assert.True(File.Exists(Path.Combine(segment.DirectoryPath, "metadata.json")));
+        // A fresh store models a new process retrying the same durable SQL intent.
+        await Assert.ThrowsAsync<InvalidDataException>(() => new WindowsIndexProjectionFileStore(_root)
+            .DeleteSegmentAsync(segment, default).AsTask());
+        Assert.Equal(bytes, await File.ReadAllBytesAsync(path));
+    }
+
+    [Theory]
+    [InlineData(false)]
+    [InlineData(true)]
+    public async Task Retired_segment_deletion_resumes_an_interrupted_intent_with_a_fresh_store(bool firstChildGone)
+    {
+        var segment = Assert.Single(await Builder(2).BuildAsync("synthetic-segment-profile", 4, Stream([Vector(1)]), CancellationToken.None));
+        var files = new WindowsIndexProjectionFileStore(_root) { BeforeUnlink = () =>
+        {
+            if (firstChildGone) File.Delete(Path.Combine(segment.DirectoryPath, "index.usearch"));
+            throw new IOException("interrupted-before-unlink");
+        } };
+        await Assert.ThrowsAsync<IOException>(() => files.DeleteSegmentAsync(segment, default).AsTask());
+        Assert.Equal(!firstChildGone, File.Exists(Path.Combine(segment.DirectoryPath, "index.usearch")));
+        await new WindowsIndexProjectionFileStore(_root).DeleteSegmentAsync(segment, default);
+        Assert.False(Directory.Exists(segment.DirectoryPath));
+    }
+
+    [Theory]
+    [InlineData("")]
+    [InlineData("{")]
+    [InlineData("{\"Version\":9}")]
+    public async Task Retired_segment_deletion_refuses_incomplete_or_unrecognised_intents_without_unlinking_payloads(string content)
+    {
+        var segment = Assert.Single(await Builder(2).BuildAsync("synthetic-segment-profile", 4, Stream([Vector(1)]), CancellationToken.None));
+        await File.WriteAllTextAsync(Path.Combine(segment.DirectoryPath, ".retirement-intent.json"), content);
+        await Assert.ThrowsAsync<InvalidDataException>(() => new WindowsIndexProjectionFileStore(_root)
+            .DeleteSegmentAsync(segment, default).AsTask());
+        Assert.True(File.Exists(Path.Combine(segment.DirectoryPath, "index.usearch")));
+        Assert.True(File.Exists(Path.Combine(segment.DirectoryPath, "metadata.json")));
+    }
+
+    [Theory]
     [InlineData("tampered")]
     [InlineData("foreign-child")]
     [InlineData("escape")]
@@ -198,7 +278,7 @@ public sealed class UsearchSegmentBuilderTests : IDisposable
         {
             var path = Path.Combine(segment.DirectoryPath, "index.usearch");
             Assert.Equal(timestamps[segment.Id], File.GetLastWriteTimeUtc(path));
-            Assert.Equal(segment.FileChecksum, Convert.ToHexStringLower(SHA256.HashData(File.ReadAllBytes(path))));
+            Assert.Equal(IndexSegmentDescriptor.UncheckedFileChecksum, segment.FileChecksum);
             using var held = new WindowsIndexSegmentReadLeaseFactory(_root).Acquire(segment.DirectoryPath);
             using var native = new USearchIndex(path, false);
             Assert.Equal((ulong)segment.VectorCount, native.Size());
@@ -239,7 +319,6 @@ public sealed class UsearchSegmentBuilderTests : IDisposable
     [Theory]
     [InlineData("profile")]
     [InlineData("dimensions")]
-    [InlineData("checksum")]
     [InlineData("nonfinite")]
     [InlineData("zero")]
     [InlineData("duplicate")]
@@ -251,7 +330,6 @@ public sealed class UsearchSegmentBuilderTests : IDisposable
         {
             "profile" => vectors[1] with { ModelFingerprint = "other" },
             "dimensions" => vectors[1] with { Dimensions = 3 },
-            "checksum" => vectors[1] with { PayloadChecksum = new string('0', 64) },
             "nonfinite" => Vector(2, float.NaN),
             "zero" => Vector(2, 0),
             "duplicate" => Vector(1),

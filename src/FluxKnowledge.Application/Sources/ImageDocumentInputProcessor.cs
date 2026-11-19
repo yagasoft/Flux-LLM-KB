@@ -36,8 +36,8 @@ public sealed class ImageDocumentInputProcessor : ILocalSourceCapabilityHandler
     {
         _ = options;
         cancellationToken.ThrowIfCancellationRequested();
-        if (!string.Equals(retained.ContentSha256, claim.InputSha256, StringComparison.Ordinal) ||
-            !string.Equals(Convert.ToHexStringLower(SHA256.HashData(retained.Bytes)), claim.InputSha256, StringComparison.Ordinal))
+        if (retained.SourceRevisionId != claim.SourceRevisionId || retained.ByteLength != retained.Bytes.LongLength ||
+            !string.Equals(retained.ContentSha256, claim.InputSha256, StringComparison.Ordinal))
             throw new RetainedProcessorException("retained-artifact-checksum-invalid");
         if (retained.ByteLength > MaximumInputBytes)
             throw new RetainedProcessorException("image-document-input-too-large");

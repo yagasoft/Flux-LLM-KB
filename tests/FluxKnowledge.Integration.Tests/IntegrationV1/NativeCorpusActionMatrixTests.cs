@@ -39,6 +39,95 @@ public sealed class NativeCorpusActionMatrixTests(NativeSqlServerFixture fixture
         Assert.Empty(await db.SourceScanRequests.Where(value => value.SourceRootId == rootId).ToArrayAsync());
     }
 
+    [NativeSqlServerFact]
+    public async Task Source_scope_update_saves_rules_and_queues_one_reconciliation()
+    {
+        var rootId = await SeedRootAsync();
+        var service = CreateService();
+        var mutation = Mutation("root_update", new
+        {
+            rootId, expectedConfigurationRevision = 1,
+            includePatterns = new[] { "**/*.md", "*.md" },
+            excludePatterns = new[] { ".*/**", "**/.*/**" }
+        });
+        var preview = await service.PreviewAsync(mutation, "test", CancellationToken.None);
+        var accepted = await service.CommitAsync(mutation, preview.ConfirmationId, "scope-update", "test", CancellationToken.None);
+        var replay = await service.CommitAsync(mutation, preview.ConfirmationId, "scope-update", "test", CancellationToken.None);
+
+        Assert.Equal(accepted.OperationId, replay.OperationId);
+        Assert.True(replay.WasReplay);
+        await using var db = await SqlTestData.CreateFactory(_fixture).CreateDbContextAsync();
+        var root = await db.SourceRootConfigurations.AsNoTracking().SingleAsync(value => value.Id == rootId);
+        Assert.Equal(2, root.ConfigurationRevision);
+        Assert.Equal("Root", root.DisplayName);
+        Assert.Equal(new[] { "**/*.md", "*.md" }, JsonSerializer.Deserialize<string[]>(root.IncludePatternsJson));
+        var exclusions = Assert.IsType<string[]>(JsonSerializer.Deserialize<string[]>(root.ExcludePatternsJson));
+        Assert.False(LocalSourceEnumerator.MatchesPolicy(".claude/rules.md", ["*.md", "**/*.md"], exclusions));
+        Assert.False(LocalSourceEnumerator.MatchesPolicy("docs/.history/rules.md", ["*.md", "**/*.md"], exclusions));
+        Assert.True(LocalSourceEnumerator.MatchesPolicy("docs/.notes.md", ["*.md", "**/*.md"], exclusions));
+
+        var request = await db.SourceScanRequests.SingleAsync(value => value.SourceRootId == rootId);
+        Assert.Equal(1, request.RequestKind);
+        Assert.Equal((int)SourceScanRequestState.Released, request.State);
+        Assert.True(request.IsReleased);
+        Assert.Single(await db.SourceScanJobs.Where(value => value.SourceScanRequestId == request.Id).ToArrayAsync());
+        Assert.Single(await db.SourceScanOutbox.Where(value => value.SourceScanRequestId == request.Id).ToArrayAsync());
+        using var healthEvidence = JsonDocument.Parse(root.HealthEvidenceJson!);
+        using var requestEvidence = JsonDocument.Parse(request.AuditEvidenceJson!);
+        Assert.Equal(new string('a', 64), healthEvidence.RootElement.GetProperty("physicalIdentity").GetProperty("identityFingerprint").GetString());
+        Assert.Equal(healthEvidence.RootElement.GetProperty("configurationFingerprint").GetString(),
+            requestEvidence.RootElement.GetProperty("configurationFingerprint").GetString());
+
+        var clear = Mutation("root_update", new { rootId, displayName = "Root", expectedConfigurationRevision = 2, excludePatterns = Array.Empty<string>() });
+        var clearPreview = await service.PreviewAsync(clear, "test", CancellationToken.None);
+        await service.CommitAsync(clear, clearPreview.ConfirmationId, "scope-clear", "test", CancellationToken.None);
+
+        var cleared = await db.SourceRootConfigurations.AsNoTracking().SingleAsync(value => value.Id == rootId);
+        Assert.Equal(3, cleared.ConfigurationRevision);
+        Assert.Equal(root.IncludePatternsJson, cleared.IncludePatternsJson);
+        Assert.Equal("[]", cleared.ExcludePatternsJson);
+        Assert.Single(await db.SourceScanRequests.Where(value => value.SourceRootId == rootId).ToArrayAsync());
+    }
+
+    [NativeSqlServerFact]
+    public async Task Source_scope_update_refuses_git_tracked_roots()
+    {
+        var rootId = await SeedRootAsync();
+        await using var db = await SqlTestData.CreateFactory(_fixture).CreateDbContextAsync();
+        var root = await db.SourceRootConfigurations.SingleAsync(value => value.Id == rootId);
+        root.CrawlMode = (int)SourceDiscoveryMode.GitTracked;
+        await db.SaveChangesAsync();
+
+        var service = CreateService();
+        var mutation = Mutation("root_update", new { rootId, excludePatterns = new[] { "tmp/**" } });
+        await AssertReasonAsync("source-rules-unsupported", () => service.PreviewAsync(mutation, "test", CancellationToken.None).AsTask());
+        await CommitAsync(service, "root_update", new { rootId, displayName = "Renamed repository", reconcile = false }, "git-rename");
+
+        var updated = await db.SourceRootConfigurations.AsNoTracking().SingleAsync(value => value.Id == rootId);
+        Assert.Equal("Renamed repository", updated.DisplayName);
+        Assert.Equal("[]", updated.ExcludePatternsJson);
+        Assert.Empty(await db.SourceScanRequests.Where(value => value.SourceRootId == rootId).ToArrayAsync());
+    }
+
+    [NativeSqlServerFact]
+    public async Task Source_scope_update_refuses_stale_edit_and_scan_opt_out()
+    {
+        var rootId = await SeedRootAsync();
+        var service = CreateService();
+        var withoutScan = Mutation("root_update", new { rootId, displayName = "Root", excludePatterns = new[] { "tmp/**" }, reconcile = false });
+        await AssertReasonAsync("invalid-payload", () => service.PreviewAsync(withoutScan, "test", CancellationToken.None).AsTask());
+
+        await CommitAsync(service, "root_update", new { rootId, displayName = "Current name", reconcile = false }, "rename");
+        var stale = Mutation("root_update", new { rootId, displayName = "Root", expectedConfigurationRevision = 1, excludePatterns = new[] { "tmp/**" } });
+        await AssertReasonAsync("operation-fenced", () => service.PreviewAsync(stale, "test", CancellationToken.None).AsTask());
+
+        await using var db = await SqlTestData.CreateFactory(_fixture).CreateDbContextAsync();
+        var root = await db.SourceRootConfigurations.SingleAsync(value => value.Id == rootId);
+        Assert.Equal("Current name", root.DisplayName);
+        Assert.Equal("[]", root.ExcludePatternsJson);
+        Assert.Empty(await db.SourceScanRequests.Where(value => value.SourceRootId == rootId).ToArrayAsync());
+    }
+
     [NativeSqlServerTheory]
     [InlineData("root_update")]
     [InlineData("root_disable")]
@@ -347,6 +436,76 @@ public sealed class NativeCorpusActionMatrixTests(NativeSqlServerFixture fixture
         await using var verification = await SqlTestData.CreateFactory(_fixture).CreateDbContextAsync();
         Assert.Equal((int)SourceRootState.Enabled, (await verification.SourceRootConfigurations.SingleAsync(value => value.Id == root)).State);
         Assert.False(await verification.SourceDeletionOperations.AnyAsync(value => value.SourceRootId == root));
+    }
+
+    [NativeSqlServerFact]
+    public async Task Watched_source_reservations_cover_registration_deletion_and_safe_edits()
+    {
+        var captureId = await SeedRootAsync();
+        var watched = Root(Guid.NewGuid());
+        var stage = watched.CanonicalPath + "-staging";
+        var service = CreateService();
+        await using var db = await SqlTestData.CreateFactory(_fixture).CreateDbContextAsync();
+        db.SourceRootConfigurations.Add(watched);
+        await db.SaveChangesAsync();
+        var deletion = Mutation("root_delete", new { rootId = watched.Id });
+        var deletePreview = await service.PreviewAsync(deletion, "test", default);
+        var registration = Mutation("root_create", new { path = Path.Combine(stage, "partial"), displayName = "Staging" });
+        var registerPreview = await service.PreviewAsync(registration, "test", default);
+        // Bind owns the publication fence before reading its source and reserving staging.
+        // A concurrent dashboard registration must see the committed reservation.
+        var entered = new TaskCompletionSource(TaskCreationOptions.RunContinuationsAsynchronously);
+        var direct = new SqlSourceRootStore(SqlTestData.CreateFactory(_fixture), TimeProvider.System, lockObserver: (_, _) =>
+        {
+            entered.TrySetResult();
+            return Task.CompletedTask;
+        });
+        await using var binding = await db.Database.BeginTransactionAsync();
+        await SqlPublishedPassageSelection.AcquireFenceAsync(db, default);
+        var concurrent = direct.CreateAsync(new SourceRootCreateRequest(stage, "Concurrent", true, [], [], false,
+            1024, [], SourcePolicyDefaults.MetadataReconciliationCadence, "test"), ScanStartIntent.SaveOnly, default).AsTask();
+        await entered.Task.WaitAsync(TimeSpan.FromSeconds(20));
+        await Assert.ThrowsAsync<TimeoutException>(() => concurrent.WaitAsync(TimeSpan.FromMilliseconds(200)));
+        db.OutlookCaptureProfiles.Add(new()
+        {
+            Id = Guid.NewGuid(), SourceRootId = captureId, WatchedSourceRootId = watched.Id,
+            WatchedRootPath = watched.CanonicalPath, WatchedStagingPath = stage,
+            DisplayName = "Bound capture", SpoolRoot = @"C:\outlook-spool",
+            ConfigurationRevision = 1, CreatedAtUtc = Now, UpdatedAtUtc = Now
+        });
+        await db.SaveChangesAsync();
+        await binding.CommitAsync();
+        await AssertReasonAsync("outlook-export-path-reserved", () => concurrent);
+
+        await AssertReasonAsync("outlook-source-delete-unsupported", () =>
+            service.PreviewAsync(deletion, "test", default).AsTask());
+        await AssertReasonAsync("outlook-source-delete-unsupported", () =>
+            service.CommitAsync(deletion, deletePreview.ConfirmationId, "reserved-delete", "test", default).AsTask());
+        await AssertReasonAsync("outlook-export-path-reserved", () =>
+            service.CommitAsync(registration, registerPreview.ConfirmationId, "reserved-create", "test", default).AsTask());
+        foreach (var path in new[] { stage, Path.Combine(watched.CanonicalPath, "nested"), Path.GetDirectoryName(stage)! })
+        {
+            await AssertReasonAsync("outlook-export-path-reserved", () =>
+                service.PreviewAsync(Mutation("root_create", new { path, displayName = "Overlap" }), "test", default).AsTask());
+            await AssertReasonAsync("outlook-export-path-reserved", () => direct.CreateAsync(
+                new SourceRootCreateRequest(path, "Overlap", true, [], [], false, 1024, [], SourcePolicyDefaults.MetadataReconciliationCadence, "test"),
+                ScanStartIntent.SaveOnly, default).AsTask());
+        }
+        await CommitAsync(service, "root_create", new { path = stage + "-other", displayName = "Sibling" }, "reserved-sibling");
+        await CommitAsync(service, "root_update", new { rootId = watched.Id, displayName = "Renamed", reconcile = false }, "reserved-edit");
+        await db.Entry(watched).ReloadAsync();
+        Assert.Equal("Renamed", watched.DisplayName);
+        Assert.Equal((int)SourceRootState.Enabled, watched.State);
+        Assert.False(await db.SourceDeletionOperations.AnyAsync(row => row.SourceRootId == watched.Id));
+        var profile = await db.OutlookCaptureProfiles.SingleAsync(row => row.WatchedSourceRootId == watched.Id);
+        profile.WatchedPublicationSuspendedAtUtc = Now;
+        watched.State = (int)SourceRootState.Paused;
+        await db.SaveChangesAsync();
+        await AssertReasonAsync("outlook-watched-source-suspended", () =>
+            CommitAsync(service, "root_resume", new { rootId = watched.Id }, "suspended-resume"));
+        await AssertReasonAsync("outlook-watched-source-suspended", () =>
+            CommitAsync(service, "watcher_set", new { rootId = watched.Id, enabled = true }, "suspended-watch"));
+        await AssertReasonAsync("outlook-export-path-reserved", () => service.PreviewAsync(registration, "test", default).AsTask());
     }
 
     [NativeSqlServerTheory]

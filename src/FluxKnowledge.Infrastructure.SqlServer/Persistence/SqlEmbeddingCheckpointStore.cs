@@ -27,7 +27,8 @@ public sealed class SqlEmbeddingCheckpointStore(
             await SqlCorpusRebuildStore.ValidateMaintenanceJobAsync(context, work.Job.JobId.Value, cancellationToken, profile).ConfigureAwait(false);
             await ValidateClaimAsync(context, work, timeProvider.GetUtcNow(), cancellationToken, sourceAdmission).ConfigureAwait(false);
             var checkpointJob = await context.Jobs.SingleAsync(value => value.Id == work.Job.JobId.Value, cancellationToken).ConfigureAwait(false);
-            var refusal = await SqlRepositoryWorkRecovery.CheckCheckpointAsync(context, checkpointJob, embeddingRuntime, cancellationToken, profile).ConfigureAwait(false);
+            var refusal = await SqlRepositoryWorkRecovery.CheckCheckpointAsync(context, checkpointJob, embeddingRuntime, cancellationToken, profile,
+                issueCheckpointReceipts: true).ConfigureAwait(false);
             if (refusal is not null) throw new RepositorySourceDeferredException(refusal);
             var state = await context.IndexState.SingleAsync(value => value.Id == 1, cancellationToken).ConfigureAwait(false);
             var draft = await context.IndexGenerations.SingleOrDefaultAsync(value => value.EmbeddingJobId == work.Job.JobId.Value, cancellationToken).ConfigureAwait(false);
@@ -129,6 +130,8 @@ public sealed class SqlEmbeddingCheckpointStore(
             await using var transaction = await context.Database.BeginTransactionAsync(IsolationLevel.Serializable, cancellationToken).ConfigureAwait(false);
             await SqlPublishedPassageSelection.AcquireFenceAsync(context, cancellationToken).ConfigureAwait(false);
             var result = await operation(context).ConfigureAwait(false);
+            if (context.ChangeTracker.HasChanges())
+                await context.SaveChangesAsync(cancellationToken).ConfigureAwait(false);
             await transaction.CommitAsync(cancellationToken).ConfigureAwait(false);
             return result;
         }).ConfigureAwait(false);

@@ -42,15 +42,36 @@ public sealed class McpEndpointRegistrationTests : IClassFixture<McpEndpointRegi
             IPAddress.Loopback);
         Assert.Equal(StatusCodes.Status200OK, discovery.Response.StatusCode);
         using var document = JsonDocument.Parse(ReadJsonRpcPayload(await ReadResponseBodyAsync(discovery)));
-        var names = document.RootElement.GetProperty("result").GetProperty("tools")
-            .EnumerateArray()
-            .Select(tool => tool.GetProperty("name").GetString()!)
+        var tools = document.RootElement.GetProperty("result").GetProperty("tools").EnumerateArray().ToArray();
+        var names = tools.Select(tool => tool.GetProperty("name").GetString()!)
             .OrderBy(name => name, StringComparer.Ordinal)
             .ToArray();
 
         Assert.Equal(
             ["code.query", "code.write", "corpus.query", "corpus.read", "corpus.search", "corpus.write", "knowledge.graph", "knowledge.search", "knowledge.write", "operations.audit", "operations.status"],
             names);
+        var knowledgeSearch = Assert.Single(tools, tool => tool.GetProperty("name").GetString() == "knowledge.search");
+        var schema = knowledgeSearch.GetProperty("inputSchema");
+        Assert.True(schema.GetProperty("properties").TryGetProperty("cwd", out _));
+        Assert.DoesNotContain(schema.GetProperty("required").EnumerateArray(), property => property.GetString() == "cwd");
+    }
+
+    [Fact]
+    public async Task Direct_loopback_MCP_dispatch_preserves_the_optional_knowledge_workspace()
+    {
+        const string cwd = @"C:\example workspace\docs";
+        var response = await SendMcpRequestAsync(_factory, new
+        {
+            jsonrpc = "2.0",
+            id = 6,
+            method = "tools/call",
+            @params = new { name = "knowledge.search", arguments = new { query = "needle", limit = 3, cwd } }
+        }, IPAddress.Loopback);
+
+        Assert.Equal(StatusCodes.Status200OK, response.Response.StatusCode);
+        var envelope = ReadToolEnvelope(response);
+        Assert.True(envelope.GetProperty("ok").GetBoolean());
+        Assert.Equal(cwd, envelope.GetProperty("result").GetProperty("cwd").GetString());
     }
 
     [Fact]
@@ -359,6 +380,8 @@ public sealed class McpEndpointRegistrationTests : IClassFixture<McpEndpointRegi
         public ValueTask<object> ExecuteQueryAsync(string family, object request, CancellationToken cancellationToken)
         {
             if (request is NativeCodeQuery { Cursor: not null }) throw new NativeOperationException("cursor-invalid");
+            if (request is NativeKnowledgeQuery { Cwd: not null } knowledge)
+                return ValueTask.FromResult<object>(new { family, cwd = knowledge.Cwd });
             return ValueTask.FromResult<object>(new { family });
         }
 

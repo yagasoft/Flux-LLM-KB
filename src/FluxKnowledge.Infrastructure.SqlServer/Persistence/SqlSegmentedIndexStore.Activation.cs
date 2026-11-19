@@ -4,6 +4,7 @@ using FluxKnowledge.Application.Pipeline;
 using FluxKnowledge.Application.Ports;
 using FluxKnowledge.Infrastructure.SqlServer.Persistence.Entities;
 using Microsoft.EntityFrameworkCore;
+using Microsoft.Data.SqlClient;
 
 namespace FluxKnowledge.Infrastructure.SqlServer.Persistence;
 
@@ -44,16 +45,52 @@ public sealed partial class SqlSegmentedIndexStore
 
     public async ValueTask<SegmentedProjectionState> ReadProjectionAsync(CancellationToken cancellationToken)
     {
-        await using var context = await contexts.CreateDbContextAsync(cancellationToken);
-        var state = await context.IndexState.AsNoTracking().SingleAsync(value => value.Id == 1, cancellationToken);
-        var generation = await context.IndexGenerations.AsNoTracking().SingleOrDefaultAsync(value => value.Id == state.ActiveIndexGenerationId, cancellationToken);
-        if (state.ActiveIndexGenerationId is not null && (generation is null || generation.FormatVersion != 2 || generation.RetiredAtUtc is not null))
-            throw new InvalidOperationException("active-segmented-manifest-invalid");
-        var empty = state.ActiveIndexGenerationId is null && state.EmptyCatalogueValidatedAtUtc is not null &&
-            !await context.Vectors.AnyAsync(cancellationToken) && !await context.IndexGenerations.AnyAsync(cancellationToken) &&
-            !await context.CurrentIndexMembers.AnyAsync(cancellationToken);
-        return new(new(state.CorpusEpoch, state.CorpusVersion), generation is null ? null : Describe(generation), state.CorpusRebuildOperationId is not null, empty);
+        await using var strategyContext = await contexts.CreateDbContextAsync(cancellationToken);
+        return await strategyContext.Database.CreateExecutionStrategy().ExecuteAsync(async () =>
+        {
+            await using var context = await contexts.CreateDbContextAsync(cancellationToken);
+            await using var transaction = await context.Database.BeginTransactionAsync(IsolationLevel.Serializable, cancellationToken);
+            // Capture state and generation together. A publisher can retire the old
+            // generation as soon as this short metadata transaction has finished.
+            await AcquireProjectionReadOwnershipAsync(context, cancellationToken);
+            await SqlPublishedPassageSelection.AcquireFenceAsync(context, cancellationToken);
+            var state = await context.IndexState.AsNoTracking().SingleAsync(value => value.Id == 1, cancellationToken);
+            var generation = await context.IndexGenerations.AsNoTracking().SingleOrDefaultAsync(value => value.Id == state.ActiveIndexGenerationId, cancellationToken);
+            if (state.ActiveIndexGenerationId is not null && (generation is null || generation.FormatVersion != 2 || generation.RetiredAtUtc is not null))
+                throw new InvalidOperationException("active-segmented-manifest-invalid");
+            var empty = state.ActiveIndexGenerationId is null && state.EmptyCatalogueValidatedAtUtc is not null &&
+                !await context.Vectors.AnyAsync(cancellationToken) && !await context.IndexGenerations.AnyAsync(cancellationToken) &&
+                !await context.CurrentIndexMembers.AnyAsync(cancellationToken);
+            await transaction.CommitAsync(cancellationToken);
+            return new SegmentedProjectionState(new(state.CorpusEpoch, state.CorpusVersion), generation is null ? null : Describe(generation), state.CorpusRebuildOperationId is not null, empty);
+        });
     }
+
+    private static async Task AcquireProjectionReadOwnershipAsync(FluxKnowledgeDbContext context, CancellationToken token)
+    {
+        int result;
+        try
+        {
+            var results = await context.Database.SqlQuery<int>($"""
+                -- segmented-projection-read-ownership
+                DECLARE @result int;
+                EXEC @result = sp_getapplock @Resource = {SqlDerivedIndexRecoveryStore.LockResource},
+                    @LockMode = 'Shared', @LockOwner = 'Transaction', @LockTimeout = 5000;
+                SELECT @result AS [Value];
+                """).ToArrayAsync(token);
+            result = results.Single();
+        }
+        catch (SqlException) when (token.IsCancellationRequested)
+        {
+            throw new OperationCanceledException(token);
+        }
+        token.ThrowIfCancellationRequested();
+        if (result == -1) throw new PublicationSnapshotConflictException("segmented-projection-maintenance-active");
+        if (result < 0) throw new ProjectionOwnershipException(result);
+    }
+
+    private sealed class ProjectionOwnershipException(int result)
+        : Exception($"segment-recovery-ownership-failed:{result}");
 
     public async ValueTask<bool> TryActivateRefreshAsync(IndexGenerationCandidateSnapshot snapshot, CancellationToken cancellationToken)
     {

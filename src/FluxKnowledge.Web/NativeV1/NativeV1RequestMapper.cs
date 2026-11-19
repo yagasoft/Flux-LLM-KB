@@ -19,7 +19,7 @@ public sealed class NativeV1RequestMapper
         var input = Input(arguments);
         return toolName switch
         {
-            "knowledge.search" => new NativeKnowledgeQuery(NativeV1ContractLimits.CanonicalizeKnowledgeQuery(QueryString(input, "query")), Limit(input)),
+            "knowledge.search" => new NativeKnowledgeQuery(NativeV1ContractLimits.CanonicalizeKnowledgeQuery(QueryString(input, "query")), Limit(input), OptionalString(input, "cwd")),
             "knowledge.graph" => new NativeGraphQuery(NativeV1ContractLimits.CanonicalizeGraphNode(QueryString(input, "node")), RequiredInt(input, "max_depth", 1, 8), RequiredInt(input, "max_results", 1, 100)),
             "code.query" => new NativeCodeQuery(RequiredString(input, "view"), NativeV1ContractLimits.CanonicalizeOptionalCodeQuery(QueryString(input, "query", required: false)), OptionalGuid(input, "branch_id"), Limit(input), OptionalCursor(input)),
             "corpus.query" => new NativeCorpusQuery(RequiredString(input, "view"), OptionalGuid(input, "root_id"), OptionalGuid(input, "branch_id"), OptionalGuid(input, "job_id"), Limit(input), OptionalCursor(input)),
@@ -188,7 +188,7 @@ public sealed class NativeV1RequestMapper
     private static string? OptionalCursor(JsonElement input)
     {
         var cursor = OptionalString(input, "cursor");
-        if (cursor is { Length: > 2048 }) throw new NativeOperationException("cursor-invalid");
+        if (cursor is { Length: > 65536 }) throw new NativeOperationException("cursor-invalid");
         return cursor;
     }
 

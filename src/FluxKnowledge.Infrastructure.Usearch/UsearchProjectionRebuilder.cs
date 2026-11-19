@@ -43,9 +43,8 @@ public sealed class UsearchProjectionRebuilder(UsearchIndexOptions options, IInd
             {
                 token.ThrowIfCancellationRequested();
                 using var path = paths.Acquire(segment.DirectoryPath);
-                using (var file = File.OpenRead(Path.Combine(segment.DirectoryPath, "index.usearch")))
-                    if (file.Length != segment.FileLength || Convert.ToHexStringLower(SHA256.HashData(file)) != segment.FileChecksum)
-                        throw new IndexGenerationValidationException("index-rebuild-segment-file-proof-mismatch-use-new-operation");
+                if (new FileInfo(Path.Combine(segment.DirectoryPath, "index.usearch")).Length != segment.FileLength)
+                    throw new IndexGenerationValidationException("index-rebuild-segment-file-length-mismatch-use-new-operation");
                 using var native = new USearchIndex(Path.Combine(segment.DirectoryPath, "index.usearch"), false);
                 if (native.Size() != (ulong)segment.VectorCount || native.Dimensions() != (ulong)segment.Dimensions)
                     throw new IndexGenerationValidationException("index-rebuild-segment-native-profile-invalid");

@@ -6,6 +6,7 @@ public sealed class KnowledgeItemEntity
     public string Title { get; set; } = string.Empty;
     public string SafeBody { get; set; } = string.Empty;
     /// <summary>Safe-only search projection, cleared with the source content on forget.</summary>
+    public Guid? CodexWorkspaceRootId { get; set; }
     public string SafeSearchText { get; set; } = string.Empty;
     public DateTimeOffset CreatedAtUtc { get; set; }
     public DateTimeOffset? ForgottenAtUtc { get; set; }

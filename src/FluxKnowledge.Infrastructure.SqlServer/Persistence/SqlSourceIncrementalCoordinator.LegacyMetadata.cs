@@ -12,8 +12,7 @@ public sealed partial class SqlSourceIncrementalCoordinator
     private async ValueTask<SourceRevisionId?> TryAdoptLegacyMetadataAsync(SourceRootConfiguration root, SourceScanRequest request,
         SourceIncrementalPlan plan, string relativePath, SourceInventoryEntryEntity? cached, CancellationToken ct)
     {
-        if (plan.ForceFullContent || artifacts is not ISourceRetainedObservationStore retained ||
-            plan.Targets.Any(x => SourcePathScope.Contains(x.RelativePath, x.IsSubtree, relativePath) && IsFileContentEvent(x, relativePath))) return null;
+        if (artifacts is not ISourceRetainedObservationStore retained) return null;
         var path = Path.GetFullPath(relativePath, root.CanonicalPath);
         await using var lookup = await factory.CreateDbContextAsync(ct).ConfigureAwait(false);
         var revisions = await lookup.SourceRevisions.AsNoTracking().Where(x => x.SourceRootId == root.Id.Value &&
@@ -29,12 +28,11 @@ public sealed partial class SqlSourceIncrementalCoordinator
         try
         {
             using var source = observations.Open(root, relativePath);
-            if (source.Observation.Identity != prior.StableSourceIdentity || source.Observation.ByteLength != prior.ByteLength ||
+            if (source.Observation.ByteLength != prior.ByteLength ||
                 source.Observation.ByteLength > root.MaximumFileBytes ||
-                source.Observation.LastWriteTicks != prior.FileLastWriteAtUtc!.Value.UtcDateTime.ToFileTimeUtc() ||
-                cached is { FileId.Length: > 0 } && cached.FileId != source.Observation.FileId) return null;
+                source.Observation.LastWriteTicks != prior.FileLastWriteAtUtc!.Value.UtcDateTime.ToFileTimeUtc()) return null;
             await using var blob = await retained.OpenObservationAsync(artifact.StoreRelativePath, artifact.ContentSha256,
-                artifact.ByteLength, false, ct).ConfigureAwait(false);
+                artifact.ByteLength, ct).ConfigureAwait(false);
             SourceRevisionId? result = null;
             await _journal.ExecuteAsync(async db =>
             {
@@ -44,9 +42,6 @@ public sealed partial class SqlSourceIncrementalCoordinator
                 var state = await db.SourceRootScanStates.SingleAsync(x => x.SourceRootId == root.Id.Value, ct).ConfigureAwait(false);
                 SqlSourceIncrementalState.RequirePlan(state, plan);
                 if (state.PolicyFingerprint != SqlRepositoryWorkRecovery.Policy(current)) return;
-                var pending = await db.SourcePendingChanges.Where(x => x.SourceRootId == root.Id.Value).ToArrayAsync(ct).ConfigureAwait(false);
-                if (pending.Any(x => SourcePathScope.Contains(x.RelativePath, x.IsSubtree, relativePath) &&
-                    IsFileContentEvent(new(x.RelativePath, x.Generation, x.IsSubtree, x.ReasonFlags), relativePath))) return;
                 var owners = await db.SourceRevisions.Where(x => x.SourceRootId == root.Id.Value && x.CanonicalPath == path &&
                     x.OriginKind == 0 && x.SuppressedAtUtc == null).Take(2).ToArrayAsync(ct).ConfigureAwait(false);
                 var bound = await db.SourceArtifacts.SingleOrDefaultAsync(x => x.Id == artifact.Id && x.SourceRevisionId == prior.Id, ct).ConfigureAwait(false);
@@ -68,10 +63,12 @@ public sealed partial class SqlSourceIncrementalCoordinator
                     entry = new() { Id = Guid.NewGuid(), SourceRootId = root.Id.Value, PathFingerprint = key };
                     db.SourceInventoryEntries.Add(entry);
                 }
-                entry.RelativePath = relativePath; entry.FileId = source.Observation.FileId; entry.ParentId = source.Observation.ParentId;
+                entry.RelativePath = relativePath;
+                BindPhysicalInventory(entry, source.Observation);
                 entry.SourceRevisionId = prior.Id; entry.SourceArtifactId = artifact.Id; entry.BaselineEpoch = plan.BaselineEpoch;
                 // A current metadata fact, never a new ingestion/hash/coverage receipt.
-                // Null capture generation ensures this cannot consume a file event.
+                // Completion acknowledges only the frozen path/generation, so a
+                // later event remains pending even when its metadata is unchanged.
                 entry.ObservationJson = JsonSerializer.Serialize(new CachedObservation(4, source.Observation, blob.Observation,
                     false, state.RecoveryGeneration, MetadataOnly: true));
                 result = new(prior.Id);

@@ -177,11 +177,11 @@ public sealed partial class UsearchGenerationTests
     }
 
     [Fact]
-    public async Task Append_reuse_never_masks_corrupt_current_sql_payloads()
+    public async Task Append_reuse_refuses_malformed_current_sql_payloads()
     {
         var (store, baseline) = await CreateAppendBaseAsync();
         var original = File.ReadAllBytes(Path.Combine(baseline.Generation.IndexPath, UsearchGenerationValidator.IndexFileName));
-        var invalid = baseline.Vectors[0] with { Values = AppendVector(1, alternate: true).Values };
+        var invalid = baseline.Vectors[0] with { Values = AppendVector(1, alternate: true).Values[..^1] };
         store.Vectors = [invalid, baseline.Vectors[1], baseline.Vectors[2], AppendVector(4)];
 
         await Assert.ThrowsAsync<IndexGenerationValidationException>(() =>

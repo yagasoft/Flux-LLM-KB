@@ -21,10 +21,26 @@ public sealed class SqlOutlookCaptureStore(IDbContextFactory<FluxKnowledgeDbCont
     private readonly IDbContextFactory<FluxKnowledgeDbContext> _contextFactory = contextFactory;
     private readonly TimeProvider _clock = timeProvider ?? TimeProvider.System;
 
+    private const string VerifyAndEnableOperation = "verify-and-enable-profile";
+
+    // The verification request shares the submitting operation's ID. The operation ledger
+    // records the enable intent in the same transaction as the profile and browse request.
+    public static IQueryable<OutlookBrowseRequestEntity> AutoEnableBrowses(FluxKnowledgeDbContext context) =>
+        from browse in context.OutlookBrowseRequests
+        join operation in context.OutlookCaptureOperations on browse.Id equals operation.OperationId
+        where operation.Kind == VerifyAndEnableOperation && operation.Accepted && operation.ResourceId == browse.ProfileId
+        select browse;
+
     public ValueTask<OutlookOperationReceipt> SaveProfileAsync(OutlookProfileSaveRequest request, CancellationToken cancellationToken)
     {
         request.Validate();
-        return MutateAsync("save-profile", request.OperationId, request.RequestFingerprint, request.ProfileId?.Value, async context =>
+        var targetPath = request.VerifyFolderPath;
+        var targetFingerprint = targetPath is null ? null : TargetPathFingerprint(targetPath);
+        var kind = targetFingerprint is null ? "save-profile" : VerifyAndEnableOperation;
+        var fingerprint = targetFingerprint is null
+            ? request.RequestFingerprint
+            : ImmutableBrowseRequestFingerprint(request.RequestFingerprint, targetFingerprint);
+        return MutateAsync(kind, request.OperationId, fingerprint, request.ProfileId?.Value, async context =>
         {
             var now = _clock.GetUtcNow();
             OutlookCaptureProfileEntity row;
@@ -61,7 +77,8 @@ public sealed class SqlOutlookCaptureStore(IDbContextFactory<FluxKnowledgeDbCont
             else
             {
                 var existing = await context.OutlookCaptureProfiles.SingleOrDefaultAsync(x => x.Id == request.ProfileId.Value, cancellationToken).ConfigureAwait(false);
-                if (existing is null || existing.ConfigurationRevision != request.ExpectedConfigurationRevision)
+                if (existing is null || existing.ConfigurationRevision != request.ExpectedConfigurationRevision ||
+                    (targetPath is not null && existing.State == (int)OutlookCaptureState.Stale))
                 {
                     return (false, (Guid?)null);
                 }
@@ -103,6 +120,19 @@ public sealed class SqlOutlookCaptureStore(IDbContextFactory<FluxKnowledgeDbCont
                 {
                     folder.Basis = (int)request.IncrementalBasis;
                 }
+            }
+            if (targetPath is not null)
+            {
+                context.OutlookBrowseRequests.Add(new OutlookBrowseRequestEntity
+                {
+                    Id = request.OperationId,
+                    ProfileId = row.Id,
+                    CorrelationId = request.OperationId,
+                    ConfigurationRevision = row.ConfigurationRevision,
+                    ExpiresAtUtc = now.AddDays(1),
+                    TargetPath = targetPath,
+                    TargetPathFingerprint = targetFingerprint
+                });
             }
             return (true, row.Id);
         }, cancellationToken);
@@ -284,11 +314,53 @@ public sealed class SqlOutlookCaptureStore(IDbContextFactory<FluxKnowledgeDbCont
 
     public async ValueTask<OutlookBrowseClaimReceipt> ClaimBrowseAsync(OutlookBrowseClaimRequest request, CancellationToken cancellationToken)
     {
-        request.Validate(); var receipt = await MutateAsync("claim-browse", request.OperationId, request.RequestFingerprint, null, async context =>
-        { var row = await context.OutlookBrowseRequests.SingleOrDefaultAsync(x => x.Id == request.BrowseRequestId, cancellationToken).ConfigureAwait(false); if (row is null || row.State != 0) return (false, (Guid?)null); if (row.ExpiresAtUtc <= _clock.GetUtcNow()) { TerminalizeBrowse(row, OutlookBrowseFailureCode.Expired); return (false, (Guid?)null); } if (!HasValidTargetPath(row)) { TerminalizeBrowse(row, OutlookBrowseFailureCode.Failed); return (false, (Guid?)null); } row.State = 1; row.FencingToken++; row.LeaseOwner = Owner(request.Host); row.LeaseExpiresAtUtc = request.LeaseExpiresAtUtc; return (true, row.Id); }, cancellationToken);
+        request.Validate();
+        await using var readContext = await _contextFactory.CreateDbContextAsync(cancellationToken).ConfigureAwait(false);
+        var autoEnable = await AutoEnableBrowses(readContext)
+            .AnyAsync(browse => browse.Id == request.BrowseRequestId, cancellationToken).ConfigureAwait(false);
+        var fingerprint = autoEnable
+            ? ImmutableBrowseRequestFingerprint(request.RequestFingerprint, FormattableString.Invariant(
+                $"{request.BrowseRequestId:N}\n{Owner(request.Host)}\n{request.LeaseExpiresAtUtc.UtcTicks}"))
+            : request.RequestFingerprint;
+        var receipt = await MutateAsync("claim-browse", request.OperationId, fingerprint, null, async context =>
+        {
+            var row = await context.OutlookBrowseRequests.SingleOrDefaultAsync(x => x.Id == request.BrowseRequestId, cancellationToken).ConfigureAwait(false);
+            if (row is null) return (false, (Guid?)null);
+            var now = _clock.GetUtcNow();
+            if (request.LeaseExpiresAtUtc <= now) return (false, (Guid?)null);
+
+            var canReclaim = autoEnable && row.State == 1 && row.LeaseExpiresAtUtc <= now;
+            if (row.State != 0 && !canReclaim) return (false, (Guid?)null);
+            if (row.ExpiresAtUtc <= now)
+            {
+                TerminalizeBrowse(row, OutlookBrowseFailureCode.Expired);
+                return (false, (Guid?)null);
+            }
+            if (!HasValidTargetPath(row) || (autoEnable && !await context.OutlookCaptureProfiles.AnyAsync(profile =>
+                profile.Id == row.ProfileId && profile.ConfigurationRevision == row.ConfigurationRevision &&
+                profile.State == (int)OutlookCaptureState.Disabled && !profile.IsEnabled, cancellationToken).ConfigureAwait(false)))
+            {
+                TerminalizeBrowse(row, OutlookBrowseFailureCode.Failed);
+                return (false, (Guid?)null);
+            }
+            row.State = 1;
+            row.FencingToken++;
+            row.LeaseOwner = Owner(request.Host);
+            row.LeaseExpiresAtUtc = request.LeaseExpiresAtUtc;
+            return (true, row.Id);
+        }, cancellationToken);
         if (!receipt.Accepted) return new OutlookBrowseClaimReceipt(null, false, receipt.Committed, receipt.IsReplay);
-        await using var context = await _contextFactory.CreateDbContextAsync(cancellationToken).ConfigureAwait(false); var row = await context.OutlookBrowseRequests.SingleAsync(x => x.Id == request.BrowseRequestId, cancellationToken).ConfigureAwait(false);
-        return new OutlookBrowseClaimReceipt(new OutlookBrowseClaim(row.Id, row.CorrelationId, row.ConfigurationRevision, request.Host, row.FencingToken, row.LeaseExpiresAtUtc!.Value, row.TargetPath), true, true, receipt.IsReplay);
+        await using var context = await _contextFactory.CreateDbContextAsync(cancellationToken).ConfigureAwait(false);
+        var row = await context.OutlookBrowseRequests.SingleAsync(x => x.Id == request.BrowseRequestId, cancellationToken).ConfigureAwait(false);
+        // The requested expiry identifies this lease within the same host instance. A
+        // replacement claim can only be made after it has passed, with a later expiry.
+        if (row.LeaseExpiresAtUtc != request.LeaseExpiresAtUtc || !Matches(row, request.Host, row.FencingToken))
+        {
+            return new OutlookBrowseClaimReceipt(null, false, receipt.Committed, receipt.IsReplay);
+        }
+        return new OutlookBrowseClaimReceipt(new OutlookBrowseClaim(
+            row.Id, row.CorrelationId, row.ConfigurationRevision, request.Host, row.FencingToken,
+            request.LeaseExpiresAtUtc, row.TargetPath), true, true, receipt.IsReplay);
     }
 
     public ValueTask<OutlookOperationReceipt> CompleteBrowseAsync(OutlookBrowseCompletionRequest request, CancellationToken cancellationToken)
@@ -296,9 +368,28 @@ public sealed class SqlOutlookCaptureStore(IDbContextFactory<FluxKnowledgeDbCont
         request.Validate(); return MutateAsync("complete-browse", request.OperationId, request.RequestFingerprint, null, async context =>
         {
             var row = await context.OutlookBrowseRequests.SingleOrDefaultAsync(x => x.Id == request.BrowseRequestId, cancellationToken).ConfigureAwait(false);
-            var profile = row is null ? null : await context.OutlookCaptureProfiles.SingleOrDefaultAsync(x => x.Id == row.ProfileId, cancellationToken).ConfigureAwait(false);
-            if (request.PrivateFolders is null || !Matches(row, request.Host, request.FencingToken) || row!.ConfigurationRevision != request.ConfigurationRevision || profile!.ConfigurationRevision != row.ConfigurationRevision)
+            if (row is null || request.PrivateFolders is null ||
+                !Matches(row, request.Host, request.FencingToken) || row.ConfigurationRevision != request.ConfigurationRevision)
             {
+                return (false, (Guid?)null);
+            }
+
+            // Legacy completion also changes folder selection. Hold the profile lock
+            // until those changes commit so it cannot overwrite a newer verification.
+            var profile = await context.OutlookCaptureProfiles
+                .FromSqlInterpolated($"SELECT * FROM [OutlookCaptureProfiles] WITH (UPDLOCK, HOLDLOCK) WHERE [Id] = {row.ProfileId}")
+                .SingleOrDefaultAsync(cancellationToken).ConfigureAwait(false);
+            if (!Matches(row, request.Host, request.FencingToken)) return (false, (Guid?)null);
+            var autoEnable = await AutoEnableBrowses(context).AnyAsync(browse => browse.Id == row.Id, cancellationToken).ConfigureAwait(false);
+            if (autoEnable && row.ExpiresAtUtc <= _clock.GetUtcNow())
+            {
+                TerminalizeBrowse(row, OutlookBrowseFailureCode.Expired);
+                return (false, (Guid?)null);
+            }
+            if (profile is null || profile.ConfigurationRevision != row.ConfigurationRevision ||
+                (autoEnable && (profile.IsEnabled || profile.State != (int)OutlookCaptureState.Disabled)))
+            {
+                if (autoEnable) TerminalizeBrowse(row, OutlookBrowseFailureCode.Failed);
                 return (false, (Guid?)null);
             }
             if (request.Folders.Count != 1 || request.PrivateFolders.Count != 1 || !HasValidTargetPath(row))
@@ -346,6 +437,13 @@ public sealed class SqlOutlookCaptureStore(IDbContextFactory<FluxKnowledgeDbCont
             foreach (var folder in configuredFolders.Where(folder => !selectedFolderIds.Contains(folder.Id)))
             {
                 folder.State = (int)OutlookCaptureState.Disabled;
+            }
+            if (autoEnable)
+            {
+                profile.IsEnabled = true;
+                profile.State = (int)OutlookCaptureState.AwaitingHost;
+                profile.ConfigurationRevision++;
+                profile.UpdatedAtUtc = _clock.GetUtcNow();
             }
             return (true, row.Id);
         }, cancellationToken);
@@ -485,7 +583,7 @@ public sealed class SqlOutlookCaptureStore(IDbContextFactory<FluxKnowledgeDbCont
     private sealed record MutationOutcome(bool Accepted, Guid? ResourceId, bool ResourceReused = false);
     private sealed record MutationReceipt(bool Accepted, Guid? ResourceId, bool IsOperationReplay, bool ResourceReused);
     private static string Owner(OutlookHostIdentity host) => $"{host.WindowsUserSid}|{host.SessionId}|{host.HostInstanceId}";
-    private bool Matches(OutlookBrowseRequestEntity? row, OutlookHostIdentity host, long token) => row is not null && row.State == 1 && row.FencingToken == token && row.LeaseOwner == Owner(host) && row.LeaseExpiresAtUtc >= _clock.GetUtcNow();
+    private bool Matches(OutlookBrowseRequestEntity? row, OutlookHostIdentity host, long token) => row is not null && row.State == 1 && row.FencingToken == token && row.LeaseOwner == Owner(host) && row.LeaseExpiresAtUtc > _clock.GetUtcNow();
     private static OutlookCatchUpClaim ToClaim(OutlookCatchUpEntity row) => new(row.Id, new OutlookCaptureProfileId(row.ProfileId), row.CoalescingKey, (OutlookCatchUpProvenance)row.Provenance, row.RetryCount, row.Reason, ParseOwner(row.LeaseOwner!), row.LeaseExpiresAtUtc!.Value, row.LastHeartbeatAtUtc!.Value, row.FencingToken);
     private static OutlookHostIdentity ParseOwner(string value) { var p = value.Split('|'); return new OutlookHostIdentity(p[0], int.Parse(p[1]), p[2]); }
     private static bool HasValidTargetPath(OutlookBrowseRequestEntity row)
@@ -514,6 +612,6 @@ public sealed class SqlOutlookCaptureStore(IDbContextFactory<FluxKnowledgeDbCont
     private static string TargetPathFingerprint(string targetPath) =>
         Convert.ToHexStringLower(SHA256.HashData(Encoding.UTF8.GetBytes(targetPath)));
 
-    private static string ImmutableBrowseRequestFingerprint(string requestFingerprint, string targetFingerprint) =>
-        Convert.ToHexStringLower(SHA256.HashData(Encoding.UTF8.GetBytes($"{requestFingerprint}\n{targetFingerprint}")));
+    private static string ImmutableBrowseRequestFingerprint(string requestFingerprint, string binding) =>
+        Convert.ToHexStringLower(SHA256.HashData(Encoding.UTF8.GetBytes($"{requestFingerprint}\n{binding}")));
 }

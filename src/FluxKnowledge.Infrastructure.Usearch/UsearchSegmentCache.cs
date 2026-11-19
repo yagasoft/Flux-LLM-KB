@@ -1,4 +1,3 @@
-using System.Security.Cryptography;
 using FluxKnowledge.Application.Indexing;
 using FluxKnowledge.Application.Ports;
 using FluxKnowledge.Application.Search;
@@ -103,9 +102,8 @@ public sealed partial class UsearchSegmentCache(UsearchIndexOptions options, IIn
                     throw new IndexGenerationValidationException("segment-path-or-format-invalid");
                 entry.Path = paths.Acquire(segment.DirectoryPath);
                 var filePath = Path.Combine(segment.DirectoryPath, "index.usearch");
-                using (var file = File.OpenRead(filePath))
-                    if (file.Length != segment.FileLength || Convert.ToHexStringLower(SHA256.HashData(file)) != segment.FileChecksum)
-                        throw new IndexGenerationValidationException("segment-file-proof-mismatch");
+                if (new FileInfo(filePath).Length != segment.FileLength)
+                    throw new IndexGenerationValidationException("segment-file-length-mismatch");
                 // Attach ownership before view opening, so a failed native close cannot lose its guard/receipt.
                 entry.Index = new UsearchReadIndex(segment.Dimensions, searchExpansion);
                 entry.Index.OpenView(filePath, segment.VectorCount);

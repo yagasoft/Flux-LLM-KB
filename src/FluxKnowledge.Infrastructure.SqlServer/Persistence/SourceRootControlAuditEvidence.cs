@@ -85,7 +85,7 @@ internal sealed record SourceRootControlConfiguration(
         MaximumFileBytes == entity.MaximumFileBytes &&
         ReconciliationCadenceSeconds == entity.ReconciliationCadenceSeconds && CrawlMode == entity.CrawlMode;
 
-    private static string CanonicalJson(IReadOnlyList<string>? values) =>
+    public static string CanonicalJson(IReadOnlyList<string>? values) =>
         JsonSerializer.Serialize((values ?? Array.Empty<string>()).OrderBy(static value => value, StringComparer.Ordinal).ToArray());
 }
 

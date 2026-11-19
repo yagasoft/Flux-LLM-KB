@@ -35,8 +35,8 @@ public sealed class TarArchiveRetainedProcessor(IRetainedArtifactWriter artifact
         {
             throw new RetainedProcessorException("archive-input-too-large");
         }
-        if (!string.Equals(retained.ContentSha256, claim.InputSha256, StringComparison.Ordinal) ||
-            !string.Equals(Convert.ToHexStringLower(SHA256.HashData(retained.Bytes)), claim.InputSha256, StringComparison.Ordinal))
+        if (retained.SourceRevisionId != claim.SourceRevisionId || retained.ByteLength != retained.Bytes.LongLength ||
+            !string.Equals(retained.ContentSha256, claim.InputSha256, StringComparison.Ordinal))
         {
             throw new RetainedProcessorException("retained-artifact-checksum-invalid");
         }

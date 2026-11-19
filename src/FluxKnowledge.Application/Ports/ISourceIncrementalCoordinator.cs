@@ -48,7 +48,7 @@ public interface IRetainedFileObservationLease : IAsyncDisposable
 public interface ISourceRetainedObservationStore
 {
     ValueTask<IRetainedFileObservationLease> OpenObservationAsync(string relativePath, string hash, long byteLength,
-        bool verifyChecksum, CancellationToken cancellationToken);
+        CancellationToken cancellationToken);
 }
 public interface ISourceIncrementalCoordinator
 {

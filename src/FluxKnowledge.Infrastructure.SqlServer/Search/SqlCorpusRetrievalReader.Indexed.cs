@@ -26,12 +26,9 @@ public sealed partial class SqlCorpusRetrievalReader
         var maximum = checked((int)segment.VectorCount + 1);
         await using var context = await contextFactory.CreateDbContextAsync(cancellationToken);
         var capture = SqlPublishedPassageSelection.Bind($"""
-            SELECT TOP ({maximum}) [vector].[VectorId], [chunk].[Content],
-                CONVERT(bigint,[chunk].[StartOffset]) AS [StartOffset], [chunk].[Length],
-                CONVERT(bigint,DATALENGTH([artifact].[SearchText]))/2 AS [CanonicalLength],
-                [window].[WindowStart], SUBSTRING([artifact].[SearchText] COLLATE Latin1_General_100_BIN2,
-                    [window].[WindowStart]+1,16384) AS [WindowText]
-            INTO #CorpusAnnWindows
+            SELECT TOP ({maximum}) [vector].[VectorId], [chunk].[Id] AS [TextChunkId],
+                CAST(CASE WHEN /*window-proof-matches*/ THEN 1 ELSE 0 END AS bit) AS [ProofMatches],
+                COALESCE([eligibility].[Available],CAST(0 AS bit)) AS [WindowAvailable]
             FROM [IndexGenerationSegments] AS [manifest]
             INNER JOIN [IndexSegmentVectors] AS [member] ON [member].[SegmentId] = [manifest].[SegmentId]
             INNER JOIN [IndexGenerations] AS [generation] ON [generation].[Id] = [manifest].[GenerationId]
@@ -40,8 +37,7 @@ public sealed partial class SqlCorpusRetrievalReader
             INNER JOIN [TextChunks] AS [chunk] ON [chunk].[Id] = [vector].[TextChunkId]
             INNER JOIN [Artifacts] AS [artifact] ON [artifact].[Id] = [chunk].[ArtifactId]
             INNER JOIN [PipelineRecords] AS [record] ON [record].[Id] = [artifact].[PipelineRecordId]
-            CROSS APPLY (SELECT CASE WHEN [chunk].[StartOffset]>4096 THEN CONVERT(bigint,[chunk].[StartOffset])-4096
-                ELSE CONVERT(bigint,0) END AS [WindowStart]) AS [window]
+            LEFT JOIN [TextChunkWindowEligibilities] AS [eligibility] ON [eligibility].[TextChunkId]=[chunk].[Id]
             /*publication-bindings*/
             WHERE [manifest].[GenerationId] = {generation.Id} AND [manifest].[SegmentId] = {segment.Id}
               AND [generation].[CorpusEpoch] = {generation.CorpusStamp.CorpusEpoch}
@@ -64,9 +60,19 @@ public sealed partial class SqlCorpusRetrievalReader
                    LEFT(CASE WHEN [publication].[OwnerSourceRevisionId] IS NOT NULL THEN [owner].[CanonicalPath] ELSE [retained].[CanonicalPath] END, LEN({prefix})) COLLATE Latin1_General_100_CI_AS = {prefix}))
             """);
         var keys = await context.Database.SqlQuery<AvailableSegmentKeyRow>(
-            SqlDisclosureWindowAvailability.Select(capture, "i.VectorId")).ToArrayAsync(cancellationToken);
+            SqlWindowEligibilityBinding.Bind(capture,eligibilityRuleVersion)).ToArrayAsync(cancellationToken);
         if (keys.Length > segment.VectorCount || keys.Any(key => key.VectorId <= 0) || keys.Select(key => key.VectorId).Distinct().Count() != keys.Length)
             throw new InvalidOperationException("segment-scope-membership-invalid");
+        if (keys.Any(key => !key.ProofMatches))
+        {
+            if (windowBackfillSignal is not null)
+            {
+                await new SqlTextChunkWindowEligibilityStore(contextFactory,ruleVersion:eligibilityRuleVersion,hold:deploymentHold)
+                    .RequestRevisitAsync(keys.Where(key => !key.ProofMatches).Min(key => key.TextChunkId),cancellationToken);
+                windowBackfillSignal.RequestBackfill();
+            }
+            throw new PassageRetrievalRefusalException("warming");
+        }
         return keys.Where(key => key.WindowAvailable).Select(key => key.VectorId).ToHashSet();
     }
 
@@ -81,8 +87,9 @@ public sealed partial class SqlCorpusRetrievalReader
         if (!lease.IsPrepared(this)) throw new PassageRetrievalRefusalException("warming");
         var generation = lease.Generation;
         var phase = Stopwatch.GetTimestamp();
-        SourceRoutingSelection? routing = queryText is null ? null : await ReadLiveRoutingAsync(lease, scope, queryText, cancellationToken);
-        var live = routing?.AllKeys ?? await ReadLiveBindingKeysAsync(lease, scope, cancellationToken);
+        var live = queryText is null ? await ReadLiveBindingKeysAsync(lease, scope, cancellationToken) :
+            await ReadLiveRoutingAsync(lease, scope, queryText, cancellationToken);
+        var routing=live.Routing;
         ReportIndexedPhase("dense-live-bindings", phase);
         phase = Stopwatch.GetTimestamp();
         var matches = await lease.SearchAsync(query, 100, scope, new CachedScopeSelection(this, generation, live), cancellationToken);
@@ -92,14 +99,14 @@ public sealed partial class SqlCorpusRetrievalReader
         if (routing.Status != SourceDirectedRetrievalStatus.Ready)
             return baseline with { SourceDirectedStatus = routing.Status };
         if (routing.DirectedKeys.Count == 0) return baseline with { SourceDirectedStatus = SourceDirectedRetrievalStatus.Ready };
-        if (!routing.DirectedKeys.IsSubsetOf(live)) throw new InvalidOperationException("source-routing-membership-invalid");
+        if (!routing.DirectedKeys.IsSubsetOf(live.Keys)) throw new InvalidOperationException("source-routing-membership-invalid");
         using var deadline = new CancellationTokenSource(TimeSpan.FromSeconds(1));
         using var sourceBudget = CancellationTokenSource.CreateLinkedTokenSource(cancellationToken, deadline.Token);
         var began = Stopwatch.GetTimestamp();
         try
         {
             var directed = await lease.SearchAsync(query, 100, scope,
-                new CachedScopeSelection(this, generation, routing.DirectedKeys), sourceBudget.Token);
+                new CachedScopeSelection(this, generation, live with {Keys=routing.DirectedKeys}), sourceBudget.Token);
             ReportIndexedPhase("source-ann", began);
             var result = await HydrateIndexedMatchesAsync(lease, scope, directed, "source", sourceBudget.Token);
             sourceBudget.Token.ThrowIfCancellationRequested();
@@ -216,6 +223,8 @@ public sealed partial class SqlCorpusRetrievalReader
     private sealed class AvailableSegmentKeyRow
     {
         public long VectorId { get; init; }
+        public long TextChunkId { get; init; }
+        public bool ProofMatches { get; init; }
         public bool WindowAvailable { get; init; }
     }
 }

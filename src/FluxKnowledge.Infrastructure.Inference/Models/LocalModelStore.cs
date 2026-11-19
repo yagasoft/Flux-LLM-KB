@@ -1,11 +1,10 @@
-using System.Security.Cryptography;
 using FluxKnowledge.Application.Models;
 
 namespace FluxKnowledge.Infrastructure.Inference.Models;
 
 public sealed class LocalModelStore : ILocalModelStore
 {
-    public const string VerifierVersion = "flux-offline-model-gate/1";
+    public const string VerifierVersion = "flux-offline-model-metadata/2";
 
     private readonly Func<IModelVerificationFiles> _openFiles;
     private readonly TimeProvider _timeProvider;
@@ -76,15 +75,14 @@ public sealed class LocalModelStore : ILocalModelStore
                 ModelArtifactObservation? observation = null;
                 try
                 {
-                    var verification = await VerifyAsync(openedFile, specificationFile, cancellationToken).ConfigureAwait(false);
+                    var verification = ObserveMetadata(openedFile, specificationFile);
                     observation = verification.Observation;
-                    if (verification.ReasonCode != ModelStoreReasons.BundleVerified)
+                    if (verification.ReasonCode != ModelStoreReasons.BundleAvailable)
                     {
                         refusalReason = verification.ReasonCode;
                     }
                     else
                     {
-                        verifiedBytes = checked(verifiedBytes + openedFile.ByteLength);
                         heldFiles.Add(specificationFile.Filename, openedFile);
                         file = null;
                     }
@@ -95,7 +93,7 @@ public sealed class LocalModelStore : ILocalModelStore
                     observation = new ModelArtifactObservation(
                         specificationFile.Filename,
                         ModelStoreReasons.ArtifactReadFailed,
-                        openedFile.ByteLength,
+                        null,
                         null);
                 }
                 finally
@@ -118,8 +116,8 @@ public sealed class LocalModelStore : ILocalModelStore
 
             var receipt = CreateReceipt(
                 fingerprint,
-                verified: true,
-                ModelStoreReasons.BundleVerified,
+                verified: false,
+                ModelStoreReasons.BundleAvailable,
                 observations,
                 verifiedBytes);
             var persisted = await files.PersistReceiptAsync(receipt, cancellationToken).ConfigureAwait(false);
@@ -138,7 +136,7 @@ public sealed class LocalModelStore : ILocalModelStore
             files = null;
             return new ModelResolutionResult(
                 true,
-                ModelStoreReasons.BundleVerified,
+                ModelStoreReasons.BundleAvailable,
                 fingerprint,
                 observations.AsReadOnly(),
                 true,
@@ -197,10 +195,9 @@ public sealed class LocalModelStore : ILocalModelStore
             verifiedBytes,
             0);
 
-    private static async ValueTask<(string ReasonCode, ModelArtifactObservation Observation)> VerifyAsync(
+    private static (string ReasonCode, ModelArtifactObservation Observation) ObserveMetadata(
         IModelVerificationFile file,
-        ModelArtifactSpecification specification,
-        CancellationToken cancellationToken)
+        ModelArtifactSpecification specification)
     {
         if (file.ByteLength != specification.ByteLength)
         {
@@ -208,32 +205,10 @@ public sealed class LocalModelStore : ILocalModelStore
                 new ModelArtifactObservation(specification.Filename, ModelStoreReasons.ArtifactLengthMismatch, file.ByteLength, null));
         }
 
-        using var hash = IncrementalHash.CreateHash(HashAlgorithmName.SHA256);
-        var buffer = new byte[64 * 1024];
-        long offset = 0;
-        while (offset < file.ByteLength)
-        {
-            var count = (int)Math.Min(buffer.Length, file.ByteLength - offset);
-            var read = await file.ReadAsync(offset, buffer.AsMemory(0, count), cancellationToken).ConfigureAwait(false);
-            if (read != count)
-            {
-                return (ModelStoreReasons.ArtifactLengthMismatch,
-                    new ModelArtifactObservation(specification.Filename, ModelStoreReasons.ArtifactLengthMismatch, file.ByteLength, null));
-            }
-
-            hash.AppendData(buffer, 0, read);
-            offset += read;
-        }
-
-        var observedSha256 = Convert.ToHexString(hash.GetHashAndReset()).ToLowerInvariant();
-        if (!string.Equals(observedSha256, specification.Sha256, StringComparison.Ordinal))
-        {
-            return (ModelStoreReasons.ArtifactSha256Mismatch,
-                new ModelArtifactObservation(specification.Filename, ModelStoreReasons.ArtifactSha256Mismatch, file.ByteLength, observedSha256));
-        }
-
-        return (ModelStoreReasons.BundleVerified,
-            new ModelArtifactObservation(specification.Filename, ModelStoreReasons.BundleVerified, file.ByteLength, observedSha256));
+        // The manifest selects an offline local artifact. Ordinary startup checks
+        // availability and length through the held file; it does not hash weights.
+        return (ModelStoreReasons.BundleAvailable,
+            new ModelArtifactObservation(specification.Filename, ModelStoreReasons.BundleAvailable, file.ByteLength, null));
     }
 
     private static ModelResolutionResult Refusal(

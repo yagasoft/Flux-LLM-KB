@@ -21,6 +21,20 @@ Assert-SourceJournalSchema -DatabaseState $complete
 $metadata=Get-VectorPublicationMetadataMigrationContract
 $successor=[pscustomobject]@{Identity=$complete.Identity;History=($complete.History+$metadata.Target);SchemaSha256=$complete.SchemaSha256;CanAlter=$true;VectorPublicationIndexSha256=$metadata.IndexSha256}
 Assert-SourceJournalSchema -DatabaseState $successor
+Import-Module (Join-Path $SourceRoot 'scripts/deploy/incremental-source-deletion-pending-queue-index.psm1') -Force
+Import-Module (Join-Path $SourceRoot 'scripts/deploy/incremental-passage-window-eligibility-migration.psm1') -Force
+$window=Get-PassageWindowEligibilityMigrationContract
+$windowSuccessor=$successor.PSObject.Copy()
+$windowSuccessor.History=$successor.History+$window.Target
+$windowSuccessor|Add-Member -NotePropertyName WindowEligibilitySchemaSha256 -NotePropertyValue $window.NewSchemaSha256
+$windowSuccessor|Add-Member -NotePropertyName QueueIndexSha256 -NotePropertyValue $window.QueueIndexSha256
+Assert-SourceJournalSchema $windowSuccessor
+foreach($field in @('WindowEligibilitySchemaSha256','QueueIndexSha256','VectorPublicationIndexSha256')){
+ $badWindow=$windowSuccessor.PSObject.Copy();$badWindow.$field='F'*64
+ Expect-Refusal {Assert-SourceJournalSchema $badWindow}
+}
+$unrecordedWindow=$windowSuccessor.PSObject.Copy();$unrecordedWindow.History=$successor.History
+Expect-Refusal {Assert-SourceJournalSchema $unrecordedWindow}
 foreach($indexHash in @($metadata.AbsentIndexSha256,('F'*64))){
  $badSuccessor=[pscustomobject]@{Identity=$complete.Identity;History=$successor.History;SchemaSha256=$complete.SchemaSha256;VectorPublicationIndexSha256=$indexHash}
  Expect-Refusal {Assert-SourceJournalSchema -DatabaseState $badSuccessor}

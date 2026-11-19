@@ -30,11 +30,15 @@ using Microsoft.EntityFrameworkCore.Diagnostics;
 using System.Data.Common;
 using Microsoft.Extensions.DependencyInjection;
 using Xunit;
+using Xunit.Abstractions;
 
 namespace FluxKnowledge.Web.Tests.Endpoints;
 
-public sealed class CorpusRetrievalEndToEndTests(NativeSqlServerFixture fixture) : IClassFixture<NativeSqlServerFixture>
+public sealed partial class CorpusRetrievalEndToEndTests(NativeSqlServerFixture fixture, ITestOutputHelper output) : IClassFixture<NativeSqlServerFixture>
 {
+    private NativeSqlServerFixture Fixture => fixture;
+    private ITestOutputHelper Output => output;
+
     [NativeSqlServerFact]
     public async Task Scoped_HTTP_hybrid_search_above_ten_thousand_vectors_uses_filtered_ANN_and_deletion_invalidates_citations()
     {

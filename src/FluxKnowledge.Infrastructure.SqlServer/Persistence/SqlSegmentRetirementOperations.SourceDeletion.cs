@@ -18,6 +18,8 @@ public sealed partial class SqlSegmentRetirementOperations
         if (target is null) return null;
         try
         {
+            if (target.StorageKind == 3 && legacyProof is null)
+                return await AdvanceManifestPageAsync(work,cancellationToken);
             await ValidateSourceDeletionAsync(context, work, target.StorageKind, target.RelativePath, cancellationToken);
             if (target.StorageKind == 3)
             {

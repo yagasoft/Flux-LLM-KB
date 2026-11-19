@@ -41,6 +41,7 @@ if (applyNativeGoLiveMigrations)
             .Options;
         await using var context = new FluxKnowledgeDbContext(options);
         await context.Database.MigrateAsync();
+        await SqlSourceDeletionPendingQueueIndex.EnsureAsync(context, CancellationToken.None);
     }
     finally
     {

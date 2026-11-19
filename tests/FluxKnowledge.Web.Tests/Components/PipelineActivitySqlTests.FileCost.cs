@@ -172,6 +172,8 @@ public sealed partial class PipelineActivitySqlTests
         _ = await reader.ReadPipelineFilesAsync(new(), root, 0, default);
         commands.Commands.Clear();
         var timings = new List<double>();
+        var overviewTimings = new List<double>();
+        string[] slowestOverviewCommands = [];
         var writerCount = 0;
         using var stopping = new CancellationTokenSource();
         var writer = WriteAsync();
@@ -182,7 +184,11 @@ public sealed partial class PipelineActivitySqlTests
                 runtimeTimings.Reset();
                 var watch = Stopwatch.StartNew();
                 var overview = await reader.ReadOverviewAsync(default);
-                timings.Add(watch.Elapsed.TotalMilliseconds);
+                var overviewMilliseconds = watch.Elapsed.TotalMilliseconds;
+                if (overviewTimings.Count == 0 || overviewMilliseconds > overviewTimings.Max())
+                    slowestOverviewCommands = runtimeTimings.Samples.ToArray();
+                overviewTimings.Add(overviewMilliseconds);
+                timings.Add(overviewMilliseconds);
                 Assert.True(overview.Activity.IsConsistent);
                 var source = Assert.Single(overview.Activity.Sources, s => s.Id == root);
                 Assert.Equal(discoveredCount, source.KnownFiles);
@@ -208,6 +214,8 @@ public sealed partial class PipelineActivitySqlTests
                 output.WriteLine("Incomplete operation command timings: " + string.Join("; ", runtimeTimings.Samples));
             }
         }
+        output.WriteLine($"Concurrent overview medianMs={overviewTimings.Order().ElementAt(overviewTimings.Count / 2):F1}; " +
+            $"maxMs={overviewTimings.Max():F1}; slowest read command timings: " + string.Join("; ", slowestOverviewCommands));
         var p95 = timings.Order().ElementAt((int)Math.Ceiling(timings.Count * .95) - 1);
         output.WriteLine($"File-cost qualification: files={discoveredCount} currentJobs={currentJobCount} confirmedCodeProcessors=1 overlappingWrites={writerCount} usableReads={timings.Count}/24 " +
             $"p95Ms={p95:F1} maxMs={timings.Max():F1} readerCommands={commands.Commands.Count} setupLogicalReads={warmStatistics.LogicalReads}; " +
@@ -215,7 +223,7 @@ public sealed partial class PipelineActivitySqlTests
         Assert.True(writerCount >= 2);
         Assert.True(warmStatistics.LogicalReads > 0);
         Assert.InRange(commands.Commands.Count, 1, 24 * 45);
-        Assert.True(timings.All(ms => ms < 2500)); // Includes return/cleanup around the existing 2s operation budget.
+        Assert.True(timings.All(ms => ms < 2500)); // Retain the 2.5 s performance target for both measured operations.
 
         async Task WriteAsync()
         {

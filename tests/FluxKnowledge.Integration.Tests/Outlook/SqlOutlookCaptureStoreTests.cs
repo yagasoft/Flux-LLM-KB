@@ -44,6 +44,104 @@ public sealed class SqlOutlookCaptureStoreTests(NativeSqlServerFixture fixture) 
     }
 
     [NativeSqlServerFact]
+    public async Task Verify_and_enable_waits_for_the_fenced_host_and_replays_once()
+    {
+        var store = CreateStore();
+        var request = Save(Guid.NewGuid(), "Verify and enable") with
+        {
+            VerifyFolderPath = "Mailbox/Action"
+        };
+
+        var submission = await store.SaveProfileAsync(request, CancellationToken.None);
+        Assert.True(submission.Accepted);
+        Assert.True((await store.SaveProfileAsync(request, CancellationToken.None)).IsReplay);
+        await Assert.ThrowsAsync<InvalidOperationException>(() =>
+            store.SaveProfileAsync(request with { VerifyFolderPath = "Mailbox/Inbox" }, CancellationToken.None).AsTask());
+
+        await using var context = await CreateContextAsync();
+        var operation = await context.OutlookCaptureOperations.SingleAsync(row => row.OperationId == request.OperationId);
+        var profileId = operation.ResourceId!.Value;
+        var browse = await context.OutlookBrowseRequests.AsNoTracking().SingleAsync(row => row.ProfileId == profileId);
+        Assert.False(await context.OutlookCaptureProfiles.Where(row => row.Id == profileId).Select(row => row.IsEnabled).SingleAsync());
+        Assert.Equal("Mailbox/Action", browse.TargetPath);
+
+        var claim = await store.ClaimBrowseAsync(new OutlookBrowseClaimRequest(
+            Guid.NewGuid(), Fingerprint, browse.Id, Host, Now.AddMinutes(1)), CancellationToken.None);
+        var token = claim.Claim!.FencingToken;
+        var completion = BrowseCompletion(browse.Id, OutlookCaptureFolderId.New(), token);
+        Assert.False((await store.CompleteBrowseAsync(
+            completion with { OperationId = Guid.NewGuid(), FencingToken = token + 1 }, CancellationToken.None)).Accepted);
+        Assert.True((await store.CompleteBrowseAsync(completion, CancellationToken.None)).Accepted);
+        Assert.True((await store.CompleteBrowseAsync(completion, CancellationToken.None)).IsReplay);
+
+        var profile = await context.OutlookCaptureProfiles.SingleAsync(row => row.Id == profileId);
+        Assert.True(profile.IsEnabled);
+        Assert.Equal((int)OutlookCaptureState.AwaitingHost, profile.State);
+        Assert.Null(await context.OutlookBrowseRequests.Where(row => row.Id == browse.Id).Select(row => row.TargetPath).SingleAsync());
+        Assert.Single(await context.OutlookCaptureFolders.Where(row => row.ProfileId == profileId).ToListAsync());
+    }
+
+    [NativeSqlServerTheory]
+    [InlineData(false)]
+    [InlineData(true)]
+    public async Task Pausing_the_profile_cancels_auto_enable_even_if_the_host_already_claimed_it(bool claimBeforePause)
+    {
+        var store = CreateStore();
+        var request = Save(Guid.NewGuid(), "Pause pending verification") with { VerifyFolderPath = "Mailbox/Action" };
+        Assert.True((await store.SaveProfileAsync(request, CancellationToken.None)).Accepted);
+        await using var context = await CreateContextAsync();
+        var profileId = await context.OutlookCaptureOperations.Where(row => row.OperationId == request.OperationId)
+            .Select(row => row.ResourceId!.Value).SingleAsync();
+        var claimRequest = new OutlookBrowseClaimRequest(Guid.NewGuid(), Fingerprint, request.OperationId, Host, Now.AddMinutes(1));
+        var claim = claimBeforePause ? (await store.ClaimBrowseAsync(claimRequest, CancellationToken.None)).Claim : null;
+        Assert.True((await store.PauseProfileAsync(
+            new(Guid.NewGuid(), Fingerprint, new(profileId), "Operator paused capture"), CancellationToken.None)).Accepted);
+
+        if (claimBeforePause)
+        {
+            Assert.NotNull(claim);
+            Assert.False((await store.CompleteBrowseAsync(
+                BrowseCompletion(request.OperationId, OutlookCaptureFolderId.New(), claim.FencingToken), CancellationToken.None)).Accepted);
+        }
+        else
+        {
+            Assert.False((await store.ClaimBrowseAsync(claimRequest, CancellationToken.None)).Accepted);
+        }
+
+        Assert.False((await context.OutlookCaptureProfiles.SingleAsync(row => row.Id == profileId)).IsEnabled);
+        Assert.Null(await context.OutlookBrowseRequests.Where(row => row.Id == request.OperationId).Select(row => row.TargetPath).SingleAsync());
+        Assert.Empty(await context.OutlookCaptureFolders.Where(row => row.ProfileId == profileId).ToListAsync());
+    }
+
+    [NativeSqlServerFact]
+    public async Task Restart_reclaims_verification_without_replaying_the_old_lease()
+    {
+        var store = CreateStore();
+        var request = Save(Guid.NewGuid(), "Interrupted verification") with { VerifyFolderPath = "Mailbox/Action" };
+        Assert.True((await store.SaveProfileAsync(request, CancellationToken.None)).Accepted);
+        var claim = new OutlookBrowseClaimRequest(Guid.NewGuid(), Fingerprint, request.OperationId, Host, Now.AddMinutes(1));
+        var first = (await store.ClaimBrowseAsync(claim, CancellationToken.None)).Claim;
+        Assert.NotNull(first);
+        var replay = await store.ClaimBrowseAsync(claim, CancellationToken.None);
+        Assert.True(replay.IsReplay);
+        Assert.Equal(first.FencingToken, replay.Claim!.FencingToken);
+
+        var restarted = CreateStore(now: Now.AddMinutes(2));
+        var second = (await restarted.ClaimBrowseAsync(
+            claim with { OperationId = Guid.NewGuid(), LeaseExpiresAtUtc = Now.AddMinutes(3) },
+            CancellationToken.None)).Claim;
+        Assert.NotNull(second);
+        Assert.True(second.FencingToken > first.FencingToken);
+        await Assert.ThrowsAsync<InvalidOperationException>(() => restarted.ClaimBrowseAsync(
+            claim with { LeaseExpiresAtUtc = second.LeaseExpiresAtUtc }, CancellationToken.None).AsTask());
+        Assert.Null((await restarted.ClaimBrowseAsync(claim, CancellationToken.None)).Claim);
+        Assert.True((await restarted.CompleteBrowseAsync(
+            BrowseCompletion(request.OperationId, OutlookCaptureFolderId.New(), second.FencingToken),
+            CancellationToken.None)).Accepted);
+        Assert.Null((await restarted.ClaimBrowseAsync(claim, CancellationToken.None)).Claim);
+    }
+
+    [NativeSqlServerFact]
     public async Task Save_profile_commits_with_the_production_retrying_execution_strategy()
     {
         var operationId = Guid.NewGuid();
@@ -706,7 +804,7 @@ public sealed class SqlOutlookCaptureStoreTests(NativeSqlServerFixture fixture) 
         var secondFolderId = OutlookCaptureFolderId.New();
         var firstRequest = BrowseCompletion(firstBrowseId, firstFolderId, fencingToken);
         var secondRequest = BrowseCompletion(secondBrowseId, secondFolderId, fencingToken);
-        var barrier = new QueryBarrierInterceptor("OutlookCaptureFolders", 2, "WHERE [o].[ProfileId]");
+        var barrier = new QueryBarrierInterceptor("OutlookBrowseRequests", 2, "WHERE [o].[Id]");
         var store = CreateStore(barrier);
 
         var receipts = await Task.WhenAll(

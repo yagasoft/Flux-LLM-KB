@@ -61,7 +61,7 @@ public sealed partial class SqlSegmentRetirementOperations : IIndexProjectionMai
             foreach (var target in pending)
             {
                 var readCost = files.MaximumSegmentVerificationBytes(SqlSegmentedIndexStore.Describe(target));
-                if (readCost <= 0 || readCost > budget.MaximumBytes) { reason ??= "segment-retirement-byte-budget"; continue; }
+                if (readCost < 0 || readCost > budget.MaximumBytes) { reason ??= "segment-retirement-byte-budget"; continue; }
                 if (readCost > budget.MaximumBytes - attemptedBytes) continue;
                 attemptedBytes += readCost;
                 try
@@ -77,7 +77,7 @@ public sealed partial class SqlSegmentRetirementOperations : IIndexProjectionMai
             foreach (var target in pendingManifests)
             {
                 var readCost = files.MaximumManifestVerificationBytes(SqlSegmentedIndexStore.Describe(target));
-                if (readCost <= 0 || readCost > budget.MaximumBytes) { reason ??= "segment-retirement-byte-budget"; continue; }
+                if (readCost < 0 || readCost > budget.MaximumBytes) { reason ??= "segment-retirement-byte-budget"; continue; }
                 if (readCost > budget.MaximumBytes - attemptedBytes) continue;
                 attemptedBytes += readCost;
                 try

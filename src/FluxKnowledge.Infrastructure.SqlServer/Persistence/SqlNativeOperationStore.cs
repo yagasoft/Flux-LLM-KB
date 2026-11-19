@@ -281,7 +281,9 @@ public sealed class SqlNativeOperationStore(
         {
             NativeFenceTargetMutation mutation when !string.IsNullOrWhiteSpace(mutation.TargetId) && !string.IsNullOrWhiteSpace(mutation.NewValue) && mutation.NewValue.Length <= 512 &&
                 targets.Count == 1 && string.Equals(targets[0].TargetId, mutation.TargetId.Trim().ToLowerInvariant(), StringComparison.Ordinal) => mutation with { TargetId = mutation.TargetId.Trim().ToLowerInvariant() },
-            KnowledgeMutationCommitOperation knowledge when string.Equals(knowledge.Mutation.Action, canonicalAction, StringComparison.Ordinal) => knowledge,
+            KnowledgeMutationCommitOperation knowledge when
+                string.Equals(knowledge.Mutation.Action, canonicalAction, StringComparison.Ordinal) &&
+                (canonicalAction != "note_create" || CodexWorkspaceMatchesPayload(knowledge.Mutation, canonicalPayload)) => knowledge,
             NativeCorpusMutationCommitOperation corpus when
                 string.Equals(corpus.Action, canonicalAction, StringComparison.Ordinal) &&
                 string.Equals(corpus.CanonicalPayload, canonicalPayload, StringComparison.Ordinal) &&
@@ -298,6 +300,17 @@ public sealed class SqlNativeOperationStore(
             ValidateFingerprint(canonicalAction, canonicalPayload, targets, request.RequestFingerprint),
             targets,
             operation);
+    }
+
+    private static bool CodexWorkspaceMatchesPayload(KnowledgeMutation mutation, string canonicalPayload)
+    {
+        using var document = JsonDocument.Parse(canonicalPayload);
+        if (document.RootElement.ValueKind != JsonValueKind.Object) return false;
+        if (!document.RootElement.TryGetProperty("codexWorkspaceRootId", out var workspace) ||
+            workspace.ValueKind == JsonValueKind.Null)
+            return mutation.CodexWorkspaceRootId is null;
+        return workspace.ValueKind == JsonValueKind.String && workspace.TryGetGuid(out var rootId) &&
+            rootId == mutation.CodexWorkspaceRootId;
     }
 
     private static bool CorpusOperationMatchesPayload(NativeCorpusMutationCommitOperation operation, string canonicalPayload)
@@ -388,6 +401,9 @@ public sealed class SqlNativeOperationStore(
 
         if (prepared.Operation is KnowledgeMutationCommitOperation knowledge)
         {
+            if (knowledge.Mutation.CodexWorkspaceRootId.HasValue &&
+                !IsCodexStopCapture(prepared.Action, prepared.IdempotencyKey, prepared.ActorSurface))
+                throw new NativeOperationException("invalid-commit-operation");
             await ApplyKnowledgeMutationAsync(context, prepared.Targets, knowledge.Mutation, cancellationToken);
             return;
         }
@@ -478,7 +494,11 @@ public sealed class SqlNativeOperationStore(
             if (targets.Count != 0 || !Guid.TryParse(mutation.ItemId, out var itemId)) throw new NativeOperationException("invalid-commit-operation");
             if (await context.KnowledgeItems.AnyAsync(value => value.Id == itemId, cancellationToken)) throw new NativeOperationException("operation-fenced");
             var item = KnowledgeItem.Create(mutation.Title!, mutation.Body!, now, itemId);
-            context.KnowledgeItems.Add(new KnowledgeItemEntity { Id = item.Id, Title = item.Title, SafeBody = item.Body, SafeSearchText = $"{item.Title}\n{item.Body}", CreatedAtUtc = item.CreatedAtUtc });
+            context.KnowledgeItems.Add(new KnowledgeItemEntity
+            {
+                Id = item.Id, Title = item.Title, SafeBody = item.Body, SafeSearchText = $"{item.Title}\n{item.Body}",
+                CreatedAtUtc = item.CreatedAtUtc, CodexWorkspaceRootId = mutation.CodexWorkspaceRootId
+            });
             return;
         }
 
@@ -514,6 +534,7 @@ public sealed class SqlNativeOperationStore(
             if (mutation.Action != "forget") throw new NativeOperationException("invalid-knowledge-target");
             EnsureKnowledgeTarget(targets, "item", targetId, itemTarget.RowVersion);
             itemTarget.Title = string.Empty; itemTarget.SafeBody = string.Empty; itemTarget.SafeSearchText = string.Empty; itemTarget.ForgottenAtUtc = now;
+            itemTarget.CodexWorkspaceRootId = null;
             context.KnowledgeTombstones.Add(new KnowledgeTombstoneEntity { Id = Guid.NewGuid(), TargetKind = "item", TargetId = targetId, ForgottenAtUtc = now });
             return;
         }
@@ -553,6 +574,7 @@ public sealed class SqlNativeOperationStore(
             if (operation.RootAdmission is null) throw new NativeOperationException("invalid-commit-operation");
             var path = operation.RootAdmission.CanonicalPath; var name = String(payload, "displayName", 256);
             EnsureAbsentTarget(targets, CanonicalPathTargetId(path) + (operation.RootAdmission.GitRepositoryIdentityFingerprint is null ? "" : ":git:" + operation.RootAdmission.GitRepositoryIdentityFingerprint));
+            await SqlOutlookSourceReservations.RequireAvailableAsync(context, path, null, enable: false, cancellationToken);
             await LockCanonicalRootAsync(context, path, cancellationToken);
             if (await context.SourceRootConfigurations.AnyAsync(value => value.CanonicalPath == path, cancellationToken)) throw new NativeOperationException("operation-fenced");
             var rootId = Guid.NewGuid();
@@ -607,16 +629,40 @@ public sealed class SqlNativeOperationStore(
                 sourceJournalOptions?.Enabled == true, now, cancellationToken).ConfigureAwait(false);
             return;
         }
+        if (operation.Action is "root_update" or "root_resume" ||
+            (operation.Action == "watcher_set" && BoolRequired(payload, "enabled")))
+            await SqlOutlookSourceReservations.RequireAvailableAsync(context, root!.CanonicalPath, root,
+                enable: operation.Action != "root_update", cancellationToken);
+
         if (operation.Action == "root_update")
         {
-            root!.DisplayName = String(payload, "displayName", 256); root.ConfigurationRevision++; root.UpdatedAtUtc = now;
+            var source = root!;
+            if (payload.TryGetProperty("expectedConfigurationRevision", out var expected) &&
+                source.ConfigurationRevision != expected.GetInt64())
+                throw new NativeOperationException("operation-fenced");
+            var includes = NativeSourceRootCreation.ReadRules(payload, "includePatterns");
+            var excludes = NativeSourceRootCreation.ReadRules(payload, "excludePatterns");
+            if ((includes is not null || excludes is not null) &&
+                (source.CrawlMode != (int)SourceDiscoveryMode.Filesystem ||
+                 await context.OutlookCaptureProfiles.AnyAsync(value => value.SourceRootId == rootIdValue, cancellationToken)))
+                throw new NativeOperationException("source-rules-unsupported");
+
+            if ((includes is { Count: > 0 } || excludes is { Count: > 0 }) &&
+                await context.OutlookCaptureProfiles.AnyAsync(value => value.WatchedSourceRootId == rootIdValue, cancellationToken))
+                throw new NativeOperationException("outlook-export-path-reserved");
+
+            if (payload.TryGetProperty("displayName", out _)) source.DisplayName = String(payload, "displayName", 256);
+            if (includes is not null) source.IncludePatternsJson = SourceRootControlConfiguration.CanonicalJson(includes);
+            if (excludes is not null) source.ExcludePatternsJson = SourceRootControlConfiguration.CanonicalJson(excludes);
+            source.ConfigurationRevision++;
+            source.UpdatedAtUtc = now;
             if (Bool(payload, "applyDefaultPolicy", false))
             {
-                root.MaximumFileBytes = SourcePolicyDefaults.MaximumTextBytes;
-                root.AllowedClassificationsJson = JsonSerializer.Serialize(SourcePolicyDefaults.AllowedClassifications);
+                source.MaximumFileBytes = SourcePolicyDefaults.MaximumTextBytes;
+                source.AllowedClassificationsJson = JsonSerializer.Serialize(SourcePolicyDefaults.AllowedClassifications);
             }
-            var configuration = SourceRootControlConfiguration.From(root);
-            root.HealthEvidenceJson = SourceRootControlAuditEvidence.UpdateConfigurationFingerprint(root.HealthEvidenceJson, configuration);
+            var configuration = SourceRootControlConfiguration.From(source);
+            source.HealthEvidenceJson = SourceRootControlAuditEvidence.UpdateConfigurationFingerprint(source.HealthEvidenceJson, configuration);
             if (Bool(payload, "reconcile", true))
                 await EnqueueAsync(context, targets, rootIdValue, actor, now, requestKind: 1, configuration, cancellationToken);
             return;
@@ -636,44 +682,13 @@ public sealed class SqlNativeOperationStore(
         {
             var watch = await context.SourceRootWatchStates.SingleOrDefaultAsync(value => value.SourceRootId == rootIdValue, cancellationToken);
             FenceExpectedTarget(targets, "watch", rootIdValue, watch?.RowVersion);
-            if (await context.OutlookCaptureProfiles.AnyAsync(value => value.SourceRootId == rootIdValue, cancellationToken))
+            if (await SqlOutlookSourceReservations.ProtectsDeletionAsync(context, rootIdValue, cancellationToken))
             {
-                throw new NativeOperationException("outlook-source-delete-unsupported");
+                throw new NativeOperationException(SqlOutlookSourceReservations.DeleteRefusal);
             }
-            var deletingRevisionIds = await context.SourceRevisions
-                .Where(value => value.SourceRootId == rootIdValue)
-                .Select(value => value.Id)
-                .ToArrayAsync(cancellationToken);
-            var deletingRecordIds = await context.PipelineRecords
-                .Where(value => value.SourceRevisionId.HasValue && deletingRevisionIds.Contains(value.SourceRevisionId.Value))
-                .Select(value => value.Id).ToArrayAsync(cancellationToken);
-            var deletingRecordCount = deletingRecordIds.Length;
-            var deletingJobIds = await context.Jobs
-                .Where(value => value.PipelineRecord.SourceRevisionId.HasValue && deletingRevisionIds.Contains(value.PipelineRecord.SourceRevisionId.Value))
-                .Select(value => value.Id)
-                .ToArrayAsync(cancellationToken);
-            var ownedEmbeddingTaskIds = embeddingRuntime is null ? [] : await SqlEmbeddingGpuRequestStore.OwnedLocalTasks(context, embeddingRuntime)
-                .Where(task => task.ParentJobId.HasValue && deletingJobIds.Contains(task.ParentJobId.Value)).Select(task => task.Id).ToArrayAsync(cancellationToken);
-            if (await SqlEmbeddingGpuRequestStore.HasContradictoryRequestsAsync(context, deletingRecordIds, ownedEmbeddingTaskIds, cancellationToken))
-                throw new NativeOperationException("source-delete-external-execution-owned");
-            // The deletion coordinator can drain the exact local model graph. Unknown
-            // or cross-source GPU ownership must still be refused before fencing.
-            if (deletingJobIds.Length > 0 && await context.GpuMiniTasks.AnyAsync(task =>
-                    task.ParentJobId.HasValue && deletingJobIds.Contains(task.ParentJobId.Value) &&
-                    !ownedEmbeddingTaskIds.Contains(task.Id) &&
-                    !context.DocumentOcrRequests.Any(request =>
-                        request.MiniTaskId == task.Id && request.ParentJobId == task.ParentJobId &&
-                        request.SourceRevision == task.SourceRevision &&
-                        request.ModelRuntimeKey == PaddleOcrVlmRuntimeContract.ModelRuntimeKey &&
-                        request.ModelRuntimeKey == task.ModelRuntimeKey &&
-                        request.SettingsFingerprint == task.SettingsFingerprint &&
-                        deletingRevisionIds.Contains(request.RetainedSourceRevisionId) &&
-                        context.Jobs.Any(job => job.Id == task.ParentJobId &&
-                            job.PipelineRecordId == request.PipelineRecordId && job.SourceRevision == request.SourceRevision)),
-                    cancellationToken))
-            {
-                throw new NativeOperationException("source-delete-external-execution-owned");
-            }
+            var deletingRecordCount = await SqlSourceDeletionOwnership.RecordIds(context, rootIdValue).CountAsync(cancellationToken);
+            var ownership = await SqlSourceDeletionOwnership.ReadAsync(context, rootIdValue, embeddingRuntime, cancellationToken);
+            if (!ownership.IsOwned) throw new NativeOperationException("source-delete-external-execution-owned");
             if (watch is not null)
             {
                 if (watch.LeaseOwner is not null && watch.LeaseExpiresAtUtc > now) throw new NativeOperationException("operation-fenced");
@@ -689,28 +704,21 @@ public sealed class SqlNativeOperationStore(
             var existingDeletion = await context.SourceDeletionOperations.SingleOrDefaultAsync(value => value.SourceRootId == rootIdValue, cancellationToken);
             if (existingDeletion is null)
             {
-                var sourceArtifacts = deletingRevisionIds.Length == 0
-                    ? []
-                    : await context.SourceArtifacts
-                        .Where(value => deletingRevisionIds.Contains(value.SourceRevisionId))
-                        .Select(value => new { value.StoreRelativePath, value.ContentSha256, value.ByteLength })
-                        .ToArrayAsync(cancellationToken);
+                // Inventory sharing in one query while retaining the original
+                // exact in-memory identity distinctness (including path case).
+                var sourceArtifacts = await context.SourceArtifacts
+                    .Where(value => value.SourceRevision.SourceRootId == rootIdValue)
+                    .Select(value => new
+                    {
+                        value.StoreRelativePath, value.ContentSha256, value.ByteLength,
+                        Shared = context.SourceArtifacts.Any(other => other.SourceRevision.SourceRootId != rootIdValue &&
+                            other.StoreRelativePath == value.StoreRelativePath && other.ContentSha256 == value.ContentSha256 &&
+                            other.ByteLength == value.ByteLength)
+                    }).ToArrayAsync(cancellationToken);
                 var distinctSourceArtifacts = sourceArtifacts
                     .DistinctBy(value => new { value.StoreRelativePath, value.ContentSha256, value.ByteLength })
                     .ToArray();
-                var sharedArtifactCount = 0;
-                foreach (var artifact in distinctSourceArtifacts)
-                {
-                    if (await context.SourceArtifacts.AnyAsync(value =>
-                            !deletingRevisionIds.Contains(value.SourceRevisionId) &&
-                            value.StoreRelativePath == artifact.StoreRelativePath &&
-                            value.ContentSha256 == artifact.ContentSha256 &&
-                            value.ByteLength == artifact.ByteLength,
-                        cancellationToken))
-                    {
-                        sharedArtifactCount++;
-                    }
-                }
+                var sharedArtifactCount = distinctSourceArtifacts.Count(value => value.Shared);
                 context.SourceDeletionOperations.Add(new SourceDeletionOperationEntity
                 {
                     Id = Guid.NewGuid(),

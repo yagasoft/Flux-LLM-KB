@@ -82,6 +82,8 @@ public sealed partial class SqlCorpusRebuildStore
             await context.IndexGenerationVectors.ExecuteDeleteAsync(token).ConfigureAwait(false);
             await context.Vectors.ExecuteDeleteAsync(token).ConfigureAwait(false);
             await context.IndexGenerations.ExecuteDeleteAsync(token).ConfigureAwait(false);
+            await SqlTextChunkWindowEligibilityStore.InvalidateAsync(context,
+                context.Artifacts.Where(artifact => context.TextChunks.Any(chunk => chunk.ArtifactId == artifact.Id)).Select(artifact => artifact.Id),token).ConfigureAwait(false);
             await context.TextChunks.ExecuteDeleteAsync(token).ConfigureAwait(false);
             var artifactIds = plan.ProjectionArtifacts.Select(artifact => artifact.Id).ToArray();
             await context.Artifacts.Where(artifact => artifactIds.Contains(artifact.Id)).ExecuteDeleteAsync(token).ConfigureAwait(false);

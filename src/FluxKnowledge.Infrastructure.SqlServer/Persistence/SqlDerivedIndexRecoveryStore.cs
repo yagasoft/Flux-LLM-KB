@@ -540,7 +540,7 @@ public sealed partial class SqlDerivedIndexRecoveryStore(
                     return null;
                 }
             }
-            return new SqlDerivedIndexRecoveryLease(connection);
+            return new SqlDerivedIndexRecoveryLease(connection, exclusive ? "Exclusive" : "Shared");
         }
         catch (SqlException) when (cancellationToken.IsCancellationRequested)
         {
@@ -822,10 +822,27 @@ public sealed partial class SqlDerivedIndexRecoveryStore(
         long ArtifactSourceRevision,
         int ArtifactStage);
 
-    private sealed class SqlDerivedIndexRecoveryLease(SqlConnection connection)
+    private sealed class SqlDerivedIndexRecoveryLease(SqlConnection connection, string expectedMode)
         : IDerivedIndexRecoveryLease
     {
         private SqlConnection? _connection = connection;
+
+        public async ValueTask<bool> IsHeldAsync(CancellationToken cancellationToken)
+        {
+            if (_connection is not { State: ConnectionState.Open } heldConnection) return false;
+            await using var command = new SqlCommand("SELECT APPLOCK_MODE(N'public', @resource, N'Session');", heldConnection);
+            command.Parameters.Add("@resource", SqlDbType.NVarChar, 255).Value = LockResource;
+            try
+            {
+                return string.Equals(await command.ExecuteScalarAsync(cancellationToken).ConfigureAwait(false) as string,
+                    expectedMode, StringComparison.Ordinal);
+            }
+            catch (SqlException)
+            {
+                cancellationToken.ThrowIfCancellationRequested();
+                return false;
+            }
+        }
 
         public async ValueTask DisposeAsync()
         {
@@ -837,6 +854,7 @@ public sealed partial class SqlDerivedIndexRecoveryStore(
 
             try
             {
+                if (heldConnection.State != ConnectionState.Open) return;
                 await using var command = new SqlCommand(
                     """
                     EXEC sp_releaseapplock

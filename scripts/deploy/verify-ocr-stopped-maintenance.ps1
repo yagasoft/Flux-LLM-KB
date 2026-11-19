@@ -140,7 +140,8 @@ function Invoke-OcrPhysicalVerification($Plan) {
     }
     Assert-OcrOwnersStopped $Plan $stop @(Get-OcrOsSnapshot)
     [ordered]@{CleanupVerified=$true;ObservedAtUtc=[DateTimeOffset]::UtcNow.ToString('O');ReleaseId=$Plan.ReleaseId;
-        Binding=$Plan.Binding;StoppedReceiptSha256=(Get-FileHash -LiteralPath $stopPath).Hash;Samples=$samples}
+        Binding=$(if($Plan.Version -eq 2 -and $Plan.Mode -ceq 'CleanupOnly'){$Plan.TerminalBinding}else{$Plan.Binding});
+        StoppedReceiptSha256=(Get-FileHash -LiteralPath $stopPath).Hash;Samples=$samples}
 }
 
 if ($MyInvocation.InvocationName -ne '.') {

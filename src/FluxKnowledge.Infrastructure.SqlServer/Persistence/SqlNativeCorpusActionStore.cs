@@ -35,6 +35,9 @@ public sealed class SqlNativeCorpusActionStore(
         if (action == "root_create")
         {
             var admission = RootAdmission(canonicalPayload);
+            await using var createContext = await contextFactory.CreateDbContextAsync(cancellationToken).ConfigureAwait(false);
+            await SqlOutlookSourceReservations.RequireAvailableAsync(createContext, admission.CanonicalPath, null,
+                enable: false, cancellationToken).ConfigureAwait(false);
             return [new NativeTargetVersion(CanonicalPathTargetId(admission.CanonicalPath) + (admission.GitRepositoryIdentityFingerprint is null ? "" : ":git:" + admission.GitRepositoryIdentityFingerprint), "absent")];
         }
         var id = RequiredGuid(canonicalPayload, action is "job_retry" or "publication_retry" or "embedding_retry" ? "jobId" : "rootId");
@@ -52,9 +55,35 @@ public sealed class SqlNativeCorpusActionStore(
             if (request is null || outbox is null || request.RowVersion.Length != 8 || outbox.RowVersion.Length != 8) throw new NativeOperationException("target-not-found");
             return [new NativeTargetVersion($"job:{job.Id:D}", Convert.ToBase64String(job.RowVersion)), new NativeTargetVersion($"request:{request.Id:D}", Convert.ToBase64String(request.RowVersion)), new NativeTargetVersion($"outbox:{outbox.Id:D}", Convert.ToBase64String(outbox.RowVersion))];
         }
-        var version = await context.SourceRootConfigurations.AsNoTracking().Where(value => value.Id == id).Select(value => value.RowVersion).SingleOrDefaultAsync(cancellationToken).ConfigureAwait(false);
-        if (version is null || version.Length != 8) throw new NativeOperationException("target-not-found");
-        var targets = new List<NativeTargetVersion> { new($"root:{id:D}", Convert.ToBase64String(version)) };
+        var source = await context.SourceRootConfigurations.AsNoTracking().Where(value => value.Id == id)
+            .SingleOrDefaultAsync(cancellationToken).ConfigureAwait(false);
+        if (source is null || source.RowVersion.Length != 8) throw new NativeOperationException("target-not-found");
+        if (action == "root_delete" && await SqlOutlookSourceReservations.ProtectsDeletionAsync(context, id, cancellationToken))
+            throw new NativeOperationException(SqlOutlookSourceReservations.DeleteRefusal);
+        if (action is "root_resume" or "root_update" or "watcher_set")
+        {
+            using var document = JsonDocument.Parse(canonicalPayload);
+            if (action != "watcher_set" || document.RootElement.GetProperty("enabled").GetBoolean())
+                await SqlOutlookSourceReservations.RequireAvailableAsync(context, source.CanonicalPath, source,
+                    enable: action != "root_update", cancellationToken).ConfigureAwait(false);
+        }
+        if (action == "root_update")
+        {
+            using var document = JsonDocument.Parse(canonicalPayload);
+            var payload = document.RootElement;
+            if (payload.TryGetProperty("expectedConfigurationRevision", out var expected) &&
+                expected.GetInt64() != source.ConfigurationRevision)
+                throw new NativeOperationException("operation-fenced");
+            if ((payload.TryGetProperty("includePatterns", out _) || payload.TryGetProperty("excludePatterns", out _)) &&
+                (source.CrawlMode != (int)SourceDiscoveryMode.Filesystem ||
+                 await context.OutlookCaptureProfiles.AnyAsync(value => value.SourceRootId == id, cancellationToken).ConfigureAwait(false)))
+                throw new NativeOperationException("source-rules-unsupported");
+            if ((NativeSourceRootCreation.ReadRules(payload, "includePatterns") is { Count: > 0 } ||
+                 NativeSourceRootCreation.ReadRules(payload, "excludePatterns") is { Count: > 0 }) &&
+                await context.OutlookCaptureProfiles.AnyAsync(value => value.WatchedSourceRootId == id, cancellationToken))
+                throw new NativeOperationException("outlook-export-path-reserved");
+        }
+        var targets = new List<NativeTargetVersion> { new($"root:{id:D}", Convert.ToBase64String(source.RowVersion)) };
         if (action is "source_verify" or "source_verification_set")
         {
             var stateVersion = await context.SourceRootScanStates.AsNoTracking().Where(x => x.SourceRootId == id)
@@ -214,7 +243,7 @@ public sealed class SqlNativeCorpusActionStore(
             var allowed = action switch
             {
                 "root_create" => new[] { "path", "displayName", "recursive", "followLinks", "maximumFileBytes", "reconciliationSeconds", "discoveryMode", "indexSourceText", "includePatterns", "excludePatterns" },
-                "root_update" => new[] { "rootId", "displayName", "applyDefaultPolicy", "reconcile" },
+                "root_update" => new[] { "rootId", "displayName", "applyDefaultPolicy", "reconcile", "includePatterns", "excludePatterns", "expectedConfigurationRevision" },
                 "policy_reprocess" => new[] { "rootId", "sourceRevisionId", "predecessorActivityId", "inputSha256", "configurationRevision" },
                 "root_disable" or "root_pause" or "root_resume" or "root_delete" => new[] { "rootId" },
                 "source_sync" => new[] { "rootId", "fullContent", "reconcileMetadata" },
@@ -236,8 +265,18 @@ public sealed class SqlNativeCorpusActionStore(
                     _ = NativeSourceRootCreation.Parse(root, "native-v1");
                     break;
                 case "root_update":
-                    _ = RequiredGuid(root, "rootId"); RequireSafeDisplayName(RequiredString(root, "displayName", 256));
-                    _ = OptionalBool(root, "applyDefaultPolicy", false); _ = OptionalBool(root, "reconcile", true);
+                    _ = RequiredGuid(root, "rootId");
+                    _ = OptionalBool(root, "applyDefaultPolicy", false);
+                    var reconcile = OptionalBool(root, "reconcile", true);
+                    var includes = NativeSourceRootCreation.ReadRules(root, "includePatterns");
+                    var excludes = NativeSourceRootCreation.ReadRules(root, "excludePatterns");
+                    var editsRules = includes is not null || excludes is not null;
+                    if (editsRules && !reconcile) throw new NativeOperationException("invalid-payload");
+                    if (!editsRules || root.TryGetProperty("displayName", out _))
+                        RequireSafeDisplayName(RequiredString(root, "displayName", 256));
+                    if (root.TryGetProperty("expectedConfigurationRevision", out var expected) &&
+                        (expected.ValueKind != JsonValueKind.Number || !expected.TryGetInt64(out var revision) || revision < 1))
+                        throw new NativeOperationException("invalid-payload");
                     break;
                 case "root_disable": case "root_pause": case "root_resume": case "root_delete": _ = RequiredGuid(root, "rootId"); break;
                 case "source_sync":

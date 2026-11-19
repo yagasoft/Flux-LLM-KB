@@ -170,6 +170,7 @@ public static class WebHostComposition
                 provider.GetService<ICorpusAnnPreparationSignal>()));
             // Synthetic segmented staging also needs a prepared projection, without model allocation.
             CorpusAnnPreparationService.Add(services);
+            if (!settings.DashboardReadBenchmark) TextChunkWindowBackfillService.Add(services);
         }
         return services;
     }
@@ -194,6 +195,7 @@ public static class WebHostComposition
         {
             allowedHostedServiceTypes.Add(typeof(BgeCpuWarmupService));
             allowedHostedServiceTypes.Add(typeof(CorpusAnnPreparationService));
+            allowedHostedServiceTypes.Add(typeof(TextChunkWindowBackfillService));
         }
         if (runtime.WorkerEnabled)
         {
@@ -205,7 +207,10 @@ public static class WebHostComposition
                 allowedHostedServiceTypes.Add(typeof(SourceChangeJournalService));
         }
         if (runtime.OutlookEnabled)
+        {
             allowedHostedServiceTypes.Add(typeof(OutlookCaptureRecoveryService));
+            allowedHostedServiceTypes.Add(typeof(OutlookWatchedExportPublisher));
+        }
         if (runtime.LocalOcrEnabled)
         {
             allowedHostedServiceTypes.Add(typeof(PaddleOcrVlmCapacityBootstrapService));
@@ -436,7 +441,6 @@ public static class WebHostComposition
             publicationGate: provider.GetRequiredService<ISourceArtifactPublicationGate>(),
             sourceAccessRepairClient: provider.GetService<ISourceAccessRepairClient>()));
         services.AddSingleton<ISourceRetainedObservationStore>(provider => (ISourceRetainedObservationStore)provider.GetRequiredService<ISourceArtifactStore>());
-        services.AddSingleton<ISourceVerificationRetainedStore>(provider => (ISourceVerificationRetainedStore)provider.GetRequiredService<ISourceArtifactStore>());
         services.AddSingleton<ISourceDeletionFileStore>(_ => new WindowsSourceDeletionFileStore(
             artifactRoot,
             indexRoot));
@@ -517,7 +521,7 @@ public static class WebHostComposition
         services.AddSingleton<SourceWorkAdmission>();
         services.AddSingleton<ISourceWorkAdmission>(provider => provider.GetRequiredService<SourceWorkAdmission>());
         services.AddSingleton<ISourceRemovalReconciler, SqlSourceRemovalReconciler>();
-        services.AddSingleton<SqlGitPublicationRecoveryProgress>();
+        services.AddSingleton<SqlSourceWorkRecoveryProgress>();
         services.AddScoped<ISourceWorkRecovery, SqlSourceWorkRecovery>();
         services.AddScoped<ISourceWorkRetirement, SqlSourceWorkRetirement>();
         services.AddScoped<SqlSourceIncrementalCoordinator>();
@@ -528,9 +532,7 @@ public static class WebHostComposition
         services.AddScoped<ISourceVerificationScheduler>(provider => provider.GetRequiredService<SqlSourceVerificationStore>());
         services.AddSingleton<ISourceVerificationReaderSlot>(_ => OperatingSystem.IsWindows()
             ? new WindowsSourceVerificationReaderSlot(liveRoot.RuntimeRoot) : throw new PlatformNotSupportedException("Source verification requires Windows."));
-        services.AddSingleton<ISourceVerificationContentReader, WindowsSourceVerificationContentReader>();
         services.AddScoped<SourceScanWorker>();
-        services.AddScoped<SourceVerificationWorker>();
         services.AddScoped<ISourceScanner, SourceWorkScanner>();
         services.AddSingleton<ChannelSourceScanWakeSignal>();
         services.AddSingleton<ISourceScanWakeSignal>(provider => provider.GetRequiredService<ChannelSourceScanWakeSignal>());
@@ -567,6 +569,9 @@ public static class WebHostComposition
         if (outlookRecoveryOptions.Enabled)
         {
             services.AddSingleton<IHostedService, OutlookCaptureRecoveryService>();
+            services.AddScoped<SqlOutlookWatchedBundleReader>();
+            services.AddScoped<SqlOutlookWatchedPublicationStore>();
+            services.AddSingleton<IHostedService, OutlookWatchedExportPublisher>();
         }
         services.AddScoped<IOutlookOperatorPolicy, LocalOutlookOperatorPolicy>();
         services.AddScoped<LocalOutlookConnectionContext>();
@@ -598,7 +603,7 @@ public static class WebHostComposition
         {
             // Reuse the provisioned physical slot, OCR adapter and recovery graph.
             if (!localOcrEnabled) throw new InvalidOperationException("hybrid-search-requires-shared-ocr-runtime");
-            BgeSearchRuntimeComposition.Add(services);
+            BgeSearchRuntimeComposition.Add(services, enableWindowBackfill: strictProductionPaths);
         }
         if (localOcrEnabled)
         {
@@ -635,7 +640,10 @@ public static class WebHostComposition
             unapprovedHostedServiceTypes.Add(typeof(PaddleOcrVlmCompletionRecoveryService));
         }
         if (!runtime.OutlookEnabled)
+        {
             unapprovedHostedServiceTypes.Add(typeof(OutlookCaptureRecoveryService));
+            unapprovedHostedServiceTypes.Add(typeof(OutlookWatchedExportPublisher));
+        }
         for (var index = services.Count - 1; index >= 0; index--)
         {
             var descriptor = services[index];

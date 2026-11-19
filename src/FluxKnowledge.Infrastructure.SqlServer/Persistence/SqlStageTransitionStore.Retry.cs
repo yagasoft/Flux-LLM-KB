@@ -18,7 +18,8 @@ public sealed partial class SqlStageTransitionStore
         var embeddingContinuation = request.CurrentJob.Stage == PipelineStage.Embed && request.CurrentJob.Operation == PipelineOperations.Embed &&
             request.Reason == "embedding-batch-persisted";
         var sourceDeferral = request.SourceDeferral is not null && request.Reason == SqlRepositoryWorkRecovery.Waiting;
-        if ((!publicationRetry && !embeddingContinuation && !sourceDeferral) ||
+        var sourceAdmissionDeferral = request.SourceDeferral is null && request.Reason == "source-work-deferred";
+        if ((!publicationRetry && !embeddingContinuation && !sourceDeferral && !sourceAdmissionDeferral) ||
             request.DispatchMessage.Stage != request.CurrentJob.Stage || request.DispatchMessage.Operation != request.CurrentJob.Operation ||
             request.DispatchMessage.PipelineRecordId != request.CurrentJob.PipelineRecordId ||
             request.DispatchMessage.SourceRevision != request.CurrentJob.SourceRevision ||
@@ -74,6 +75,15 @@ public sealed partial class SqlStageTransitionStore
                 job.LeaseOwner != request.CurrentJob.LeaseOwner || dispatch.LeaseOwner != request.DispatchMessage.LeaseOwner)
                 throw new InvalidOperationException("The retry Job or DispatchMessage lease was lost.");
 
+            if (sourceAdmissionDeferral)
+            {
+                var deferredAt = _timeProvider.GetUtcNow();
+                if (job.LeaseExpiresAtUtc is null || dispatch.LeaseExpiresAtUtc is null ||
+                    job.LeaseExpiresAtUtc <= deferredAt || dispatch.LeaseExpiresAtUtc <= deferredAt ||
+                    !await context.PipelineRecords.AnyAsync(record => record.Id == job.PipelineRecordId &&
+                        record.SourceRevisionId != null, cancellationToken))
+                    throw new InvalidOperationException("The source admission deferral no longer owns live source-linked work.");
+            }
             if (sourceDeferral)
             {
                 if (!await (from record in context.PipelineRecords join revision in context.SourceRevisions on record.SourceRevisionId equals revision.Id

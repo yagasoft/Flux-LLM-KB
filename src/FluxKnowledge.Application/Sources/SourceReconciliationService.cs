@@ -38,7 +38,8 @@ public sealed class SourceReconciliationService(
     SourceWatchCoordinator? watchCoordinator = null,
     IDeploymentValidationHold? deploymentValidationHold = null,
     IDatabaseStartupReadiness? databaseStartupReadiness = null,
-    ILogger<SourceReconciliationService>? logger = null) : BackgroundService
+    ILogger<SourceReconciliationService>? logger = null,
+    IHostedDatabaseFailureClassifier? databaseFailureClassifier = null) : BackgroundService
 {
     private static readonly TimeSpan DefaultCadence = TimeSpan.FromMinutes(15);
     private static readonly TimeSpan WatchCadence = TimeSpan.FromSeconds(2);
@@ -46,7 +47,32 @@ public sealed class SourceReconciliationService(
 
     protected override async Task ExecuteAsync(CancellationToken stoppingToken)
     {
-        await (databaseStartupReadiness?.WaitAsync(stoppingToken) ?? ValueTask.CompletedTask).ConfigureAwait(false);
+        try
+        {
+            await (databaseStartupReadiness?.WaitAsync(stoppingToken) ?? ValueTask.CompletedTask).ConfigureAwait(false);
+            while (!stoppingToken.IsCancellationRequested)
+            {
+                try
+                {
+                    await RunLoopAsync(stoppingToken).ConfigureAwait(false);
+                    return;
+                }
+                catch (Exception exception) when (databaseFailureClassifier?.TryClassify(exception, out _) == true)
+                {
+                    databaseFailureClassifier.TryClassify(exception, out var errorNumber);
+                    logger?.LogWarning("Source reconciliation deferred after SQL error {SqlErrorNumber} ({ExceptionType}); a fresh iteration will revalidate durable work.",
+                        errorNumber, exception.GetType().Name);
+                }
+                // Failed scopes/timers are disposed. Re-enter through the hold and durable
+                // claims; never directly replay a mutation with an uncertain outcome.
+                await Task.Delay(TimeSpan.FromSeconds(30), timeProvider, stoppingToken).ConfigureAwait(false);
+            }
+        }
+        catch (OperationCanceledException) when (stoppingToken.IsCancellationRequested) { }
+    }
+
+    private async Task RunLoopAsync(CancellationToken stoppingToken)
+    {
         await (deploymentValidationHold ?? DeploymentValidationHold.None)
             .WaitUntilReleasedAsync(stoppingToken).ConfigureAwait(false);
         await PumpDueWatchBatchesAsync(stoppingToken).ConfigureAwait(false);

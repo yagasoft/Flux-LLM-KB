@@ -119,6 +119,7 @@ public static class ModelStoreCommand
     private static async Task<int> WriteUsageAsync(TextWriter error)
     {
         await error.WriteLineAsync("Usage: FluxKnowledge.Cli models verify --manifest <local-file>").ConfigureAwait(false);
+        await error.WriteLineAsync("Checks local paths and byte lengths without reading model payload checksums.").ConfigureAwait(false);
         return 2;
     }
 }

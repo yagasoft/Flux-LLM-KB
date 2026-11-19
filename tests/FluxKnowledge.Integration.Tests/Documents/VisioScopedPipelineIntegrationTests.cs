@@ -17,7 +17,7 @@ using Xunit;
 namespace FluxKnowledge.Integration.Tests.Documents;
 
 [Collection("interactive-visio")]
-public sealed class VisioScopedPipelineIntegrationTests(NativeSqlServerFixture fixture)
+public sealed partial class VisioScopedPipelineIntegrationTests(NativeSqlServerFixture fixture)
     : IClassFixture<NativeSqlServerFixture>, IAsyncLifetime
 {
     private const string Fingerprint = "phase-6-vsdx-retained-visio-v2";
@@ -496,7 +496,7 @@ public sealed class VisioScopedPipelineIntegrationTests(NativeSqlServerFixture f
         Assert.Single(await check.Jobs.ToListAsync());
     }
 
-    private async Task<(DocumentReprocessRequest Request, Guid BranchId)> SeedAsync(RetainedProcessorBranchState state)
+    private async Task<(DocumentReprocessRequest Request, Guid BranchId)> SeedAsync(RetainedProcessorBranchState state, string? physicalRoot = null)
     {
         var now = DateTimeOffset.UtcNow;
         var rootId = Guid.NewGuid();
@@ -507,7 +507,7 @@ public sealed class VisioScopedPipelineIntegrationTests(NativeSqlServerFixture f
         await using var context = await SqlTestData.CreateFactory(fixture).CreateDbContextAsync();
         context.SourceRootConfigurations.Add(new SourceRootConfigurationEntity
         {
-            Id = rootId, CanonicalPath = $"C:\\visio-scope\\{rootId:N}", DisplayName = "Visio scope", State = (int)SourceRootState.Enabled,
+            Id = rootId, CanonicalPath = physicalRoot ?? $"C:\\visio-scope\\{rootId:N}", DisplayName = "Visio scope", State = (int)SourceRootState.Enabled,
             Recursive = true, IncludePatternsJson = "[]", ExcludePatternsJson = "[]", AllowedClassificationsJson = "[]",
             MaximumFileBytes = 1024 * 1024, ReconciliationCadenceSeconds = 900, ConfigurationRevision = 1,
             CreatedAtUtc = now, UpdatedAtUtc = now
@@ -515,7 +515,7 @@ public sealed class VisioScopedPipelineIntegrationTests(NativeSqlServerFixture f
         context.SourceRevisions.Add(new SourceRevisionEntity
         {
             Id = revisionId, SourceRootId = rootId, StableSourceIdentity = "visio-public-test", Revision = 1,
-            ContentSha256 = hash, CanonicalPath = "C:\\visio-scope\\public.vsdx", Classification = "VsdxDocumentContainer",
+            ContentSha256 = hash, CanonicalPath = physicalRoot is null ? "C:\\visio-scope\\public.vsdx" : Path.Combine(physicalRoot, "public.vsdx"), Classification = "VsdxDocumentContainer",
             Extension = ".vsdx", ByteLength = 4, DiscoveredAtUtc = now
         });
         context.SourceArtifacts.Add(new SourceArtifactEntity

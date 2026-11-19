@@ -15,6 +15,33 @@ namespace FluxKnowledge.Integration.Tests.Workers;
 public sealed partial class GpuSchedulerServiceTests
 {
     [Fact]
+    public async Task Admission_contention_retains_the_pending_operation_and_consumed_wake_until_success()
+    {
+        var consumption = Guid.NewGuid();
+        var store = new ScriptedStore(new GpuSchedulerWakeSnapshot(7, GpuSchedulerWakeReason.WorkReady, null,
+            ConsumptionOperationId: consumption), failuresBeforeSuccess: 1)
+        { AdmissionFailureFactory = () => new SqlGpuAdmissionDeferredException() };
+        var signal = new ChannelGpuSchedulerWakeSignal();
+        var logger = new RecordingLogger();
+        await using var provider = CreateProvider(store, signal, TimeProvider.System, TimeSpan.FromHours(1), logger);
+        var service = provider.GetRequiredService<GpuSchedulerService>();
+        await service.StartAsync(CancellationToken.None);
+        try
+        {
+            await store.FirstAttempt.Task.WaitAsync(TimeSpan.FromSeconds(2));
+            Assert.Empty(store.AcknowledgedConsumptions);
+            signal.Notify(GpuSchedulerWakeReason.WorkReady);
+            await store.WakeAcknowledged.Task.WaitAsync(TimeSpan.FromSeconds(2));
+            Assert.Equal(2, store.AdmissionOperationIds.Count);
+            Assert.Single(store.AdmissionOperationIds.Distinct());
+            Assert.Equal(consumption, Assert.Single(store.AcknowledgedConsumptions));
+            Assert.Empty(store.ConsumptionOperationIds);
+            Assert.Equal(0, logger.ErrorCount);
+        }
+        finally { await service.StopAsync(CancellationToken.None).WaitAsync(TimeSpan.FromSeconds(2)); }
+    }
+
+    [Fact]
     public async Task Startup_recovery_waits_for_deployment_release_without_needing_a_new_work_notification()
     {
         var hold = new SchedulerDeploymentHold();

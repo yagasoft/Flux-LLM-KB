@@ -15,6 +15,11 @@ public sealed class OutlookCaptureExportEntity
     public int State { get; set; }
     public string? BlockedReasonCode { get; set; }
     public Guid? SourceRevisionId { get; set; }
+    public DateTimeOffset? WatchedPublishedAtUtc { get; set; }
+    public DateTimeOffset? WatchedWithdrawalAtUtc { get; set; }
+    public string? WatchedWithdrawalRevisionIdsJson { get; set; }
+    public string? WatchedPreparedBundleJson { get; set; }
+    public DateTimeOffset? WatchedRetryAfterUtc { get; set; }
     public long FencingToken { get; set; }
     public byte[] RowVersion { get; set; } = [];
 }

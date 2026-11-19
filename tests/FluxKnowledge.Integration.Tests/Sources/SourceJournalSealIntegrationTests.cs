@@ -119,7 +119,7 @@ public sealed partial class SourceJournalSealIntegrationTests(NativeSqlServerFix
         scenario.Overwrite(0, 65);
         var root = await scenario.ScanAsync("baseline");
         var capturedHash = Convert.ToHexStringLower(SHA256.HashData(await File.ReadAllBytesAsync(scenario.Path)));
-        scenario.Overwrite(1, 66); // Intentionally undetected: same size and timestamp, aggregated native event.
+        scenario.Overwrite(1, 66, preserveDate: true); // Intentionally undetected under the size/date policy.
         scenario.Clock.Now += root.ReconciliationCadence + TimeSpan.FromSeconds(1);
         scenario.SourceBytes = 0;
         await scenario.ScanAsync("ordinary-backstop");
@@ -175,7 +175,7 @@ public sealed partial class SourceJournalSealIntegrationTests(NativeSqlServerFix
     [InlineData("environment")]
     [InlineData("unavailable-provider")]
     [InlineData("partial-provider")]
-    public async Task Revoked_qualification_fences_existing_receipts_and_advisory_hints_but_disabling_only_new_writes_does_not(string change)
+    public async Task Metadata_reuse_does_not_depend_on_retired_journal_seal_provider_qualifications(string change)
     {
         await using var scenario = await Scenario.CreateAsync(fixture.ConnectionString, qualified: true);
         await scenario.ScanAsync("baseline");
@@ -197,7 +197,7 @@ public sealed partial class SourceJournalSealIntegrationTests(NativeSqlServerFix
             Assert.True(await pending.SourcePendingChanges.AnyAsync(x => x.RelativePath == "one.txt" && x.LastUnjournaledGeneration > 0));
         scenario.Restart();
         await scenario.DrainAsync();
-        Assert.Equal(64, scenario.SourceBytes);
+        Assert.Equal(0, scenario.SourceBytes + scenario.ArtifactSourceBytes);
         await using var db = scenario.Factory.CreateDbContext();
         var receipt = JsonDocument.Parse((await db.SourceInventoryEntries.SingleAsync(x => x.RelativePath == "one.txt")).ObservationJson!);
         Assert.False(receipt.RootElement.GetProperty("JournalCovered").GetBoolean());
@@ -257,7 +257,7 @@ public sealed partial class SourceJournalSealIntegrationTests(NativeSqlServerFix
         }
         scenario.SourceBytes = 0;
         await scenario.DrainAsync();
-        Assert.Equal(64, scenario.SourceBytes); // The later unknown obligation requires a fresh guarded capture.
+        Assert.Equal(0, scenario.SourceBytes); // The later generation is observed again; unchanged size/date needs no capture.
     }
 
     [DllImport("kernel32.dll", EntryPoint = "CreateHardLinkW", CharSet = CharSet.Unicode, SetLastError = true)]
@@ -392,10 +392,11 @@ public sealed partial class SourceJournalSealIntegrationTests(NativeSqlServerFix
             }
         }
 
-        internal void Overwrite(int offset, byte value)
+        internal void Overwrite(int offset, byte value, bool preserveDate = false)
         {
             using (var writer = new FileStream(Path, FileMode.Open, FileAccess.Write, FileShare.ReadWrite | FileShare.Delete))
             { writer.Position = offset; writer.WriteByte(value); }
+            if (!preserveDate) _stamp = _stamp.AddSeconds(1);
             File.SetLastWriteTimeUtc(Path, _stamp);
         }
         internal async Task<SourceRootConfiguration> ScanAsync(string owner)

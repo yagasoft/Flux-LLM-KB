@@ -147,6 +147,7 @@ public sealed class SourceAccessIntegrationTests
     {
         public ValueTask<ISourceArtifactPublicationLease> AcquireSharedAsync(string hash, CancellationToken token)
         { beforeAcquire(); return ValueTask.FromResult<ISourceArtifactPublicationLease>(new Lease()); }
+        public ValueTask<ISourceArtifactPublicationBatchLease?> TryAcquireExclusiveBatchAsync(IReadOnlyList<string> hashes, CancellationToken token) => throw new NotSupportedException();
         public ValueTask<ISourceArtifactPublicationLease?> TryAcquireExclusiveAsync(string hash, CancellationToken token) => throw new NotSupportedException();
         private sealed class Lease : ISourceArtifactPublicationLease { public ValueTask DisposeAsync() => ValueTask.CompletedTask; }
     }

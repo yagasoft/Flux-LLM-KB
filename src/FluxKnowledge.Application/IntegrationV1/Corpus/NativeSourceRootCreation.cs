@@ -19,15 +19,15 @@ public static class NativeSourceRootCreation
         };
         var sourceText = Bool(payload, "indexSourceText", true);
         return new SourceRootCreateRequest(payload.GetProperty("path").GetString()!, payload.GetProperty("displayName").GetString()!,
-            Bool(payload, "recursive", true), Rules(payload, "includePatterns"), Rules(payload, "excludePatterns"),
+            Bool(payload, "recursive", true), ReadRules(payload, "includePatterns") ?? [], ReadRules(payload, "excludePatterns") ?? [],
             Bool(payload, "followLinks", false), Long(payload, "maximumFileBytes", SourcePolicyDefaults.MaximumTextBytes),
             sourceText ? ["text/plain", "text/x-source-code"] : [],
             TimeSpan.FromSeconds(Long(payload, "reconciliationSeconds", SourcePolicyDefaults.MetadataReconciliationSeconds)), actor, DiscoveryMode: mode);
     }
 
-    private static IReadOnlyList<string> Rules(JsonElement payload, string name)
+    public static IReadOnlyList<string>? ReadRules(JsonElement payload, string name)
     {
-        if (!payload.TryGetProperty(name, out var value)) return [];
+        if (!payload.TryGetProperty(name, out var value)) return null;
         if (value.ValueKind != JsonValueKind.Array) throw new NativeOperationException("invalid-payload");
         var result = new List<string>();
         foreach (var entry in value.EnumerateArray())

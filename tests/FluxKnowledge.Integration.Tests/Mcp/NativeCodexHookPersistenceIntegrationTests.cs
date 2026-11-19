@@ -1,3 +1,4 @@
+using System.Data.Common;
 using System.Security.Cryptography;
 using System.Text;
 using System.Text.Json;
@@ -10,7 +11,9 @@ using FluxKnowledge.Infrastructure.SqlServer.Persistence.Entities;
 using FluxKnowledge.Infrastructure.SqlServer.Visibility;
 using FluxKnowledge.Integration.Tests.Support;
 using FluxKnowledge.Web.Mcp;
+using FluxKnowledge.Web.NativeV1;
 using Microsoft.EntityFrameworkCore;
+using Microsoft.EntityFrameworkCore.Diagnostics;
 using Microsoft.Data.SqlClient;
 using Xunit;
 
@@ -20,6 +23,100 @@ public sealed class NativeCodexHookPersistenceIntegrationTests(NativeSqlServerFi
     : IClassFixture<NativeSqlServerFixture>
 {
     private readonly NativeSqlServerFixture _fixture = fixture;
+
+    [NativeSqlServerFact]
+    public async Task Workspace_search_returns_only_new_Stop_captures_from_the_selected_workspace()
+    {
+        var workspace = $@"C:\chat-workspace-{Guid.NewGuid():N}";
+        var nestedWorkspace = workspace + @"\registered-child";
+        var siblingWorkspace = workspace + "-sibling";
+        var factory = CreateRetryingFactory();
+        async Task Register(params string[] paths)
+        {
+            await using var context = await factory.CreateDbContextAsync();
+            foreach (var path in paths)
+            {
+                context.SourceRootConfigurations.Add(new SourceRootConfigurationEntity
+                {
+                    Id = Guid.NewGuid(), CanonicalPath = path, DisplayName = path,
+                    State = 0, Recursive = true, IncludePatternsJson = "[]", ExcludePatternsJson = "[]",
+                    MaximumFileBytes = 1024, AllowedClassificationsJson = "[]",
+                    ReconciliationCadenceSeconds = 60, ConfigurationRevision = 1,
+                    CreatedAtUtc = DateTimeOffset.UtcNow, UpdatedAtUtc = DateTimeOffset.UtcNow
+                });
+            }
+            await context.SaveChangesAsync();
+        }
+
+        await Register(workspace, nestedWorkspace, siblingWorkspace);
+        var hook = CreateService();
+        var needle = $"capture-{Guid.NewGuid():N}";
+        var turn = Guid.NewGuid().ToString();
+        var session = Guid.NewGuid().ToString();
+        async Task Capture(string? cwd, string reply, string turnId)
+        {
+            var fields = new Dictionary<string, string>
+            {
+                ["session_id"] = session, ["turn_id"] = turnId,
+                ["last_assistant_message"] = $"{needle} {reply}"
+            };
+            if (cwd is not null) fields.Add("cwd", cwd);
+            var payload = JsonSerializer.SerializeToElement(fields);
+            var response = await hook.HandleAsync("Stop", payload, CancellationToken.None);
+            Assert.Null(response.SystemMessage);
+        }
+
+        await Capture(workspace + @"\src", "workspace reply", turn);
+        await Capture(siblingWorkspace, "replay from another workspace", turn);
+        await Capture(nestedWorkspace, "nested reply", Guid.NewGuid().ToString());
+        await Capture(siblingWorkspace, "sibling reply", Guid.NewGuid().ToString());
+        await Capture(null, "legacy unscoped reply", Guid.NewGuid().ToString());
+
+        var store = new SqlKnowledgeStore(factory);
+        var disclosure = new LocalPrivateContentDisclosure();
+        var queries = new KnowledgeQueryService(store, null!, disclosure);
+        var facade = new NativeV1Facade(null!, null!, null!, null!, null!, null!, queries, null!);
+        var mapper = new NativeV1RequestMapper();
+        async Task<IReadOnlyList<KnowledgeSearchResult>> Search(string cwd, INativeV1Facade? queryFacade = null)
+        {
+            var request = mapper.MapQuery("knowledge.search", JsonSerializer.SerializeToElement(new { query = needle, limit = 10, cwd }));
+            var response = await (queryFacade ?? facade).ExecuteQueryAsync("knowledge", request, CancellationToken.None);
+            return Assert.IsAssignableFrom<IReadOnlyList<KnowledgeSearchResult>>(response);
+        }
+
+        var captured = Assert.Single(await Search(workspace.ToUpperInvariant() + @"\docs\"));
+        Assert.Equal($"{needle} workspace reply", captured.Content);
+        var global = await store.SearchAsync(needle, 10, CancellationToken.None);
+        Assert.Contains(global, note => note.Content == $"{needle} legacy unscoped reply");
+        Assert.Equal($"{needle} nested reply", Assert.Single(await Search(nestedWorkspace)).Content);
+        Assert.Equal($"{needle} sibling reply", Assert.Single(await Search(siblingWorkspace)).Content);
+        var error = await Assert.ThrowsAsync<NativeOperationException>(() => Search(workspace + "-unknown"));
+        Assert.Equal("scope-unavailable", error.ReasonCode);
+        foreach (var invalidPath in new[] { nestedWorkspace + ":stream", workspace + @"\NUL.txt" })
+        {
+            var invalid = await Assert.ThrowsAsync<NativeOperationException>(() => Search(invalidPath));
+            Assert.Equal("scope-unavailable", invalid.ReasonCode);
+        }
+
+        var newChild = workspace + @"\new-child";
+        var interleaving = new BeforeNoteRead(async () =>
+        {
+            await Register(newChild);
+            await Capture(workspace, "parent reply after child registration", Guid.NewGuid().ToString());
+        });
+        var concurrentStore = new SqlKnowledgeStore(new RetryingDbContextFactory(_fixture.ConnectionString, interleaving));
+        var concurrentQuery = new KnowledgeQueryService(concurrentStore, null!, new LocalPrivateContentDisclosure());
+        var concurrentFacade = new NativeV1Facade(null!, null!, null!, null!, null!, null!, concurrentQuery, null!);
+        var changed = await Assert.ThrowsAsync<NativeOperationException>(() => Search(newChild, concurrentFacade));
+        Assert.Equal("scope-unavailable", changed.ReasonCode);
+        Assert.Empty(await Search(newChild));
+
+        var mutations = new KnowledgeCommandService(new SqlNativeOperationStore(factory, TimeProvider.System), store, disclosure);
+        var forget = new KnowledgeMutation("forget", captured.Id.ToString(), null, null, null, null, null, null, null, null);
+        var preview = await mutations.PreviewAsync(forget, "rest", CancellationToken.None);
+        await mutations.CommitAsync(forget, preview.ConfirmationId, Guid.NewGuid().ToString("N"), "rest", CancellationToken.None);
+        Assert.DoesNotContain(await Search(workspace), note => note.Id == captured.Id);
+    }
 
     [NativeSqlServerFact]
     public async Task Stop_persists_one_note_and_receipt_then_replays_the_same_turn_without_duplicates()
@@ -246,15 +343,20 @@ public sealed class NativeCodexHookPersistenceIntegrationTests(NativeSqlServerFi
     public async Task Stop_preview_failure_redacts_hook_values_echoed_by_the_exception()
     {
         var factory = CreateRetryingFactory();
+        const string cwd = @"C:\private-workspace-sentinel";
         var service = new NativeCodexHookService(
-            new EchoingPreviewFailureFacade("private-session-sentinel", "private-turn-sentinel"),
+            new EchoingPreviewFailureFacade("private-session-sentinel", "private-turn-sentinel", cwd),
             new SqlNativeOperationStore(factory, TimeProvider.System),
             auditWriter: new SqlCodexHookAuditWriter(factory));
 
         var startedAt = DateTimeOffset.UtcNow;
         var response = await service.HandleAsync(
             "Stop",
-            Json("{\"session_id\":\"private-session-sentinel\",\"turn_id\":\"private-turn-sentinel\",\"last_assistant_message\":\"private-summary-sentinel\"}"),
+            JsonSerializer.SerializeToElement(new
+            {
+                session_id = "private-session-sentinel", turn_id = "private-turn-sentinel",
+                last_assistant_message = "private-summary-sentinel", cwd
+            }),
             CancellationToken.None);
 
         Assert.True(response.Continue);
@@ -275,6 +377,8 @@ public sealed class NativeCodexHookPersistenceIntegrationTests(NativeSqlServerFi
         Assert.DoesNotContain("private-session-sentinel", visible.Message, StringComparison.Ordinal);
         Assert.DoesNotContain("private-turn-sentinel", visible.Message, StringComparison.Ordinal);
         Assert.DoesNotContain("private-summary-sentinel", visible.Message, StringComparison.Ordinal);
+        Assert.DoesNotContain("private-workspace-sentinel", visible.Message, StringComparison.Ordinal);
+        Assert.DoesNotContain("private-workspace-sentinel", audit.DetailsJson, StringComparison.Ordinal);
     }
 
     [NativeSqlServerFact]
@@ -483,7 +587,7 @@ public sealed class NativeCodexHookPersistenceIntegrationTests(NativeSqlServerFi
             new SqlKnowledgeStore(factory),
             new LocalPrivateContentDisclosure());
         var facade = new NativeV1Facade(null!, null!, null!, null!, null!, null!, null!, commands);
-        return new NativeCodexHookService(facade, operationStore);
+        return new NativeCodexHookService(facade, operationStore, knowledgeStore: new SqlKnowledgeStore(factory));
     }
 
     private static string StopIdempotencyKey(string sessionId, string turnId) =>
@@ -512,11 +616,27 @@ public sealed class NativeCodexHookPersistenceIntegrationTests(NativeSqlServerFi
         return document.RootElement.Clone();
     }
 
-    private sealed class RetryingDbContextFactory(string connectionString) : IDbContextFactory<FluxKnowledgeDbContext>
+    private sealed class BeforeNoteRead(Func<Task> action) : DbCommandInterceptor
+    {
+        private int _ran;
+
+        public override async ValueTask<InterceptionResult<DbDataReader>> ReaderExecutingAsync(
+            DbCommand command, CommandEventData eventData, InterceptionResult<DbDataReader> result,
+            CancellationToken cancellationToken = default)
+        {
+            if (command.CommandText.Contains("FROM [KnowledgeItems]", StringComparison.Ordinal) &&
+                Interlocked.Exchange(ref _ran, 1) == 0)
+                await action();
+            return result;
+        }
+    }
+
+    private sealed class RetryingDbContextFactory(string connectionString, IInterceptor? interceptor = null) : IDbContextFactory<FluxKnowledgeDbContext>
     {
         private readonly DbContextOptions<FluxKnowledgeDbContext> _options =
             new DbContextOptionsBuilder<FluxKnowledgeDbContext>()
                 .UseSqlServer(connectionString, sqlServer => sqlServer.EnableRetryOnFailure())
+                .AddInterceptors(interceptor is null ? Array.Empty<IInterceptor>() : [interceptor])
                 .Options;
 
         public FluxKnowledgeDbContext CreateDbContext() => new(_options);
@@ -598,7 +718,7 @@ public sealed class NativeCodexHookPersistenceIntegrationTests(NativeSqlServerFi
             throw new NotSupportedException();
     }
 
-    private sealed class EchoingPreviewFailureFacade(string sessionId, string turnId) : INativeV1Facade
+    private sealed class EchoingPreviewFailureFacade(string sessionId, string turnId, string cwd) : INativeV1Facade
     {
         public ValueTask<object> ExecuteQueryAsync(string family, object request, CancellationToken cancellationToken) =>
             throw new NotSupportedException();
@@ -607,7 +727,7 @@ public sealed class NativeCodexHookPersistenceIntegrationTests(NativeSqlServerFi
         {
             var mutation = Assert.IsType<KnowledgeMutation>(command);
             return ValueTask.FromException<NativeActionPreview>(
-                new InvalidOperationException($"preview failure: {sessionId}; {turnId}; {mutation.Title}; {mutation.Body}"));
+                new InvalidOperationException($"preview failure: {sessionId}; {turnId}; {mutation.Title}; {mutation.Body}; {cwd}; {JsonSerializer.Serialize(cwd)}"));
         }
 
         public ValueTask<NativeActionReceipt> CommitAsync(string family, object command, string confirmationId, string idempotencyKey, string surface, CancellationToken cancellationToken) =>

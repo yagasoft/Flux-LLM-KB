@@ -1,5 +1,3 @@
-using System.Security.Cryptography;
-using System.Text;
 using FluxKnowledge.Application.Ports;
 
 namespace FluxKnowledge.Application.Search;
@@ -32,7 +30,14 @@ public static partial class PassageRanking
         }
         // Only verified identical header/body inputs share a vote. Preserve every
         // eligible citation binding so publication withdrawal can select another copy.
-        var groups = identities.Values.GroupBy(InputKey).Select(group => group.OrderBy(value => value.ChunkId).ToArray()).ToArray();
+        var grouped = new SortedDictionary<(string Body, string Header, long UnverifiedId), List<EligiblePassageCandidate>>(InputComparer);
+        foreach (var passage in identities.Values)
+        {
+            var key = InputKey(passage);
+            if (!grouped.TryGetValue(key, out var copiesForInput)) grouped[key] = copiesForInput = [];
+            copiesForInput.Add(passage);
+        }
+        var groups = grouped.Values.Select(group => group.OrderBy(value => value.ChunkId).ToArray()).ToArray();
         var representatives = groups.SelectMany(group => group.Select(value => (value.ChunkId, Representative: group[0].ChunkId)))
             .ToDictionary(value => value.ChunkId, value => value.Representative);
         var copies = groups.ToDictionary(group => group[0].ChunkId);
@@ -71,7 +76,8 @@ public static partial class PassageRanking
         first with { FullTextRank = 0, DisclosureProof = null } ==
             second with { FullTextRank = 0, DisclosureProof = null };
 
-    internal static int DistinctInputCount(IEnumerable<EligiblePassageCandidate> passages) => passages.Select(InputKey).Distinct().Count();
+    internal static int DistinctInputCount(IEnumerable<EligiblePassageCandidate> passages) =>
+        new SortedSet<(string Body, string Header, long UnverifiedId)>(passages.Select(InputKey), InputComparer).Count;
 
     internal static bool SameSearchInput(EligiblePassageCandidate first, EligiblePassageCandidate second)
     {
@@ -79,11 +85,15 @@ public static partial class PassageRanking
         return key.UnverifiedId == 0 && key == InputKey(second);
     }
 
-    private static (string Hash, string Body, string Header, long UnverifiedId) InputKey(EligiblePassageCandidate passage)
-    {
-        var text = passage.ContextHeader.Length == 0 ? passage.Content : passage.ContextHeader + "\n" + passage.Content;
-        var verified = passage.SearchInputHash.Length == 64 && passage.SearchInputHash ==
-            Convert.ToHexStringLower(SHA256.HashData(Encoding.UTF8.GetBytes(text)));
-        return verified ? (passage.SearchInputHash, passage.Content, passage.ContextHeader, 0) : ("", "", "", passage.ChunkId);
-    }
+    private static (string Body, string Header, long UnverifiedId) InputKey(EligiblePassageCandidate passage) =>
+        PassageIntegrityVerifier.Shared.MatchesSearchInput(passage)
+            ? (passage.Content, passage.ContextHeader, 0) : ("", "", passage.ChunkId);
+
+    private static readonly IComparer<(string Body, string Header, long UnverifiedId)> InputComparer =
+        Comparer<(string Body, string Header, long UnverifiedId)>.Create((first, second) =>
+        {
+            var result = first.UnverifiedId.CompareTo(second.UnverifiedId);
+            if (result == 0) result = StringComparer.Ordinal.Compare(first.Body, second.Body);
+            return result == 0 ? StringComparer.Ordinal.Compare(first.Header, second.Header) : result;
+        });
 }

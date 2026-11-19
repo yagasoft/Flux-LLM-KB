@@ -55,8 +55,8 @@ public sealed class SourceCaptureLeaseTests
             Assert.Same(snapshot, Assert.IsAssignableFrom<ISourceCaptureLease>(receipt.PublicationLease).Snapshot);
             Assert.Equal(existing, receipt.ExistingArtifact);
             Assert.Equal(length, discoveryReads);
-            Assert.Equal(existing ? 0L : length, copyReads);
-            Assert.Equal(length, retainedReads);
+            Assert.Equal(existing || snapshot.HasFullBoundedBuffer ? 0L : length, copyReads);
+            Assert.Equal(0, retainedReads);
             Assert.Equal(length <= Math.Min(maximumFileBytes, 33554432) ? length : Math.Min(length, 8192), snapshot.ClassificationBuffer.Length);
             Assert.Equal(bytes, await File.ReadAllBytesAsync(Path.Combine(storage.Root, receipt.StoreRelativePath)));
             Assert.Throws<IOException>(() => { using var writable = File.OpenWrite(path); });
@@ -107,8 +107,10 @@ public sealed class SourceCaptureLeaseTests
         await Assert.ThrowsAsync<ObjectDisposedException>(() => artifacts.PutCapturedFileAsync(capture, Metadata(capture.Snapshot), default).AsTask());
     }
 
-    [Fact]
-    public async Task Existing_retained_corruption_is_rejected_without_overwrite_or_a_leaked_capture()
+    [Theory]
+    [InlineData(false)]
+    [InlineData(true)]
+    public async Task Existing_retained_blobs_use_metadata_without_rehashing_and_reject_length_changes(bool lengthChanged)
     {
         using var source = new CloudSourceFixture();
         using var storage = new CloudSourceFixture();
@@ -121,22 +123,36 @@ public sealed class SourceCaptureLeaseTests
         var original = "Original evidence."u8.ToArray();
         var seed = await artifacts.PutAsync(original, Metadata(capture.Snapshot), default);
         var retainedPath = Path.Combine(storage.Root, seed.StoreRelativePath);
-        var corrupt = Enumerable.Repeat((byte)'?', original.Length).ToArray();
+        var corrupt = Enumerable.Repeat((byte)'?', original.Length+(lengthChanged?1:0)).ToArray();
         await File.WriteAllBytesAsync(retainedPath, corrupt);
 
-        await Assert.ThrowsAsync<InvalidDataException>(() => artifacts.PutCapturedFileAsync(capture, Metadata(capture.Snapshot), default).AsTask());
+        if(lengthChanged)
+            await Assert.ThrowsAsync<InvalidDataException>(() => artifacts.PutCapturedFileAsync(capture, Metadata(capture.Snapshot), default).AsTask());
+        else
+        {
+            var receipt=await artifacts.PutCapturedFileAsync(capture,Metadata(capture.Snapshot),default);
+            try
+            {
+                Assert.True(receipt.ExistingArtifact);
+                Assert.Throws<IOException>(()=>{using var writable=File.OpenWrite(path);});
+            }
+            finally{await receipt.PublicationLease!.DisposeAsync();}
+        }
 
         Assert.Equal(corrupt, await File.ReadAllBytesAsync(retainedPath));
         using var writable = File.OpenWrite(path);
         Assert.True(writable.CanWrite);
     }
 
-    [Fact]
-    public async Task Classification_bytes_are_not_authority_and_new_capture_detects_a_timestamp_restored_edit()
+    [Theory]
+    [InlineData(6)]
+    [InlineData(8193)]
+    public async Task Classification_bytes_are_not_authority_and_new_capture_detects_a_timestamp_restored_edit(int length)
     {
         using var source = new CloudSourceFixture();
         using var storage = new CloudSourceFixture();
-        var path = source.File("same.txt", "before");
+        var original=new string('b',length);
+        var path = source.File("same.txt", original);
         var root = SourceRootConfiguration.Create(source.Root, "capture", false, false, 1024);
         using var artifacts = new ContentAddressedSourceArtifactStore(storage.Root);
         string originalHash;
@@ -149,10 +165,10 @@ public sealed class SourceCaptureLeaseTests
             originalTime = capture.Snapshot.LastWriteAtUtc;
             Array.Fill(capture.Snapshot.ClassificationBuffer, (byte)'?');
             var receipt = await artifacts.PutCapturedFileAsync(capture, Metadata(capture.Snapshot), default);
-            try { Assert.Equal("before", await File.ReadAllTextAsync(Path.Combine(storage.Root, receipt.StoreRelativePath))); }
+            try { Assert.Equal(original, await File.ReadAllTextAsync(Path.Combine(storage.Root, receipt.StoreRelativePath))); }
             finally { await receipt.PublicationLease!.DisposeAsync(); }
         }
-        await File.WriteAllTextAsync(path, "after!");
+        await File.WriteAllTextAsync(path, new string('a',length));
         File.SetLastWriteTimeUtc(path, originalTime.UtcDateTime);
         await using var next = new LocalSourceEnumerator().EnumerateCapturedAsync(root, Ownership(), default).GetAsyncEnumerator();
         Assert.True(await next.MoveNextAsync());
@@ -185,7 +201,7 @@ public sealed class SourceCaptureLeaseTests
     [Theory]
     [InlineData(false)]
     [InlineData(true)]
-    public async Task Cancelled_retained_verification_or_streaming_copy_releases_capture_and_temporary_files(bool existing)
+    public async Task Cancelled_metadata_reuse_or_streaming_copy_releases_capture_and_temporary_files(bool existing)
     {
         using var source = new CloudSourceFixture();
         using var storage = new CloudSourceFixture();
@@ -197,7 +213,8 @@ public sealed class SourceCaptureLeaseTests
         Assert.True(await iterator.MoveNextAsync());
         var capture = iterator.Current;
         if (existing) _ = await seedStore.PutAsync(await File.ReadAllBytesAsync(path), Metadata(capture.Snapshot), default);
-        using var artifacts = new ContentAddressedSourceArtifactStore(storage.Root)
+        using var artifacts = new ContentAddressedSourceArtifactStore(storage.Root,beforeArtifactWrite: _=>
+        {if(existing)cancellation.Cancel();return ValueTask.CompletedTask;})
         {
             SourceBytesRead = _ => cancellation.Cancel(),
             RetainedBytesRead = _ => cancellation.Cancel()
@@ -317,6 +334,7 @@ public sealed class SourceCaptureLeaseTests
             await Task.Delay(Timeout.InfiniteTimeSpan, token);
             throw new InvalidOperationException("Unreachable cancelled wait.");
         }
+        public ValueTask<ISourceArtifactPublicationBatchLease?> TryAcquireExclusiveBatchAsync(IReadOnlyList<string> hashes, CancellationToken token) => throw new NotSupportedException();
         public ValueTask<ISourceArtifactPublicationLease?> TryAcquireExclusiveAsync(string hash, CancellationToken token) =>
             throw new NotSupportedException();
     }
@@ -439,6 +457,7 @@ public sealed class SourceCaptureLeaseTests
         public bool FailRelease { get; init; }
         public ValueTask<ISourceArtifactPublicationLease> AcquireSharedAsync(string hash, CancellationToken token) =>
             ValueTask.FromResult<ISourceArtifactPublicationLease>(new Lease(this));
+        public ValueTask<ISourceArtifactPublicationBatchLease?> TryAcquireExclusiveBatchAsync(IReadOnlyList<string> hashes, CancellationToken token) => throw new NotSupportedException();
         public ValueTask<ISourceArtifactPublicationLease?> TryAcquireExclusiveAsync(string hash, CancellationToken token) =>
             throw new NotSupportedException();
         private sealed class Lease(RecordingGate owner) : ISourceArtifactPublicationLease

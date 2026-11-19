@@ -187,7 +187,23 @@ public sealed class CorpusRebuildReplacementTests(NativeSqlServerFixture fixture
         Assert.Empty(await context.GpuExecutorResultReceipts.ToArrayAsync());
         Assert.Equal(retained.MiniTaskId, await SqlEmbeddingGpuRequestStore.OwnedLocalTasks(context, runtime).Select(value => value.Id).SingleAsync());
         Assert.False(await SqlEmbeddingGpuRequestStore.HasContradictoryRequestsAsync(context, [old.Inputs[0].PipelineRecordId], [], CancellationToken.None));
-        await context.EmbeddingGpuRequests.Where(value => value.MiniTaskId == retained.MiniTaskId)
+        // Exercise more than one archived-proof batch. All attempts have exact
+        // supersession provenance; corrupting the final one must still refuse.
+        var archivedTask = await context.GpuMiniTasks.AsNoTracking().SingleAsync();
+        var lastRequestId = retained.MiniTaskId;
+        for (var i = 0; i < 256; i++)
+        {
+            var taskCopy = (GpuMiniTaskEntity)context.Entry(archivedTask).CurrentValues.ToObject();
+            taskCopy.Id = Guid.NewGuid(); taskCopy.CreatedSequence = 0; taskCopy.RowVersion = [];
+            taskCopy.IdempotencyKey = "archived-deletion:" + taskCopy.Id.ToString("N");
+            var requestCopy = (EmbeddingGpuRequestEntity)context.Entry(retained).CurrentValues.ToObject();
+            requestCopy.MiniTaskId = taskCopy.Id; requestCopy.RowVersion = [];
+            context.AddRange(taskCopy, requestCopy);
+            lastRequestId = taskCopy.Id;
+        }
+        await context.SaveChangesAsync();
+        Assert.False(await SqlEmbeddingGpuRequestStore.HasContradictoryRequestsAsync(context, [old.Inputs[0].PipelineRecordId], [], CancellationToken.None));
+        await context.EmbeddingGpuRequests.Where(value => value.MiniTaskId == lastRequestId)
             .ExecuteUpdateAsync(setters => setters.SetProperty(value => value.CorpusEpoch, Guid.NewGuid()));
         Assert.True(await SqlEmbeddingGpuRequestStore.HasContradictoryRequestsAsync(context, [old.Inputs[0].PipelineRecordId], [], CancellationToken.None));
     }

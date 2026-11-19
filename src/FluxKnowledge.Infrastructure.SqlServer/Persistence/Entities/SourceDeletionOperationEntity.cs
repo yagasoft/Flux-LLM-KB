@@ -10,6 +10,7 @@ public sealed class SourceDeletionOperationEntity
     public string? ReasonCode { get; set; }
     public string? ResumePhase { get; set; }
     public long? MembershipVectorCursor { get; set; }
+    public long? WithdrawalVectorCursor { get; set; }
     public long MembershipRowsDeleted { get; set; }
     public Guid? LastCommittedLeaseId { get; set; }
     public DateTimeOffset? LastProgressAtUtc { get; set; }

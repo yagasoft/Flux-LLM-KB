@@ -66,6 +66,10 @@ public sealed class HybridDegradationEndpointTests
         public ValueTask<KnowledgeTarget?> FindTargetAsync(KnowledgeMutation mutation, CancellationToken ct) => ValueTask.FromResult<KnowledgeTarget?>(null);
         public ValueTask<IReadOnlyList<KnowledgeSearchResult>> SearchAsync(string query, int limit, CancellationToken ct) =>
             ValueTask.FromResult<IReadOnlyList<KnowledgeSearchResult>>([new(Guid.NewGuid(), "note", "Public note", "Safe stored note", "knowledge")]);
+        public ValueTask<IReadOnlyList<KnowledgeSearchResult>> SearchCodexWorkspaceAsync(
+            string query, string cwd, int limit, CancellationToken cancellationToken) => throw new NotSupportedException();
+        public ValueTask<Guid?> ResolveCodexWorkspaceAsync(string cwd, CancellationToken cancellationToken) =>
+            throw new NotSupportedException();
         public ValueTask<IReadOnlyList<KnowledgeGraphResult>> TraverseAsync(string node, int depth, int limit, CancellationToken ct) =>
             ValueTask.FromResult<IReadOnlyList<KnowledgeGraphResult>>([]);
     }

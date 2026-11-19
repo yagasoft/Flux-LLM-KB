@@ -5,6 +5,12 @@ public sealed class OutlookCaptureProfileEntity
 {
     public Guid Id { get; set; }
     public Guid SourceRootId { get; set; }
+    public Guid? WatchedSourceRootId { get; set; }
+    public string? WatchedRootPath { get; set; }
+    public string? WatchedStagingPath { get; set; }
+    public string? WatchedRootIdentity { get; set; }
+    public string? WatchedStagingIdentity { get; set; }
+    public DateTimeOffset? WatchedPublicationSuspendedAtUtc { get; set; }
     public string DisplayName { get; set; } = string.Empty;
     public string SpoolRoot { get; set; } = string.Empty;
     public int IncrementalBasis { get; set; }

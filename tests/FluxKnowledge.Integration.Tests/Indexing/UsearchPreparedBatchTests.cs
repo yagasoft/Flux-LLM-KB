@@ -37,7 +37,7 @@ public sealed class UsearchPreparedBatchTests
         await fixture.Cache.PrepareAsync([fixture.Segments[0]], default);
         await Assert.ThrowsAsync<PassageRetrievalRefusalException>(() => fixture.Cache.BorrowPreparedBatchAsync(fixture.Segments, default).AsTask());
         await Assert.ThrowsAsync<InvalidOperationException>(() => fixture.Cache.BorrowPreparedBatchAsync(
-            [fixture.Segments[0] with { FileChecksum = new string('0', 64) }], default).AsTask());
+            [fixture.Segments[0] with { FileChecksum = new string('a', 64) }], default).AsTask());
         await Assert.ThrowsAsync<ArgumentException>(() => fixture.Cache.BorrowPreparedBatchAsync(
             [fixture.Segments[0], fixture.Segments[0]], default).AsTask());
         Assert.Empty(fixture.Owners.Reads);

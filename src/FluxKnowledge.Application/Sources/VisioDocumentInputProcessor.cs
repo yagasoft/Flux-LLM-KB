@@ -20,8 +20,8 @@ public sealed class VisioDocumentInputProcessor : ILocalSourceCapabilityHandler
     public async ValueTask<RetainedProcessorCompletion> ProcessAsync(
         RetainedProcessorClaim claim, RetainedSourceBytes retained, CancellationToken cancellationToken)
     {
-        if (retained.ContentSha256 != claim.InputSha256 ||
-            Convert.ToHexStringLower(SHA256.HashData(retained.Bytes)) != claim.InputSha256)
+        if (retained.SourceRevisionId != claim.SourceRevisionId || retained.ByteLength != retained.Bytes.LongLength ||
+            retained.ContentSha256 != claim.InputSha256)
         {
             throw new RetainedProcessorException("retained-artifact-checksum-invalid");
         }

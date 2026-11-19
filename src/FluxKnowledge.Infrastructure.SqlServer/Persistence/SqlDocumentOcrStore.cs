@@ -207,7 +207,9 @@ public sealed partial class SqlDocumentOcrStore(
                     cancellationToken)
                 .ConfigureAwait(false);
             if (task is null || dispatch is null ||
-                !await SourceIsEnabledAsync(context, request, cancellationToken).ConfigureAwait(false))
+                !(lease is not null
+                    ? await HasDurableSourceBindingAsync(context, request, cancellationToken).ConfigureAwait(false)
+                    : await SourceIsEnabledAsync(context, request, cancellationToken).ConfigureAwait(false)))
             {
                 throw new InvalidOperationException("document-ocr-execution-unavailable");
             }
@@ -652,6 +654,16 @@ public sealed partial class SqlDocumentOcrStore(
             _ = StrictUtf8.GetByteCount(block.Text);
         }
     }
+
+    // Saving an owned result grants no execution or publication permission.
+    // Admission and pending-removal checks still fence launch and continuation.
+    private static Task<bool> HasDurableSourceBindingAsync(FluxKnowledgeDbContext context,
+        DocumentOcrRequestEntity request, CancellationToken cancellationToken) =>
+        (from record in SqlSourceWorkEligibility.Records(context, includePending: false, includeAdmission: false).AsNoTracking()
+         join revision in context.SourceRevisions.AsNoTracking() on record.SourceRevisionId equals revision.Id
+         where record.Id == request.PipelineRecordId && record.Revision == request.SourceRevision &&
+               record.SourceRevisionId == request.RetainedSourceRevisionId && revision.ContentSha256 == request.ContentSha256
+         select record.Id).AnyAsync(cancellationToken);
 
     private Task<bool> SourceIsEnabledAsync(
         FluxKnowledgeDbContext context,

@@ -13,11 +13,12 @@ using FluxKnowledge.Domain.Pipeline;
 using FluxKnowledge.Domain.Sources;
 using FluxKnowledge.Infrastructure.SqlServer.Persistence.Entities;
 using Microsoft.EntityFrameworkCore;
+using Microsoft.EntityFrameworkCore.Storage;
 
 namespace FluxKnowledge.Infrastructure.SqlServer.Persistence;
 
 /// <summary>Explicit terminal Embed recovery preserves checkpoint and delivery identities.</summary>
-internal sealed record SqlEmbeddingRetry(JobEntity Job, OutboxMessageEntity Dispatch, PipelineRecordEntity Record,
+internal sealed partial record SqlEmbeddingRetry(JobEntity Job, OutboxMessageEntity Dispatch, PipelineRecordEntity Record,
     SourceRevisionEntity Source, SourceRootConfigurationEntity Root, SourceActivityEntity Activity,
     IReadOnlyList<NativeTargetVersion> Targets, bool HasUnstartedHandoff = false, bool BeforeFirstDraft = false,
     bool RequiresSettledGpuPublicationProof = false)
@@ -174,7 +175,8 @@ internal sealed record SqlEmbeddingRetry(JobEntity Job, OutboxMessageEntity Disp
     private sealed record GpuInput(long Id, string Hash);
     internal static async Task<string> ReadSettledGpuBindingAsync(FluxKnowledgeDbContext context, JobEntity job,
         IndexGenerationEntity draft, EmbeddingGpuRuntime runtime, CancellationToken ct,
-        bool repositoryRecovery = false, bool allowUnresolvedGroup = false, bool allowUnstartedHandoff = false)
+        bool repositoryRecovery = false, bool allowUnresolvedGroup = false, bool allowUnstartedHandoff = false,
+        bool reuseCheckpointValidation = false, bool issueCheckpointValidation = false)
     {
         var requests = await context.EmbeddingGpuRequests.AsNoTracking().Where(value => value.ParentJobId == job.Id)
             .OrderBy(value => value.MiniTaskId).ToArrayAsync(ct);
@@ -200,7 +202,10 @@ internal sealed record SqlEmbeddingRetry(JobEntity Job, OutboxMessageEntity Disp
         var reserved = await context.GpuCapacitySlots.Where(value => value.ActiveBatchId != null && batchIds.Contains(value.ActiveBatchId.Value))
             .Select(value => value.ActiveBatchId!.Value).ToArrayAsync(ct);
         var reservedIds = reserved.ToHashSet();
-        var successfulDigests = await ReadSuccessfulResultDigestsAsync(context, job, draft, requests, ct);
+        var cachedProofs = reuseCheckpointValidation
+            ? await ReadReusableSuccessfulResultDigestsAsync(context, job, draft, runtime, requests, tasksById, batches, dispatches, ct)
+            : null;
+        var successfulDigests = cachedProofs?.Digests ?? await ReadSuccessfulResultDigestsAsync(context, job, draft, requests, ct);
         foreach (var request in requests)
         {
             var task = tasksById[request.MiniTaskId];
@@ -266,6 +271,12 @@ internal sealed record SqlEmbeddingRetry(JobEntity Job, OutboxMessageEntity Disp
             tasks.Where(task => requestsById.TryGetValue(task.Id, out var request) && SameGroup(request, unresolved))
                 .Max(value => value.CreatedSequence)) Refuse();
         if (unresolved is not null && unstarted.Length == 1 && !SameGroup(unstarted[0], unresolved)) Refuse();
+        if (issueCheckpointValidation && cachedProofs is not null)
+        {
+            if (context.Database.CurrentTransaction?.GetDbTransaction().IsolationLevel != System.Data.IsolationLevel.Serializable)
+                throw new InvalidOperationException("embedding-checkpoint-cache-requires-fenced-transaction");
+            context.GpuSchedulerOperationReceipts.AddRange(cachedProofs.Receipts);
+        }
         return Convert.ToHexStringLower(binding.GetHashAndReset());
     }
 
@@ -279,7 +290,8 @@ internal sealed record SqlEmbeddingRetry(JobEntity Job, OutboxMessageEntity Disp
     }
 
     private static async Task<Dictionary<Guid, byte[]>> ReadSuccessfulResultDigestsAsync(FluxKnowledgeDbContext context,
-        JobEntity job, IndexGenerationEntity draft, EmbeddingGpuRequestEntity[] requests, CancellationToken ct)
+        JobEntity job, IndexGenerationEntity draft, EmbeddingGpuRequestEntity[] requests, CancellationToken ct,
+        bool validatePayloadMetadata = false)
     {
         var successful = requests.Where(value => value.ResultDigest is { Length: 32 }).ToArray();
         var result = new Dictionary<Guid, byte[]>();
@@ -291,17 +303,20 @@ internal sealed record SqlEmbeddingRetry(JobEntity Job, OutboxMessageEntity Disp
         {
             var groups = successful.Skip(start).Take(groupsPerPage).Select(request => new { Request = request, Inputs = ReadGroupInputs(request) }).ToArray();
             var ids = groups.SelectMany(group => group.Inputs.Select(input => input.Id)).Distinct().ToArray();
-            var payloads = await (from chunk in SqlEmbeddingCheckpointStore.Chunks(context, job.PipelineRecordId, job.SourceRevision)
-                join vector in context.Vectors on chunk.Id equals vector.TextChunkId
-                where ids.Contains(chunk.Id) && vector.IndexGenerationId == draft.Id
-                select new { chunk.Id, chunk.SearchInputHash, vector.Values }).ToArrayAsync(ct);
-            var byChunk = payloads.ToDictionary(value => value.Id);
+            var payloads = await context.Vectors.AsNoTracking().Include(vector => vector.TextChunk)
+                .Where(vector => vector.IndexGenerationId == draft.Id && ids.Contains(vector.TextChunkId) &&
+                    SqlEmbeddingCheckpointStore.Chunks(context, job.PipelineRecordId, job.SourceRevision).Any(chunk => chunk.Id == vector.TextChunkId))
+                .ToArrayAsync(ct);
+            if (validatePayloadMetadata)
+                foreach (var payload in payloads)
+                    SqlEmbeddingCheckpointStore.ValidateStoredPayload(payload, payload.TextChunk, draft);
+            var byChunk = payloads.ToDictionary(value => value.TextChunkId);
             foreach (var group in groups)
             {
                 using var hash = IncrementalHash.CreateHash(HashAlgorithmName.SHA256);
                 foreach (var input in group.Inputs)
                 {
-                    if (!byChunk.TryGetValue(input.Id, out var payload) || payload.SearchInputHash != input.Hash) Refuse();
+                    if (!byChunk.TryGetValue(input.Id, out var payload) || payload.TextChunk.SearchInputHash != input.Hash) Refuse();
                     hash.AppendData(payload.Values);
                 }
                 result.Add(group.Request.MiniTaskId, hash.GetHashAndReset());

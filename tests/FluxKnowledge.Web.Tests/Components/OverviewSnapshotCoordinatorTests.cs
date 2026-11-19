@@ -32,22 +32,22 @@ public sealed class OverviewSnapshotCoordinatorTests
     }
 
     [Fact]
-    public async Task Owned_deadline_uses_the_supplied_clock_and_preserves_the_full_two_second_budget()
+    public async Task Owned_deadline_uses_the_supplied_clock_and_preserves_the_full_five_second_budget()
     {
         var clock = new ManualClock();
         var reader = new ControlledReader { HoldCancellation = true };
         using var services = new ServiceCollection().AddSingleton<IProjectionReader>(reader).BuildServiceProvider();
         await using var shared = new OverviewSnapshotCoordinator(services.GetRequiredService<IServiceScopeFactory>(), new StatusEventFeed(), clock);
         var refresh = shared.RefreshAsync(default).AsTask();
-        await reader.Started.Task.WaitAsync(TimeSpan.FromSeconds(3));
-        Assert.Equal(TimeSpan.FromSeconds(2), clock.OneShotDelay);
-        clock.Advance(TimeSpan.FromMilliseconds(1999));
-        Assert.Equal(TimeSpan.FromMilliseconds(1), clock.OneShotDelay);
-        Assert.False(reader.CancellationObserved.Task.IsCompleted);
-        Assert.False(refresh.IsCompleted);
-        clock.Advance(TimeSpan.FromMilliseconds(1));
         try
         {
+            await reader.Started.Task.WaitAsync(TimeSpan.FromSeconds(3));
+            Assert.Equal(TimeSpan.FromSeconds(5), clock.OneShotDelay);
+            clock.Advance(TimeSpan.FromMilliseconds(4999));
+            Assert.Equal(TimeSpan.FromMilliseconds(1), clock.OneShotDelay);
+            Assert.False(reader.CancellationObserved.Task.IsCompleted);
+            Assert.False(refresh.IsCompleted);
+            clock.Advance(TimeSpan.FromMilliseconds(1));
             await reader.CancellationObserved.Task.WaitAsync(TimeSpan.FromSeconds(1));
             Assert.False(refresh.IsCompleted); // Deadline cancellation still awaits reader cleanup.
         }
@@ -57,6 +57,45 @@ public sealed class OverviewSnapshotCoordinatorTests
         Assert.Null(shared.Current.Projection);
         Assert.Equal(1, shared.Metrics.Failed);
     }
+    [Fact]
+    public async Task Periodic_refresh_respects_timeout_backoff_and_then_publishes_a_fresh_sample()
+    {
+        var clock = new ManualClock();
+        var reader = new ControlledReader();
+        reader.Release.SetResult();
+        using var services = new ServiceCollection().AddSingleton<IProjectionReader>(reader).BuildServiceProvider();
+        await using var shared = new OverviewSnapshotCoordinator(services.GetRequiredService<IServiceScopeFactory>(), new StatusEventFeed(), clock);
+        using var subscription = shared.Subscribe();
+        await shared.RefreshAsync(default);
+        var original = shared.Current;
+
+        reader.Release = new(TaskCreationOptions.RunContinuationsAsynchronously);
+        clock.Advance(TimeSpan.FromSeconds(2));
+        var timedOut = shared.RefreshAsync(default, force: true).AsTask();
+        await reader.SecondRead.Task.WaitAsync(TimeSpan.FromSeconds(3));
+        clock.Advance(TimeSpan.FromSeconds(5));
+        await timedOut.WaitAsync(TimeSpan.FromSeconds(3));
+        Assert.Same(original.Projection, shared.Current.Projection);
+        Assert.Equal(original.PublishedAtUtc, shared.Current.PublishedAtUtc);
+        Assert.Contains("Status is busy", shared.Current.RefreshIssue);
+
+        reader.Result = Sample(9);
+        reader.Release.SetResult();
+        var backoffCheck = clock.ObserveNextUtcRead();
+        clock.Advance(TimeSpan.FromSeconds(3));
+        await backoffCheck.WaitAsync(TimeSpan.FromSeconds(3));
+        Assert.Equal(2, shared.Metrics.Attempts);
+        Assert.False(clock.HasOneShotTimer);
+
+        clock.Advance(TimeSpan.FromSeconds(10));
+        await WaitUntilAsync(() => clock.HasOneShotTimer);
+        clock.Advance(TimeSpan.FromMilliseconds(250));
+        await WaitUntilAsync(() => shared.Metrics.Completed == 2);
+        Assert.Equal(3, reader.Reads);
+        Assert.Equal(9, shared.Current.Projection!.IndexedRecordCount);
+        Assert.Null(shared.Current.RefreshIssue);
+    }
+
     [Theory]
     [InlineData(true, 0, 0, true)]
     [InlineData(true, 0, 3621, true)]
@@ -80,7 +119,7 @@ public sealed class OverviewSnapshotCoordinatorTests
         clock.Advance(TimeSpan.FromSeconds(2));
         var failedRefresh = shared.RefreshAsync(default, force: true).AsTask();
         await reader.SecondRead.Task.WaitAsync(TimeSpan.FromSeconds(3));
-        if (waitForDeadline) clock.Advance(TimeSpan.FromSeconds(2));
+        if (waitForDeadline) clock.Advance(TimeSpan.FromSeconds(5));
         await failedRefresh.WaitAsync(TimeSpan.FromSeconds(3));
         Assert.Equal(busy ? "Status is busy. Waiting for a consistent sample." : "Status refresh failed.", shared.Current.RefreshIssue);
         Assert.Same(original.Projection, shared.Current.Projection);
@@ -428,12 +467,31 @@ public sealed class OverviewSnapshotCoordinatorTests
         public CancellationToken ApplicationStopped => default;
         public void StopApplication() => _stopping.Cancel();
     }
-    private sealed class ManualClock : TimeProvider
+    internal sealed class ManualClock : TimeProvider
     {
         private readonly object _sync = new();
         private DateTimeOffset _now = DateTimeOffset.UtcNow;
         private readonly List<ManualTimer> _timers = [];
-        public override DateTimeOffset GetUtcNow() { lock (_sync) return _now; }
+        private TaskCompletionSource? _nextUtcRead;
+
+        public override DateTimeOffset GetUtcNow()
+        {
+            lock (_sync)
+            {
+                _nextUtcRead?.TrySetResult();
+                _nextUtcRead = null;
+                return _now;
+            }
+        }
+
+        public Task ObserveNextUtcRead()
+        {
+            lock (_sync)
+            {
+                _nextUtcRead = new(TaskCreationOptions.RunContinuationsAsynchronously);
+                return _nextUtcRead.Task;
+            }
+        }
         public bool HasOneShotTimer { get { lock (_sync) return _timers.Any(t => t.Due != DateTimeOffset.MaxValue && t.Period == Timeout.InfiniteTimeSpan); } }
         public TimeSpan? OneShotDelay { get { lock (_sync) return _timers.Where(t => t.Due != DateTimeOffset.MaxValue && t.Period == Timeout.InfiniteTimeSpan).Select(t => (TimeSpan?)(t.Due - _now)).Min(); } }
         public override ITimer CreateTimer(TimerCallback callback, object? state, TimeSpan dueTime, TimeSpan period)

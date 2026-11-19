@@ -172,9 +172,9 @@ public sealed class SourceVerificationPanelTests
         Assert.Contains("1,024", html);
         Assert.Contains("512", html);
         Assert.Contains("Weekly metadata reconciliation", html);
-        Assert.Contains("Automatic checksum verification is disabled", html);
+        Assert.Contains("Files are checked using size and modification date", html);
         Assert.Contains("UTC", html);
-        Assert.Contains("Full content rescan", html);
+        Assert.Contains("Reconcile source metadata", html);
         Assert.Equal(1, reads.Calls);
         Assert.Equal(0, writes.Previews);
     }

@@ -134,13 +134,16 @@ public sealed class OverviewSnapshotCoordinator : IAsyncDisposable
             if (wait > TimeSpan.Zero) await Task.Delay(wait, _clock, _stopping.Token).ConfigureAwait(false);
             lock (_sync) { _lastStart = attemptStarted = _clock.GetUtcNow(); sampledVersion = _invalidationVersion; attemptNumber = ++_attempts; }
             elapsed = System.Diagnostics.Stopwatch.StartNew();
-            using var deadline = new CancellationTokenSource(TimeSpan.FromSeconds(2), _clock);
+            using var deadline = new CancellationTokenSource(OverviewReadOptions.ReadBudget, _clock);
             using var budget = CancellationTokenSource.CreateLinkedTokenSource(_stopping.Token, deadline.Token);
             try
             {
-                await using var scope = _scopes.CreateAsyncScope();
-                var reader = scope.ServiceProvider.GetRequiredService<IProjectionReader>();
-                var next = await reader.ReadOverviewAsync(budget.Token).ConfigureAwait(false);
+                OverviewProjection next;
+                await using (var scope = _scopes.CreateAsyncScope())
+                {
+                    var reader = scope.ServiceProvider.GetRequiredService<IProjectionReader>();
+                    next = await reader.ReadOverviewAsync(budget.Token).ConfigureAwait(false);
+                }
                 budget.Token.ThrowIfCancellationRequested();
                 if (!next.Activity.IsConsistent)
                     RecordFailure("Status changed during the read. Waiting for a consistent sample.");
@@ -155,6 +158,7 @@ public sealed class OverviewSnapshotCoordinator : IAsyncDisposable
                     } };
                     lock (_sync)
                     {
+                        budget.Token.ThrowIfCancellationRequested();
                         _current = new(next, next.RuntimeAdmissionChanged ? "Deployment admission changed during this sample. Refreshing status." : null, _clock.GetUtcNow());
                         _completed++;
                         _retryAfter = DateTimeOffset.MinValue;

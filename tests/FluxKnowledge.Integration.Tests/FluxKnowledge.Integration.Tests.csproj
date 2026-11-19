@@ -1,4 +1,8 @@
 <Project Sdk="Microsoft.NET.Sdk">
+  <PropertyGroup>
+    <OutputType>Exe</OutputType>
+    <StartupObject>FluxKnowledge.Integration.Tests.Support.SqlScenarioProgram</StartupObject>
+  </PropertyGroup>
   <ItemGroup>
     <ProjectReference Include="../../src/FluxKnowledge.Infrastructure.SqlServer/FluxKnowledge.Infrastructure.SqlServer.csproj" />
     <ProjectReference Include="../../src/FluxKnowledge.Infrastructure.Usearch/FluxKnowledge.Infrastructure.Usearch.csproj" />

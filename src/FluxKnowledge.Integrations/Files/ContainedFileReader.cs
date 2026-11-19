@@ -76,11 +76,9 @@ public static class ContainedFileReader
         {
             throw new InvalidDataException("The contained file grew while it was read.");
         }
-        var sha256 = Convert.ToHexStringLower(SHA256.HashData(bytes));
-        if (expectedSha256 is not null && !string.Equals(sha256, expectedSha256, StringComparison.Ordinal))
-        {
-            throw new InvalidDataException("The contained file checksum is invalid.");
-        }
+        // A recorded identity belongs to the initial ingestion. Retained reads
+        // preserve it instead of hashing the same bytes again.
+        var sha256 = expectedSha256 ?? Convert.ToHexStringLower(SHA256.HashData(bytes));
 
         var currentRoot = PhysicalFileIdentity.GetDirectory(canonicalRoot);
         if (!string.Equals(currentRoot.IdentityFingerprint, rootLease.Identity.IdentityFingerprint, StringComparison.Ordinal))

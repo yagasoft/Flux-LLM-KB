@@ -1,4 +1,3 @@
-using System.Security.Cryptography;
 using FluxKnowledge.Application.Models;
 using FluxKnowledge.Integrations.Windows.NativeGoLive;
 
@@ -6,9 +5,9 @@ namespace FluxKnowledge.Integrations.Models;
 
 /// <summary>
 /// Opens the one approved PaddleOCR-VL model set from the fixed J: model store.  This is a
-/// verification boundary only: it has no downloader, provider loader, cache fallback, or
-/// configurable paths.  Successful verification retains all model files read-only for this
-/// process lifetime.
+/// local-file boundary only: it has no downloader, provider loader, cache fallback, or
+/// configurable paths. Files stay read-only for this process lifetime; startup does not
+/// checksum their contents.
 /// </summary>
 public sealed class PaddleOcrVlmModelGate : IDisposable
 {
@@ -189,7 +188,7 @@ public sealed class PaddleOcrVlmModelGate : IDisposable
         }
     }
 
-    private static async ValueTask<IDisposable> VerifyFixedBundleCopiesAsync(
+    private static ValueTask<IDisposable> VerifyFixedBundleCopiesAsync(
         IReadOnlyList<ModelBundleSpecification> specifications,
         CancellationToken cancellationToken)
     {
@@ -212,13 +211,13 @@ public sealed class PaddleOcrVlmModelGate : IDisposable
 
                 foreach (var file in specification.Files)
                 {
-                    var held = await OpenAndVerifyAsync(bundle.BundlePath, file, cancellationToken).ConfigureAwait(false);
+                    var held = OpenLocalFile(bundle.BundlePath, file, cancellationToken);
                     heldFiles.Add(held);
                 }
             }
 
             heldFiles.Add(OpenPythonExecutable());
-            return new PaddleOcrVlmBundleLease(heldFiles);
+            return ValueTask.FromResult<IDisposable>(new PaddleOcrVlmBundleLease(heldFiles));
         }
         catch
         {
@@ -227,7 +226,7 @@ public sealed class PaddleOcrVlmModelGate : IDisposable
         }
     }
 
-    private static async ValueTask<NativeModelHeldReadFile> OpenAndVerifyAsync(
+    private static NativeModelHeldReadFile OpenLocalFile(
         string bundlePath,
         ModelArtifactSpecification specification,
         CancellationToken cancellationToken)
@@ -236,6 +235,7 @@ public sealed class PaddleOcrVlmModelGate : IDisposable
         NativeModelHeldReadFile? file = null;
         try
         {
+            cancellationToken.ThrowIfCancellationRequested();
             var fileSystem = new HandleRelativeNativeFileSystem();
             parent = fileSystem.OpenModelDirectoryChain(bundlePath);
             file = fileSystem.TryOpenModelReadFile(parent.Leaf, specification.Filename, parent);
@@ -246,28 +246,6 @@ public sealed class PaddleOcrVlmModelGate : IDisposable
 
             parent = null;
             if (file.ByteLength != specification.ByteLength)
-            {
-                throw new PaddleOcrModelGateException("document-ocr-model-bundle-integrity-failed");
-            }
-
-            using var hash = IncrementalHash.CreateHash(HashAlgorithmName.SHA256);
-            var buffer = new byte[64 * 1024];
-            for (long offset = 0; offset < file.ByteLength;)
-            {
-                cancellationToken.ThrowIfCancellationRequested();
-                var expected = (int)Math.Min(buffer.Length, file.ByteLength - offset);
-                var read = await file.ReadAsync(offset, buffer.AsMemory(0, expected), cancellationToken).ConfigureAwait(false);
-                if (read != expected)
-                {
-                    throw new PaddleOcrModelGateException("document-ocr-model-bundle-integrity-failed");
-                }
-
-                hash.AppendData(buffer, 0, read);
-                offset += read;
-            }
-
-            var observed = Convert.ToHexStringLower(hash.GetHashAndReset());
-            if (!string.Equals(observed, specification.Sha256, StringComparison.Ordinal))
             {
                 throw new PaddleOcrModelGateException("document-ocr-model-bundle-integrity-failed");
             }

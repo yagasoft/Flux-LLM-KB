@@ -80,8 +80,10 @@ public sealed class SqlDatabaseStartupReadiness : IDatabaseStartupReadiness
     }
 
     internal static bool IsAvailabilityFailure(SqlException failure) => failure.Errors.Count > 0 &&
-        failure.Errors.Cast<SqlError>().All(error => error.Number is
-            -2 or 2 or 53 or 64 or 233 or 258 or 4060 or 10053 or 10054 or 10060 or 10061 or 17142 or 18401);
+        failure.Errors.Cast<SqlError>().All(error => IsAvailabilityErrorNumber(error.Number));
+
+    internal static bool IsAvailabilityErrorNumber(int number) => number is
+        -2 or 2 or 53 or 64 or 233 or 258 or 4060 or 10053 or 10054 or 10060 or 10061 or 17142 or 18401;
 
     public static async Task ProbeOnceAsync(IDbContextFactory<FluxKnowledgeDbContext> factory, CancellationToken ct,
         bool? segmentedPublicationEnabled = null)

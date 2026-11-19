@@ -434,7 +434,11 @@ internal sealed class ClassicOutlookComAdapter : IClassicOutlookAdapter
                 return ValueTask.FromResult(new OutlookMessagePayload(
                     body,
                     "text/plain",
-                    attachments));
+                    attachments)
+                {
+                    Subject = ReadOptionalMailText(() => mail.Subject),
+                    Sender = ReadOptionalMailText(() => mail.SenderName)
+                });
             }
             finally
             {
@@ -452,6 +456,19 @@ internal sealed class ClassicOutlookComAdapter : IClassicOutlookAdapter
         Release(_session);
         Release(_application);
         return ValueTask.CompletedTask;
+    }
+
+    private static string? ReadOptionalMailText(Func<string?> read)
+    {
+        try
+        {
+            var value = read();
+            return string.IsNullOrWhiteSpace(value) ? null : value;
+        }
+        catch (COMException)
+        {
+            return null;
+        }
     }
 
     private static string[] ParseTargetPath(string targetPath)

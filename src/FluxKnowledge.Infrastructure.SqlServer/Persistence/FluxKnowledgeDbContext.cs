@@ -22,6 +22,8 @@ public sealed class FluxKnowledgeDbContext(DbContextOptions<FluxKnowledgeDbConte
     public DbSet<CanonicalCodeDisclosureSpanEntity> CanonicalCodeDisclosureSpans => Set<CanonicalCodeDisclosureSpanEntity>();
     public DbSet<DocumentPublicationEntity> DocumentPublications => Set<DocumentPublicationEntity>();
     public DbSet<TextChunkEntity> TextChunks => Set<TextChunkEntity>();
+    public DbSet<TextChunkWindowEligibilityEntity> TextChunkWindowEligibilities => Set<TextChunkWindowEligibilityEntity>();
+    public DbSet<TextChunkWindowBackfillStateEntity> TextChunkWindowBackfillStates => Set<TextChunkWindowBackfillStateEntity>();
     public DbSet<VectorEntity> Vectors => Set<VectorEntity>();
     public DbSet<IndexGenerationEntity> IndexGenerations => Set<IndexGenerationEntity>();
     public DbSet<IndexGenerationVectorEntity> IndexGenerationVectors => Set<IndexGenerationVectorEntity>();

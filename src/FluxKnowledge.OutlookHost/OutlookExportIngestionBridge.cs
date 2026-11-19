@@ -68,17 +68,24 @@ internal sealed class OutlookExportIngestionBridge(
             var attachments = new List<OutlookExportSidecar>(payload.Attachments.Count);
             for (var index = 0; index < payload.Attachments.Count; index++)
             {
+                var attachment = payload.Attachments[index];
                 var relativePath = Path.Combine("attachments", $"{index:D4}.bin");
                 await WritePrivateFileAsync(
                     Path.Combine(inflightDirectory, relativePath),
-                    payload.Attachments[index].Content,
+                    attachment.Content,
                     cancellationToken).ConfigureAwait(false);
-                attachments.Add(OutlookExportSidecar.Create(relativePath, payload.Attachments[index].ContentType));
+                attachments.Add(OutlookExportSidecar.Create(relativePath, attachment.ContentType) with
+                {
+                    OriginalFileName = attachment.FileName
+                });
             }
 
             var manifest = OutlookExportManifest.Create(exportId, bodyPath, attachments, recovery) with
             {
-                Body = OutlookExportSidecar.Create(bodyPath, payload.BodyContentType)
+                Body = OutlookExportSidecar.Create(bodyPath, payload.BodyContentType),
+                Subject = payload.Subject,
+                Sender = payload.Sender,
+                ReceivedAtUtc = item.ReceivedTimeUtc.ToUniversalTime()
             };
             await layout.WriteManifestAsync(inflightDirectory, manifest, cancellationToken).ConfigureAwait(false);
             _ = await layout.PromoteAsync(exportId, cancellationToken).ConfigureAwait(false);

@@ -10,7 +10,8 @@ $descriptor=[byte[]]::new($security.BinaryLength);$security.GetBinaryForm($descr
 $passed=0
 $failures=[Collections.Generic.List[object]]::new()
 foreach($scenario in @('success','repair-off','repair-default-off','disabled','probe-failure','start-failure','exit-unproved','candidate-drift','source-policy-drift','task-drift',
- 'journal-policy-drift','allowlist-predecessor-drift','duplicate-repair','untrusted-policy','disabled-running','post-start-policy-drift','rollback-probe-failure','rollback-start-failure','task-security-drift')){
+ 'journal-policy-drift','allowlist-predecessor-drift','duplicate-repair','untrusted-policy','disabled-running','post-start-policy-drift','rollback-probe-failure','rollback-start-failure','task-security-drift',
+ 'preserve-policy','preserve-policy-missing','preserve-rollback-refused')){
  $id=[guid]::NewGuid().ToString('N');$root='I:\FluxKnowledgeSourceAccess-Staging-'+$id
  $taskName='FluxKnowledge.SourceAccess-Staging-'+$id;$state=$null
  $created=[FluxSourceAccessInstallFile]::CreatePrivateDirectory($root,$descriptor);$created.Dispose()
@@ -39,6 +40,12 @@ foreach($scenario in @('success','repair-off','repair-default-off','disabled','p
      [Security.AccessControl.FileSystemRights]::WriteData,[Security.AccessControl.AccessControlType]::Allow))
    Set-Acl -LiteralPath $file -AclObject $acl
   }
+  $preservedPolicyHash='';$preservedWriteTime=0
+  if($scenario -cin @('preserve-policy','preserve-rollback-refused')){
+   [IO.File]::WriteAllText((Join-Path $root 'journal-policy.json'),("{`n `"RepairEnabled`": false,`"ApprovedVolumes`": [ `"\\\\?\\Volume{11111111-1111-1111-1111-111111111111}\\`" ], `"PipeName`": `"FluxKnowledge.SourceJournal.isolated`", `"Version`": 1 }"))
+   $preservedPolicyHash=(Get-FileHash -LiteralPath (Join-Path $root 'journal-policy.json')).Hash
+   $preservedWriteTime=[IO.File]::GetLastWriteTimeUtc((Join-Path $root 'journal-policy.json')).Ticks
+  }
   $task=@{TaskName=$taskName;PrincipalSid='S-1-5-18';Executable=(Join-Path $live 'FluxKnowledge.Cli.exe');
    Arguments=('source-access serve --broker-root "'+$root+'"');WorkingDirectory=$live;
    DefinitionSha256=('A'*64);SecuritySha256=('B'*64);Enabled=($scenario -cnotin @('disabled','disabled-running'));Running=($scenario -cne 'disabled')}
@@ -46,11 +53,12 @@ foreach($scenario in @('success','repair-off','repair-default-off','disabled','p
   $arguments=@{InstallRoot=$root;TaskName=$taskName;ReleaseId='20261025T170000Z-6fbd224186ab';CandidatePath=$input;
    ExpectedCandidateSha256=(Get-SourceJournalHelperPayloadManifest $input).Sha256;TaskObservation=$task;
    PipeName='FluxKnowledge.SourceJournal.isolated';ApprovedVolumes=@('\\?\Volume{11111111-1111-1111-1111-111111111111}\')}
+  if($scenario -clike 'preserve-*'){$arguments.PreserveJournalPolicy=$true}
   if($scenario -ceq 'allowlist-predecessor-drift'){
    $arguments.ExpectedJournalPolicySha256=(Get-FileHash -LiteralPath (Join-Path $root 'journal-policy.json')).Hash
    [IO.File]::AppendAllText((Join-Path $root 'journal-policy.json'),' ')
   }
-  if($scenario -cin @('duplicate-repair','untrusted-policy','disabled-running','allowlist-predecessor-drift')){
+  if($scenario -cin @('duplicate-repair','untrusted-policy','disabled-running','allowlist-predecessor-drift','preserve-policy-missing')){
    $box=@{State=$null}
    try{Expect-Refusal {$box.State=New-SourceJournalHelperUpdate @arguments}}finally{Close-SourceJournalHelperUpdate $box.State}
    Assert-True (!(Test-Path -LiteralPath (Join-Path $root 'updates'))) 'Unreviewed policy/task state reached protected preparation writes.'
@@ -78,23 +86,29 @@ foreach($scenario in @('success','repair-off','repair-default-off','disabled','p
      [IO.File]::WriteAllText((Join-Path $root 'journal-policy.json'),'{"Version":1,"PipeName":"FluxKnowledge.SourceJournal.newer-policy-sentinel","ApprovedVolumes":[],"RepairEnabled":true}')
      throw 'owned post-start policy drift'
     }
-    if($journal -and $sim.Scenario -cin @('probe-failure','rollback-probe-failure','rollback-start-failure')){throw 'owned journal transport refusal'}
+    if($journal -and $sim.Scenario -cin @('probe-failure','rollback-probe-failure','rollback-start-failure','preserve-rollback-refused')){throw 'owned journal transport refusal'}
     if(!$journal -and $sim.Scenario -ceq 'rollback-probe-failure'){throw 'owned predecessor probe refusal'}
     Assert-True ($sim.Task.Running) 'Probe ran without a live task.'
     Assert-True ([IO.File]::ReadAllText((Join-Path $live 'FluxKnowledge.Cli.dll')) -ceq ($journal ? 'candidate' : 'old')) 'Probe observed the wrong payload.'
    }
   }
+  if($scenario -ceq 'preserve-rollback-refused'){$ports.AssertRollbackAllowed={throw 'schema is not the reviewed predecessor'}}
   switch($scenario){
    'candidate-drift'{[IO.File]::AppendAllText((Join-Path $state.CandidateRoot 'FluxKnowledge.Cli.dll'),'changed')}
    'source-policy-drift'{[IO.File]::AppendAllText((Join-Path $root 'policy.json'),'changed')}
    'task-drift'{$sim.Task.DefinitionSha256='F'*64}
    'task-security-drift'{$sim.Task.SecuritySha256='F'*64}
   }
-  if($scenario -cin @('success','repair-off','repair-default-off','disabled')){
+  if($scenario -cin @('success','repair-off','repair-default-off','disabled','preserve-policy')){
+   if($scenario -ceq 'preserve-policy'){
+    Assert-True ((Read-SourceJournalHelperFile (Join-Path $root 'journal-policy.json')).Length -gt 0) 'Updater cannot read protected helper policy through its exported API.'
+    Assert-SourceJournalHelperBindings $state $ports
+   }
    Invoke-SourceJournalHelperUpdate -State $state -Ports $ports
+   if($scenario -ceq 'preserve-policy'){Assert-SourceJournalHelperBindings $state $ports}
    Assert-True $state.Completed 'Qualified replacement did not complete.'
    $policy=Get-Content -LiteralPath (Join-Path $root 'journal-policy.json') -Raw|ConvertFrom-Json
-   Assert-True ($policy.RepairEnabled -eq ($scenario -cnotin @('repair-off','repair-default-off'))) 'Repair availability changed.'
+   Assert-True ($policy.RepairEnabled -eq ($scenario -cnotin @('repair-off','repair-default-off','preserve-policy'))) 'Repair availability changed.'
    Assert-True ($sim.Task.Enabled -eq ($scenario -cne 'disabled') -and $sim.Task.Running -eq ($scenario -cne 'disabled')) 'Original enabled/running state changed.'
    Assert-True ([IO.File]::ReadAllText((Join-Path $live 'FluxKnowledge.Cli.dll')) -ceq 'candidate') 'The new payload was not activated.'
    Expect-Refusal {Invoke-SourceJournalHelperUpdate -State $state -Ports $ports}
@@ -102,6 +116,8 @@ foreach($scenario in @('success','repair-off','repair-default-off','disabled','p
    Expect-Refusal {Invoke-SourceJournalHelperUpdate -State $state -Ports $ports}
    if($scenario -cin @('candidate-drift','source-policy-drift','task-drift','task-security-drift')){
     Assert-True ($sim.Disables -eq 0 -and $sim.Starts -eq 0 -and !$state.Attempted) 'Preflight drift reached task mutation.'
+   }elseif($scenario -ceq 'preserve-rollback-refused'){
+    Assert-True (!$state.RollbackVerified -and $sim.Starts -eq 1 -and !$sim.Task.Enabled -and !$sim.Task.Running) 'Unproved schema allowed helper predecessor restoration.'
    }elseif($scenario -ceq 'post-start-policy-drift'){
     Assert-True (!$state.RollbackVerified -and $sim.Starts -eq 1 -and !$sim.Task.Enabled -and !$sim.Task.Running) 'Post-start drift left a SYSTEM helper running or restarted the predecessor.'
     Assert-True ([IO.File]::ReadAllText((Join-Path $root 'journal-policy.json')).Contains('newer-policy-sentinel')) 'Post-start policy drift was overwritten.'
@@ -116,9 +132,13 @@ foreach($scenario in @('success','repair-off','repair-default-off','disabled','p
     Assert-True ($state.RollbackVerified -and $sim.Task.Enabled -and $sim.Task.Running) 'Proved recovery failed to restore the original task state.'
     Assert-True (!(Test-Path -LiteralPath (Join-Path $root 'journal-policy.json'))) 'A newly introduced journal policy survived verified rollback.'
    }
-   if($scenario -ceq 'post-start-policy-drift'){
+   if($scenario -cin @('post-start-policy-drift','preserve-rollback-refused')){
     Assert-True ([IO.File]::ReadAllText((Join-Path $state.PreviousRoot 'FluxKnowledge.Cli.dll')) -ceq 'old') 'Unconfirmed recovery lost the inspection-only predecessor.'
    }else{Assert-True ([IO.File]::ReadAllText((Join-Path $live 'FluxKnowledge.Cli.dll')) -ceq 'old') 'A failed update lost the predecessor payload.'}
+  }
+  if($scenario -cin @('preserve-policy','preserve-rollback-refused')){
+   Assert-True (!$state.Policy.Attempted -and (Get-FileHash -LiteralPath (Join-Path $root 'journal-policy.json')).Hash -ceq $preservedPolicyHash -and
+    [IO.File]::GetLastWriteTimeUtc((Join-Path $root 'journal-policy.json')).Ticks -eq $preservedWriteTime) 'Payload-only helper update wrote the journal policy.'
   }
   Assert-True ([IO.File]::ReadAllText((Join-Path $root 'root-read-plan.json')) -ceq '{"Version":1,"fixture":"preserve-root-grant"}') 'Root read grants were rewritten.'
   Assert-True ([IO.File]::ReadAllText((Join-Path $root 'journal\owned-intent.json')) -ceq '{"fixture":"preserve-repair-intent"}') 'Repair journal intents were changed.'

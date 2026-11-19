@@ -73,16 +73,21 @@ public sealed partial class SqlProjectionReader(
     {
         // One deadline bounds every overview, including setup, SQL waits, and
         // all attempts/retry delays, whether or not source deletion is active.
-        using var budget = CancellationTokenSource.CreateLinkedTokenSource(cancellationToken);
-        budget.CancelAfter(TimeSpan.FromSeconds(2));
+        using var deadline = new CancellationTokenSource(OverviewReadOptions.ReadBudget, _clock);
+        using var budget = CancellationTokenSource.CreateLinkedTokenSource(cancellationToken, deadline.Token);
         try
         {
-            await using var execution = await contextFactory.CreateDbContextAsync(budget.Token).ConfigureAwait(false);
-            return await execution.Database.CreateExecutionStrategy().ExecuteAsync(
-                state: this,
-                operation: static (_, reader, boundedToken) => reader.ReadOverviewCoreAsync(boundedToken),
-                verifySucceeded: null,
-                cancellationToken: budget.Token).ConfigureAwait(false);
+            OverviewProjection projection;
+            await using (var execution = await contextFactory.CreateDbContextAsync(budget.Token).ConfigureAwait(false))
+            {
+                projection = await execution.Database.CreateExecutionStrategy().ExecuteAsync(
+                    state: this,
+                    operation: static (_, reader, boundedToken) => reader.ReadOverviewCoreAsync(boundedToken),
+                    verifySucceeded: null,
+                    cancellationToken: budget.Token).ConfigureAwait(false);
+            }
+            budget.Token.ThrowIfCancellationRequested();
+            return projection;
         }
         catch (OperationCanceledException exception) when (!cancellationToken.IsCancellationRequested && budget.IsCancellationRequested)
         {

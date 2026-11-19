@@ -33,7 +33,9 @@ public static class OcrRecoveryCommand
             heldPlan.Position = 0;
             var plan = await JsonSerializer.DeserializeAsync<OcrRecoveryPlan>(heldPlan, Json, budget.Token)
                 ?? throw new InvalidOperationException("document-ocr-maintenance-plan-invalid");
-            if (plan.Version != 1 || plan.Binding is null || string.IsNullOrWhiteSpace(plan.ReleaseId) ||
+            var cleanupOnly=plan.Version==2 && plan.Mode=="CleanupOnly" && plan.TerminalBinding is not null && plan.Binding is null && plan.StoredExecutionBinding is null;
+            var storedExecution=plan.Version==3 && plan.Mode=="StoredExecution" && plan.StoredExecutionBinding is not null && plan.Binding is null && plan.TerminalBinding is null;
+            if (!(plan.Version==1 && plan.Mode is null && plan.Binding is not null && plan.TerminalBinding is null && plan.StoredExecutionBinding is null || cleanupOnly || storedExecution) || string.IsNullOrWhiteSpace(plan.ReleaseId) ||
                 !Path.IsPathFullyQualified(plan.OperationRoot)) throw new InvalidOperationException("document-ocr-maintenance-plan-invalid");
             using var hold = OpenRead(plan.HoldPath);
             if (hold.Length > 1024 || await JsonSerializer.DeserializeAsync<string>(hold, cancellationToken: budget.Token) != plan.ReleaseId)
@@ -52,17 +54,44 @@ public static class OcrRecoveryCommand
             {
                 var actual = await db.Database.SqlQueryRaw<string>("SELECT CONVERT(nvarchar(128), SERVERPROPERTY('ServerName')) + '|' + DB_NAME() + '|' + CONVERT(nvarchar(36), database_guid) AS [Value] FROM sys.database_recovery_status WHERE database_id=DB_ID()")
                     .SingleAsync(budget.Token);
+                var history=(await db.Database.GetAppliedMigrationsAsync(budget.Token)).ToArray();
                 if (!string.Equals(actual, plan.DatabaseIdentity, StringComparison.OrdinalIgnoreCase) ||
-                    (await db.Database.GetAppliedMigrationsAsync(budget.Token)).LastOrDefault() != "20261024061418_AddDocumentOcrExecutionLifecycle")
+                    (cleanupOnly || storedExecution ? history.Length!=80 || history.LastOrDefault()!="20261117210606_PersistPassageWindowEligibility" ||
+                        plan.OriginalHistory is null || !history.SequenceEqual(plan.OriginalHistory,StringComparer.Ordinal)
+                        : history.LastOrDefault()!="20261024061418_AddDocumentOcrExecutionLifecycle"))
                     throw new InvalidOperationException("document-ocr-maintenance-database-binding-changed");
             }
             var store = new SqlDocumentOcrStore(factory, scheduler: null);
             var verifier = new StoppedVerifier(plan, args[2], args[4]);
-            var verified = await store.AcceptLegacyCleanupAsync(plan.Binding, verifier, budget.Token);
+            if(storedExecution)
+            {
+                var original=plan.StoredExecutionBinding!;
+                var cleaned=await store.AcceptStoredExecutionCleanupAsync(original,verifier,budget.Token);
+                if(!cleaned.Accepted) throw new InvalidOperationException(cleaned.ReasonCode);
+                if(await verifier.VerifyStoppedAndCleanAsync(budget.Token) is null)
+                    throw new InvalidOperationException("document-ocr-native-cleanup-unproven");
+                var originalSettlement=await store.SettleCompletionAsync(original.Lease.Handle,original.Lease.MiniTaskId,original.ResultDigest,budget.Token);
+                if(!originalSettlement.Accepted) throw new InvalidOperationException(originalSettlement.ReasonCode);
+                await output.WriteLineAsync(JsonSerializer.Serialize(new {CleanupConfirmed=true,StoredExecution=true,Settled=true,Requeued=false,
+                    original.Lease.Handle.BatchId,original.OperationId,original.Lease.ExecutionInstanceId,
+                    ResultDigest=Convert.ToHexString(original.ResultDigest)}));
+                return 0;
+            }
+            if(cleanupOnly)
+            {
+                var cleaned=await store.AcceptTerminalCleanupAsync(plan.TerminalBinding!,verifier,budget.Token);
+                if(!cleaned.Accepted) throw new InvalidOperationException(cleaned.ReasonCode);
+                if(await verifier.VerifyStoppedAndCleanAsync(budget.Token) is null)
+                    throw new InvalidOperationException("document-ocr-native-cleanup-unproven");
+                await output.WriteLineAsync(JsonSerializer.Serialize(new {CleanupConfirmed=true,CleanupOnly=true,
+                    plan.TerminalBinding!.Handle.BatchId,plan.TerminalBinding.RecoveryInstanceId}));
+                return 0;
+            }
+            var verified = await store.AcceptLegacyCleanupAsync(plan.Binding!, verifier, budget.Token);
             if (!verified.Accepted) throw new InvalidOperationException(verified.ReasonCode);
             if (await verifier.VerifyStoppedAndCleanAsync(budget.Token) is null)
                 throw new InvalidOperationException("document-ocr-native-cleanup-unproven");
-            var settled = await store.SettleCompletionAsync(plan.Binding.Handle, plan.Binding.MiniTaskId, plan.Binding.ResultDigest, budget.Token);
+            var settled = await store.SettleCompletionAsync(plan.Binding!.Handle, plan.Binding.MiniTaskId, plan.Binding.ResultDigest, budget.Token);
             if (!settled.Accepted) throw new InvalidOperationException(settled.ReasonCode);
             var requeued = await store.RequeueCompletedAsync(plan.Binding.Handle, plan.Binding.MiniTaskId, budget.Token);
             await output.WriteLineAsync(JsonSerializer.Serialize(new { Settled = true, Requeued = requeued,
@@ -121,8 +150,10 @@ public static class OcrRecoveryCommand
     }
 
     private sealed record OcrRecoveryPlan(int Version, string ReleaseId, string DatabaseIdentity,
-        DocumentOcrLegacyRecoveryBinding Binding, string OperationRoot, string HoldPath,
-        string ConfigurationPath, string ConfigurationSha256, string VerifierScriptPath, string VerifierScriptSha256);
+        DocumentOcrLegacyRecoveryBinding? Binding, string OperationRoot, string HoldPath,
+        string ConfigurationPath, string ConfigurationSha256, string VerifierScriptPath, string VerifierScriptSha256,
+        string? Mode=null,DocumentOcrTerminalCleanupBinding? TerminalBinding=null,string[]? OriginalHistory=null,
+        DocumentOcrStoredExecutionRecoveryBinding? StoredExecutionBinding=null);
     private sealed class Factory(string connection) : IDbContextFactory<FluxKnowledgeDbContext>
     {
         public FluxKnowledgeDbContext CreateDbContext() => new(new DbContextOptionsBuilder<FluxKnowledgeDbContext>()

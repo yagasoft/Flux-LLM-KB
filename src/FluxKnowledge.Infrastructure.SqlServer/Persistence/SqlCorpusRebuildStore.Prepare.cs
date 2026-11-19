@@ -8,6 +8,7 @@ using System.Data;
 using System.Text.Json;
 using System.Runtime.CompilerServices;
 using FluxKnowledge.Application.Ports;
+using FluxKnowledge.Infrastructure.SqlServer.Search;
 
 namespace FluxKnowledge.Infrastructure.SqlServer.Persistence;
 
@@ -56,14 +57,22 @@ public sealed partial class SqlCorpusRebuildStore
             else
             {
                 foreach (var passage in passages)
-                    context.TextChunks.Add(new TextChunkEntity
+                {
+                    var entity = new TextChunkEntity
                     {
                         ArtifactId = input.CanonicalArtifactId, SourceRevision = input.SourceRevision,
                         Ordinal = passage.Ordinal, StartOffset = passage.StartOffset, Length = passage.Length,
                         Content = passage.Content, ContentHash = passage.ContentHash,
                         PassagePolicyFingerprint = passage.PassagePolicyFingerprint, ContextHeader = passage.ContextHeader,
                         SearchInputHash = passage.SearchInputHash
-                    });
+                    };
+                    entity.WindowEligibility = CanonicalWindowEligibility.Bind(entity, new ArtifactEntity
+                    {
+                        Id = input.CanonicalArtifactId, SourceRevision = input.SourceRevision,
+                        ContentHash = source.ContentHash, SearchText = source.SearchText
+                    }, now);
+                    context.TextChunks.Add(entity);
+                }
                 var generation = checked(1 + (await context.OutboxMessages.Where(value => value.PipelineRecordId == pipelineRecordId &&
                     value.SourceRevision == input.SourceRevision).MaxAsync(value => (long?)value.DispatchGeneration, cancellationToken).ConfigureAwait(false) ?? 0));
                 context.Jobs.Add(new JobEntity

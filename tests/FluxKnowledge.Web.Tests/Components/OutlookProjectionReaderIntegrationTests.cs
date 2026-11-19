@@ -122,6 +122,7 @@ public sealed class OutlookProjectionReaderIntegrationTests
         var profileId = Guid.NewGuid();
         var folderId = Guid.NewGuid();
         var sourceRootId = Guid.NewGuid();
+        var watchedSourceRootId = Guid.NewGuid();
         var now = new DateTimeOffset(2026, 8, 11, 12, 0, 0, TimeSpan.Zero);
         const string privateSpool = "C:\\private\\secret-outlook-spool";
         const string storeId = "private-store-id";
@@ -146,10 +147,26 @@ public sealed class OutlookProjectionReaderIntegrationTests
                 CreatedAtUtc = now,
                 UpdatedAtUtc = now
             });
+            context.SourceRootConfigurations.Add(new SourceRootConfigurationEntity
+            {
+                Id = watchedSourceRootId,
+                CanonicalPath = $"I:\\test\\outlook-watched\\{watchedSourceRootId:N}",
+                DisplayName = "Watched Outlook exports",
+                State = 1,
+                IncludePatternsJson = "[]",
+                ExcludePatternsJson = "[]",
+                AllowedClassificationsJson = "[]",
+                MaximumFileBytes = 64L * 1024 * 1024,
+                ReconciliationCadenceSeconds = 86400,
+                ConfigurationRevision = 1,
+                CreatedAtUtc = now,
+                UpdatedAtUtc = now
+            });
             context.OutlookCaptureProfiles.Add(new OutlookCaptureProfileEntity
             {
                 Id = profileId,
                 SourceRootId = sourceRootId,
+                WatchedSourceRootId = watchedSourceRootId,
                 DisplayName = "Operations mailbox",
                 SpoolRoot = privateSpool,
                 IncrementalBasis = (int)OutlookIncrementalBasis.LastModificationTime,
@@ -174,7 +191,8 @@ public sealed class OutlookProjectionReaderIntegrationTests
                 State = (int)OutlookCaptureState.Ready
             });
             context.OutlookCaptureExports.AddRange(
-                Export(OutlookExportState.Ingested),
+                Export(OutlookExportState.Ingested, now.AddMinutes(-1)),
+                Export(OutlookExportState.Ingested, now),
                 Export(OutlookExportState.Deferred),
                 Export(OutlookExportState.Blocked));
             context.AuditEvents.Add(new AuditEventEntity
@@ -200,9 +218,11 @@ public sealed class OutlookProjectionReaderIntegrationTests
         Assert.Equal("Operations mailbox", profile.DisplayName);
         Assert.Equal("Configured", profile.Spool.Status);
         Assert.Equal("Healthy", profile.Spool.Health);
+        Assert.Equal(watchedSourceRootId, profile.WatchedSourceRootId);
+        Assert.Equal(now, profile.LastSuccessfulExportAtUtc);
         var folder = Assert.Single(profile.Folders);
         Assert.Equal("Selected inbox", folder.DisplayName);
-        Assert.Equal(1, folder.IngestedCount);
+        Assert.Equal(2, folder.IngestedCount);
         Assert.Equal(1, folder.DeferredCount);
         Assert.Equal(1, folder.BlockedCount);
         Assert.DoesNotContain(privateSpool, json, StringComparison.Ordinal);
@@ -218,18 +238,19 @@ public sealed class OutlookProjectionReaderIntegrationTests
         Assert.Equal(1, overview.OutlookCapture.ProfileCount);
         Assert.Equal(1, overview.OutlookCapture.EnabledProfileCount);
         Assert.Equal(1, overview.OutlookCapture.FolderCount);
-        Assert.Equal(1, overview.OutlookCapture.IngestedCount);
+        Assert.Equal(2, overview.OutlookCapture.IngestedCount);
         Assert.Equal(1, overview.OutlookCapture.DeferredCount);
         Assert.Equal(1, overview.OutlookCapture.BlockedCount);
 
-        OutlookCaptureExportEntity Export(OutlookExportState state) => new()
+        OutlookCaptureExportEntity Export(OutlookExportState state, DateTimeOffset? publishedAt = null) => new()
         {
             Id = Guid.NewGuid(),
             ProfileId = profileId,
             FolderId = folderId,
-            EntryId = entryId + state,
+            EntryId = entryId + state + publishedAt?.ToUnixTimeSeconds(),
             SourceFingerprint = new string('c', 64),
             State = (int)state,
+            WatchedPublishedAtUtc = publishedAt,
             FencingToken = 1
         };
     }

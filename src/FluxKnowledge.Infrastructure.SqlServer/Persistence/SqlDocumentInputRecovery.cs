@@ -19,7 +19,7 @@ using Microsoft.EntityFrameworkCore;
 namespace FluxKnowledge.Infrastructure.SqlServer.Persistence;
 
 /// <summary>One exact retained document successor for a proved settled failure. Never resets old execution.</summary>
-internal static class SqlDocumentInputRecovery
+internal static partial class SqlDocumentInputRecovery
 {
     private const string ParentRelationship = "superseded-by-retained-processor";
     private const string DimensionFailure = "image-document-dimensions-exceeded";
@@ -28,7 +28,7 @@ internal static class SqlDocumentInputRecovery
     private static readonly JsonSerializerOptions JsonOptions = new(JsonSerializerDefaults.Web);
 
     internal static async Task<DocumentReprocessRequestResult> RequestAsync(IDbContextFactory<FluxKnowledgeDbContext> factory,
-        DocumentReprocessRequest request, CancellationToken token)
+        DocumentReprocessRequest request, CancellationToken token, ISourceWorkAdmission? sourceAdmission = null)
     {
         if (request.SourceRevisionId.Value == Guid.Empty || request.FailedExtractJobId is not { } jobId || jobId == Guid.Empty ||
             request.ExpectedRootConfigurationRevision is not > 0 || !TryGetDescriptor(request.ExpectedProcessorFingerprint, out var descriptor) ||
@@ -54,9 +54,16 @@ internal static class SqlDocumentInputRecovery
             return new(false, true, existing[0].Branch.Id);
         }
         var binding = await ReadSettledFailureAsync(db, request.SourceRevisionId.Value, request.ExpectedInputSha256,
-            request.ExpectedRootConfigurationRevision.Value, descriptor.ProcessorFingerprint, jobId, null, token).ConfigureAwait(false);
+            request.ExpectedRootConfigurationRevision.Value, descriptor.ProcessorFingerprint, jobId, null, token,
+            allowNoResultTransition: true).ConfigureAwait(false);
         if (binding is null || await db.SourceActivityRelations.AnyAsync(value => value.PredecessorActivityId == binding.PredecessorActivityId, token).ConfigureAwait(false))
             return DocumentReprocessRequestResult.NotEligible;
+        if (binding.NoResult is not null)
+        {
+            if (!await SqlSourceWorkEligibility.Inputs(db, sourceAdmission).AnyAsync(value => value.Id == binding.ParentRevisionId, token).ConfigureAwait(false))
+                return DocumentReprocessRequestResult.NotEligible;
+            await TerminaliseNoResultAsync(db, binding, token).ConfigureAwait(false);
+        }
         var activityId = Guid.NewGuid(); var branchId = Guid.NewGuid(); var now = DateTimeOffset.UtcNow;
         var admission = new RecoveryProof(DocumentProcessingInput.DocumentRecoveryVersion, activityId, branchId, binding);
         db.SourceActivities.Add(new SourceActivityEntity { Id = activityId, SourceRevisionId = binding.ParentRevisionId,
@@ -162,7 +169,7 @@ internal static class SqlDocumentInputRecovery
     }
 
     private static async Task<FailureBinding?> ReadSettledFailureAsync(FluxKnowledgeDbContext db, Guid parentId, string hash, long configuration,
-        string processorFingerprint, Guid jobId, Guid? recoveryBranchId, CancellationToken token)
+        string processorFingerprint, Guid jobId, Guid? recoveryBranchId, CancellationToken token, bool allowNoResultTransition = false)
     {
         if (db.Database.CurrentTransaction is null) throw new InvalidOperationException("Document recovery requires a fenced transaction.");
         if (!TryGetDescriptor(processorFingerprint, out var descriptor)) return null;
@@ -186,12 +193,14 @@ internal static class SqlDocumentInputRecovery
         if (artifact is null || artifact.ContentSha256 != hash || artifact.ByteLength != parent.ByteLength ||
             !string.Equals(artifact.StoreRelativePath, Path.Combine("sha256", hash[..2], hash + ".bin"), StringComparison.OrdinalIgnoreCase)) return null;
         var job = await db.Jobs.SingleOrDefaultAsync(value => value.Id == jobId, token).ConfigureAwait(false);
+        var noResultTransition = allowNoResultTransition && job is { PublicState: (int)PublicJobState.GpuProcessing, Reason: null };
+        var noResult = noResultTransition || job?.Reason == NoResultReason;
         if (job is null || job.Stage != (int)PipelineStage.Extract || job.Operation != PipelineOperations.ExtractDocument ||
-            job.PublicState != (int)PublicJobState.Failed ||
-            !(job.Reason == RuntimeFailure || !pdf && job.Reason == DimensionFailure || pdf && job.Reason == EncryptedPdfFailure) ||
-            job.LeaseOwner is not null || job.LeaseExpiresAtUtc is not null ||
+            !noResultTransition && (job.PublicState != (int)PublicJobState.Failed ||
+                !(job.Reason == RuntimeFailure || !pdf && job.Reason == DimensionFailure || pdf && job.Reason == EncryptedPdfFailure || noResult)) ||
+            (noResultTransition ? !LeaseIsQuiescent(job.LeaseOwner, job.LeaseExpiresAtUtc) : job.LeaseOwner is not null || job.LeaseExpiresAtUtc is not null) ||
             await db.JobAttempts.AnyAsync(value => value.JobId == jobId && value.CompletedAtUtc == null, token).ConfigureAwait(false) ||
-            await db.OutboxMessages.AnyAsync(value => value.JobId == jobId && (value.DispatchedAtUtc == null || value.LeaseOwner != null || value.LeaseExpiresAtUtc != null), token).ConfigureAwait(false)) return null;
+            !noResult && await db.OutboxMessages.AnyAsync(value => value.JobId == jobId && (value.DispatchedAtUtc == null || value.LeaseOwner != null || value.LeaseExpiresAtUtc != null), token).ConfigureAwait(false)) return null;
         var record = await db.PipelineRecords.SingleOrDefaultAsync(value => value.Id == job.PipelineRecordId, token).ConfigureAwait(false);
         if (record is null || record.IsDeleted || record.CompletionCriteriaMet || record.CurrentStage != (int)PipelineStage.Extract ||
             record.Revision != job.SourceRevision || record.ContentHash != hash || record.SourceRevisionId is null ||
@@ -223,7 +232,9 @@ internal static class SqlDocumentInputRecovery
             await db.SourceProcessorForceRequests.AnyAsync(value => value.SourceProcessorBranchId == owner.Branch.Id && value.State <= 1, token).ConfigureAwait(false)) return null;
         var childActivity = await db.SourceActivities.SingleOrDefaultAsync(value => value.Id == owner.Member.ChildSourceActivityId, token).ConfigureAwait(false);
         var childArtifact = await db.SourceArtifacts.SingleOrDefaultAsync(value => value.SourceRevisionId == child.Id, token).ConfigureAwait(false);
-        if (childActivity is null || childActivity.SourceRevisionId != child.Id || childActivity.State != (int)SourceActivityState.FailedTerminal || childActivity.Reason != job.Reason ||
+        if (childActivity is null || childActivity.SourceRevisionId != child.Id ||
+            (noResultTransition ? childActivity.State is not ((int)SourceActivityState.Pending) and not ((int)SourceActivityState.Running) :
+                childActivity.State != (int)SourceActivityState.FailedTerminal || childActivity.Reason != job.Reason) ||
             childActivity.ActivityKind != (int)SourceActivityKind.DocumentParsing || childActivity.ExecutionClass != (int)ExecutionClass.InProcess ||
             childActivity.ProcessorVersion != contract.ProcessorVersion || childActivity.DescriptorFingerprint != contract.ProcessorFingerprint ||
             childActivity.ResultingPipelineRecordId != record.Id || childActivity.ResultingPipelineRecordRevision != record.Revision || childActivity.InputFingerprint != hash ||
@@ -241,6 +252,12 @@ internal static class SqlDocumentInputRecovery
             (relation.RelationshipKind != DocumentProcessingInput.DocumentRecoveryChildRelationship || relation.ReasonCode != DocumentProcessingInput.DocumentRecoveryVersion ||
              !db.SourceProcessorBranchMembers.Any(member => member.BranchId == recoveryBranchId && member.ChildSourceActivityId == relation.SuccessorActivityId && member.Disposition == "completed")), token).ConfigureAwait(false)) return null;
         var requests = await db.DocumentOcrRequests.Where(value => value.ParentJobId == jobId).Take(2).ToArrayAsync(token).ConfigureAwait(false);
+        if (noResult)
+        {
+            if (requests.Length != 1) return null;
+            var unknown = await ReadSettledNoResultAsync(db, requests[0], job, record, child.Id, noResultTransition, token).ConfigureAwait(false);
+            return unknown is null ? null : Bind(null, unknown);
+        }
         if (job.Reason == EncryptedPdfFailure)
         {
             // The old blanket flag refusal happened before any OCR handoff. Absence of
@@ -284,9 +301,9 @@ internal static class SqlDocumentInputRecovery
         return Bind(new(request.MiniTaskId, batch.Id, task.AdmissionGeneration, dispatch.DispatchId, receipt.OperationId,
             Convert.ToHexStringLower(digest), request.ModelRuntimeKey, request.SettingsFingerprint));
 
-        FailureBinding Bind(NativeBinding? native) => new(root.Id, configuration, parentId, hash, parent.ByteLength, artifact.Id,
-            descriptor.ProcessorFingerprint, job.Reason!, owner.Activity.Id, owner.Branch.Id, owner.Member.Id,
-            owner.Member.MemberFingerprint, child.Id, childActivity.Id, record.Id, record.Revision, jobId, native);
+        FailureBinding Bind(NativeBinding? native, SettledNoResultBinding? unknown = null) => new(root.Id, configuration, parentId, hash, parent.ByteLength, artifact.Id,
+            descriptor.ProcessorFingerprint, unknown is null ? job.Reason! : NoResultReason, owner.Activity.Id, owner.Branch.Id, owner.Member.Id,
+            owner.Member.MemberFingerprint, child.Id, childActivity.Id, record.Id, record.Revision, jobId, native, unknown);
     }
 
     private static bool IsSettledFailureResult(string json, string? expectedReason)
@@ -325,7 +342,8 @@ internal static class SqlDocumentInputRecovery
     private sealed record RecoveryProof(string Version, Guid RecoveryActivityId, Guid RecoveryBranchId, FailureBinding Binding);
     private sealed record FailureBinding(Guid RootId, long ConfigurationRevision, Guid ParentRevisionId, string InputSha256, long ByteLength,
         Guid ParentArtifactId, string ProcessorFingerprint, string FailureReason, Guid PredecessorActivityId, Guid PredecessorBranchId, Guid PredecessorMemberId, string PredecessorMemberFingerprint,
-        Guid FailedChildRevisionId, Guid FailedChildActivityId, Guid FailedPipelineRecordId, long FailedPipelineRevision, Guid FailedJobId, NativeBinding? Native);
+        Guid FailedChildRevisionId, Guid FailedChildActivityId, Guid FailedPipelineRecordId, long FailedPipelineRevision, Guid FailedJobId, NativeBinding? Native,
+        SettledNoResultBinding? NoResult = null);
     private sealed record NativeBinding(Guid MiniTaskId, Guid BatchId, long AdmissionGeneration, Guid DispatchId, Guid ResultReceiptOperationId, string ResultDigest,
         string ModelRuntimeKey, string SettingsFingerprint);
 }

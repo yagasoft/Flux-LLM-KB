@@ -1,5 +1,5 @@
 [CmdletBinding()]
-param([string]$SourceRoot=(Split-Path -Parent (Split-Path -Parent (Split-Path -Parent $PSCommandPath))))
+param([string]$SourceRoot=(Split-Path -Parent (Split-Path -Parent (Split-Path -Parent $PSCommandPath))),[switch]$OcrCleanupOnly,[switch]$OcrStoredExecution)
 $ErrorActionPreference='Stop'
 Set-StrictMode -Version Latest
 Import-Module (Join-Path $SourceRoot 'scripts/deploy/incremental-source-journal-migration.psm1') -Force
@@ -44,6 +44,34 @@ try{
   $sha=(Get-FileHash -LiteralPath $entry).Hash;$box.Fingerprint[$payload.Root]=$sha
   $payload.Role+'='+$sha
  })
+ if($OcrCleanupOnly -or $OcrStoredExecution){
+  . (Join-Path $SourceRoot 'scripts/deploy/incremental-ocr-lifecycle-recovery.ps1')
+  function Assert-OcrPlainLocalPath([string]$Path){$Path} # Isolated filesystem port; canonical path is never opened.
+  function Wait-IisAppPoolState {param($Name,$ExpectedState,$TimeoutSeconds)}
+  $SiteName='isolated';$ReadinessTimeoutSeconds=30;$box.Database=$complete
+  $helperRoot=Join-Path $SourceJournalHelperRoot 'payload';$helperHash=$box.Fingerprint[$helperRoot]
+  $box.Fingerprint['I:\FluxKnowledgeSourceAccess\payload']=$helperHash
+  $p=@{Version=2;Mode='CleanupOnly';Binding=$null;TerminalBinding=@{Handle=@{BatchId=[Guid]::NewGuid()}};
+   DatabaseIdentity=$complete.Identity;PreservedHelperPayload=@{Root='I:\FluxKnowledgeSourceAccess\payload';Sha256=$helperHash};
+   Payloads=@(Get-DeploymentSourceJournalPayloads|Where-Object Role -cne 'Cli'|ForEach-Object {@{Role=$_.Role;Sha256=$box.Fingerprint[$_.Root]}})}
+  if($OcrStoredExecution){$p.Version=3;$p.Mode='StoredExecution';$p.TerminalBinding=$null;$p.StoredExecutionBinding=@{Lease=@{Handle=@{BatchId=[Guid]::NewGuid()}}}}
+  Set-OcrCleanupAdmissionBindings $p
+  $before=$box.Actions
+  Start-OcrApplicationOwners
+  [IO.File]::WriteAllText($ValidationHoldPath,'"owned-release"')
+  Remove-DeploymentValidationHold -Path $ValidationHoldPath -ReleaseId owned-release
+  Assert-True ($box.Actions -eq $before+1 -and !(Test-Path $ValidationHoldPath)) 'OCR composed start/release did not admit exact derived pins.'
+  $before=$box.Actions;$p.PreservedHelperPayload.Sha256='F'*64
+  Expect-Refusal {Set-OcrCleanupAdmissionBindings $p}
+  $p.PreservedHelperPayload.Sha256=$helperHash;$p.DatabaseIdentity='wrong-incarnation'
+  Set-OcrCleanupAdmissionBindings $p
+  Expect-Refusal {Start-OcrApplicationOwners}
+  [IO.File]::WriteAllText($ValidationHoldPath,'"owned-release"')
+  Expect-Refusal {Remove-DeploymentValidationHold -Path $ValidationHoldPath -ReleaseId owned-release}
+  Assert-True ($box.Actions -eq $before -and (Test-Path $ValidationHoldPath)) 'OCR mismatched bindings reached start or released the hold.'
+  'OCR derived candidate Web/Outlook and preserved helper traversed actual composed start/hold-release; changed helper/database refused.'
+  return
+ }
  foreach($feature in @($false,$true)){
   $box.Database=if($feature){$complete}else{$baseline};$before=$box.Actions
   Start-IndexCompatibleWebAppPool -Name isolated
@@ -53,6 +81,19 @@ try{
   Assert-True ($box.Actions-$before -eq 2 -and !(Test-Path -LiteralPath $ValidationHoldPath)) 'A valid installed set did not traverse every action boundary.'
  }
  $box.Database=$complete;$before=$box.Actions
+ # Exercise the typed abort through the actual composed start and hold-release
+ # functions, with only SQL/OS ports substituted by this disposable fixture.
+ . (Join-Path $SourceRoot 'scripts/deploy/incremental-passage-window-pre-ddl-abort.ps1')
+ $originals=@(Get-DeploymentSourceJournalPayloads|ForEach-Object {@{Role=$_.Role;Root=$_.Root;Sha256=$box.Fingerprint[$_.Root]}})
+ $ReviewedSourceJournalPayloads=@()
+ Set-PassageWindowAbortPayloads @{OriginalPayloads=$originals}
+ [IO.File]::WriteAllText($ValidationHoldPath,'"owned-release"')
+ $ports=@{AssertEvidence={param($Running)};WriteIntent={};Capture={@{Owned=$true}};
+  Start={Start-IndexCompatibleWebAppPool -Name isolated};Stop={throw 'Qualified abort unexpectedly stopped.'};Probe={};
+  AssertUnchanged={param($Baseline)};Release={Remove-DeploymentValidationHold -Path $ValidationHoldPath -ReleaseId owned-release};Complete={}}
+ Invoke-PassageWindowPreDdlAbort $ports
+ Assert-True ($box.Actions -eq $before+1 -and !(Test-Path -LiteralPath $ValidationHoldPath)) 'Typed abort did not traverse actual start/release admission with original pins.'
+ $before=$box.Actions
  foreach($case in @('no-review','wrong-cli','wrong-database','schema-drift','late-database-drift')){
   $saved=@($ReviewedSourceJournalPayloads);$savedIdentity=$ExpectedSourceJournalDatabaseIdentity;$box.Reads=0;$box.DriftAt=0
   switch($case){

@@ -18,6 +18,29 @@ namespace FluxKnowledge.Integration.Tests.Indexing;
 public sealed class CanonicalArtifactReaderTests(NativeSqlServerFixture fixture) : IClassFixture<NativeSqlServerFixture>
 {
     [NativeSqlServerFact]
+    public async Task Repeated_reads_preserve_the_persisted_window_version_including_uncommitted_changes()
+    {
+        await using var environment = await SqlToUsearchRebuildTests.PipelineEnvironment.CreateAsync(fixture, "Stable version reader seed.", embed: false);
+        await using var context = environment.Factory.CreateDbContext();
+        var artifact = await context.Artifacts.SingleAsync(x => x.Stage == (int)PipelineStage.CanonicalIndex);
+        var persisted = Guid.Parse("d313291a-1eb3-4f89-87aa-a78057358362");
+        var changed = Guid.Parse("a21374b9-b268-4226-b622-e97b6fd5c467");
+        artifact.WindowEligibilityVersion = persisted;
+        await context.SaveChangesAsync();
+        for (var index = 0; index < 2; index++)
+            Assert.Equal(persisted, (await SqlCanonicalArtifactReader.ReadAsync(context, artifact.PipelineRecordId, artifact.SourceRevision, default))!.WindowEligibilityVersion);
+        await using (var transaction = await context.Database.BeginTransactionAsync())
+        {
+            artifact.WindowEligibilityVersion = changed;
+            await context.SaveChangesAsync();
+            for (var index = 0; index < 2; index++)
+                Assert.Equal(changed, (await SqlCanonicalArtifactReader.ReadAsync(context, artifact.PipelineRecordId, artifact.SourceRevision, default))!.WindowEligibilityVersion);
+            await transaction.RollbackAsync();
+        }
+        Assert.Equal(persisted, (await SqlCanonicalArtifactReader.ReadAsync(context, artifact.PipelineRecordId, artifact.SourceRevision, default))!.WindowEligibilityVersion);
+    }
+
+    [NativeSqlServerFact]
     public async Task Unfenced_reader_keeps_the_configured_transient_read_strategy()
     {
         await using var environment = await SqlToUsearchRebuildTests.PipelineEnvironment.CreateAsync(fixture, "Retry reader seed.", embed: false);

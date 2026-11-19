@@ -12,8 +12,10 @@ public sealed class SourceDeletionCoordinator(
     ISourceArtifactPublicationGate? artifactPublicationGate = null,
     IDerivedIndexRecoveryStore? queryCleanupGate = null,
     ILogger<SourceDeletionCoordinator>? logger = null,
-    IIndexSourceDeletionMaintenance? indexMaintenance = null)
+    IIndexSourceDeletionMaintenance? indexMaintenance = null,
+    TimeProvider? timeProvider = null)
 {
+    private readonly TimeProvider _timeProvider = timeProvider ?? TimeProvider.System;
     private readonly ILogger<SourceDeletionCoordinator> _logger = logger ?? NullLogger<SourceDeletionCoordinator>.Instance;
 
     public async ValueTask<bool> RunOneAsync(CancellationToken cancellationToken)
@@ -79,7 +81,8 @@ public sealed class SourceDeletionCoordinator(
 
                 if (string.Equals(workItem.Phase, "cleanup-files", StringComparison.Ordinal))
                 {
-                    var pending = await store.ReadPendingCleanupAsync(workItem, cancellationToken).ConfigureAwait(false);
+                    var pending = await store.ReadPendingCleanupAsync(workItem, cancellationToken,
+                        ISourceDeletionStore.FileCleanupBatchSize).ConfigureAwait(false);
                     if (pending.Count == 0)
                     {
                         var completed = await store.PurgeAsync(workItem, survivorGeneration: null, cancellationToken).ConfigureAwait(false);
@@ -91,53 +94,8 @@ public sealed class SourceDeletionCoordinator(
                         return false;
                     }
 
-                    var target = pending[0];
-                    if (target.StorageKind == 2 && queryCleanupGate is null)
-                    {
-                        await store.FailAsync(workItem, "source-delete-query-cleanup-gate-unavailable", cancellationToken).ConfigureAwait(false);
+                    if (!await RunFileBatchAsync(workItem, pending, fileStore, cancellationToken).ConfigureAwait(false))
                         return false;
-                    }
-                    await using var queryCleanupLease = target.StorageKind == 2
-                        ? await queryCleanupGate!.TryAcquireExclusiveLeaseAsync(TimeSpan.Zero, cancellationToken).ConfigureAwait(false) : null;
-                    if (target.StorageKind == 2 && queryCleanupLease is null)
-                    {
-                        await store.DeferAsync(workItem, "source-delete-search-queries-active", cancellationToken).ConfigureAwait(false);
-                        return false;
-                    }
-                    if (target.StorageKind == 1 && target.ContentSha256 is not null && artifactPublicationGate is null)
-                    {
-                        await store.FailAsync(workItem, "source-delete-artifact-publication-gate-unavailable", cancellationToken).ConfigureAwait(false);
-                        return false;
-                    }
-
-                    await using var cleanupLease = target.StorageKind == 1
-                        ? await artifactPublicationGate!.TryAcquireExclusiveAsync(target.ContentSha256!, cancellationToken).ConfigureAwait(false)
-                        : null;
-                    if (target.StorageKind == 1 && cleanupLease is null)
-                    {
-                        await store.DeferAsync(workItem, "source-delete-artifact-publication-active", cancellationToken).ConfigureAwait(false);
-                        return false;
-                    }
-
-                    // Both kinds require a fresh authority/target read after acquiring
-                    // their execution gate. The exact gate stays held through native IO.
-                    pending = await store.ReadPendingCleanupAsync(workItem, cancellationToken).ConfigureAwait(false);
-                    var current = pending.SingleOrDefault(candidate => candidate.CleanupItemId == target.CleanupItemId);
-                    if (current is null) return progressed;
-                    if (current.StorageKind != target.StorageKind || current.RelativePath != target.RelativePath ||
-                        current.ContentSha256 != target.ContentSha256 || current.ByteLength != target.ByteLength)
-                    {
-                        await store.FailAsync(workItem, "source-delete-cleanup-target-changed", cancellationToken).ConfigureAwait(false);
-                        return false;
-                    }
-                    var result = current.SharedReferenceExists
-                        ? new SourceDeletionFileResult(true, "source-delete-shared-artifact-preserved")
-                        : await fileStore.DeleteAsync(current, cancellationToken).ConfigureAwait(false);
-                    await store.RecordCleanupResultAsync(workItem, target.CleanupItemId, result, cancellationToken).ConfigureAwait(false);
-                    if (!result.Completed)
-                    {
-                        return false;
-                    }
                     progressed = true;
                     continue;
                 }
@@ -187,5 +145,104 @@ public sealed class SourceDeletionCoordinator(
         }
 
         return progressed;
+    }
+
+    private async ValueTask<bool> RunFileBatchAsync(SourceDeletionWorkItem work,
+        IReadOnlyList<SourceDeletionFileTarget> pending, ISourceDeletionFileStore files, CancellationToken cancellationToken)
+    {
+        var storageKind = pending[0].StorageKind;
+        if (storageKind == 2)
+        {
+            if (queryCleanupGate is null)
+            {
+                await store.FailAsync(work, "source-delete-query-cleanup-gate-unavailable", cancellationToken).ConfigureAwait(false);
+                return false;
+            }
+
+            await using var queryLease = await queryCleanupGate.TryAcquireExclusiveLeaseAsync(TimeSpan.Zero, cancellationToken).ConfigureAwait(false);
+            if (queryLease is null)
+            {
+                await store.DeferAsync(work, "source-delete-search-queries-active", cancellationToken).ConfigureAwait(false);
+                return false;
+            }
+
+            var count = pending.TakeWhile(target => target.StorageKind == 2).Count();
+            return await DeleteGatedTargetsAsync(work, pending, count, files, (_, ct) => queryLease.IsHeldAsync(ct),
+                cancellationToken).ConfigureAwait(false);
+        }
+
+        if (storageKind != 1 || pending[0].ContentSha256 is null)
+        {
+            var reason = storageKind == 1 ? "source-delete-artifact-path-invalid" : "source-delete-storage-kind-invalid";
+            await store.FailAsync(work, reason, cancellationToken).ConfigureAwait(false);
+            return false;
+        }
+        if (artifactPublicationGate is null)
+        {
+            await store.FailAsync(work, "source-delete-artifact-publication-gate-unavailable", cancellationToken).ConfigureAwait(false);
+            return false;
+        }
+
+        var hashes = pending.TakeWhile(target => target.StorageKind == 1 && target.ContentSha256 is not null)
+            .Select(target => target.ContentSha256!).ToArray();
+        await using var artifactLease = await artifactPublicationGate.TryAcquireExclusiveBatchAsync(hashes, cancellationToken).ConfigureAwait(false);
+        if (artifactLease is null)
+        {
+            await store.DeferAsync(work, "source-delete-artifact-publication-active", cancellationToken).ConfigureAwait(false);
+            return false;
+        }
+
+        return await DeleteGatedTargetsAsync(work, pending, artifactLease.AcquiredCount, files,
+            (target, ct) => artifactLease.IsHeldAsync(target.ContentSha256!, ct), cancellationToken).ConfigureAwait(false);
+    }
+
+    private async ValueTask<bool> DeleteGatedTargetsAsync(SourceDeletionWorkItem work,
+        IReadOnlyList<SourceDeletionFileTarget> pending, int count, ISourceDeletionFileStore files,
+        Func<SourceDeletionFileTarget, CancellationToken, ValueTask<bool>> isGateHeld, CancellationToken cancellationToken)
+    {
+        // Both kinds require a fresh authority and target read under their execution
+        // gates. The exact gates stay held through native IO and the receipt commit.
+        var current = await store.ReadPendingCleanupAsync(work, cancellationToken, count).ConfigureAwait(false);
+        if (current.Count != count) return false;
+        for (var index = 0; index < count; index++)
+        {
+            if (current[index].MatchesBinding(pending[index])) continue;
+            await store.FailAsync(work, "source-delete-cleanup-target-changed", cancellationToken).ConfigureAwait(false);
+            return false;
+        }
+
+        var outcomes = new List<SourceDeletionFileOutcome>(count);
+        var started = _timeProvider.GetTimestamp();
+        foreach (var target in current)
+        {
+            cancellationToken.ThrowIfCancellationRequested();
+            // Give queries a chance to acquire the global gate between slow legacy
+            // directories. Once started, an individual deletion keeps its gate.
+            if (target.StorageKind == 2 && outcomes.Count > 0 &&
+                _timeProvider.GetElapsedTime(started) >= TimeSpan.FromSeconds(1)) break;
+            if (!await isGateHeld(target, cancellationToken).ConfigureAwait(false)) break;
+            if (work.LeaseExpiresAtUtc is not { } expires || expires <= _timeProvider.GetUtcNow())
+            {
+                if (outcomes.Count == 0) return false;
+                break;
+            }
+
+            var result = target.SharedReferenceExists
+                ? new SourceDeletionFileResult(true, "source-delete-shared-artifact-preserved")
+                : await files.DeleteAsync(target, cancellationToken).ConfigureAwait(false);
+            outcomes.Add(new(target, result));
+            if (!result.Completed) break;
+        }
+
+        if (outcomes.Count == 0)
+        {
+            await store.DeferAsync(work, "source-delete-cleanup-gate-lost", cancellationToken).ConfigureAwait(false);
+            return false;
+        }
+
+        // An in-flight delete can finish under an expired work lease. Report the
+        // physical progress to the worker, while SQL refuses the stale receipt.
+        await store.RecordCleanupResultsAsync(work, outcomes, cancellationToken).ConfigureAwait(false);
+        return outcomes[^1].Result.Completed;
     }
 }

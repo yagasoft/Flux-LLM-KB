@@ -12,9 +12,10 @@ public sealed class RetainedProcessorActivationHostedService(
     IRetainedProcessorFailureClassifier? failureClassifier = null,
     ILogger<RetainedProcessorActivationHostedService>? logger = null,
     TimeProvider? timeProvider = null,
-    IDatabaseStartupReadiness? databaseStartupReadiness = null) : BackgroundService
+    IDatabaseStartupReadiness? databaseStartupReadiness = null,
+    IHostedDatabaseFailureClassifier? databaseFailureClassifier = null) : BackgroundService
 {
-    // The policy is optional for application-only compositions; without it failures retain StopHost behaviour.
+    // Classifiers are optional for application-only compositions; unrelated failures retain StopHost behaviour.
     private readonly IRetainedProcessorFailureClassifier? _failureClassifier = failureClassifier;
     private readonly ILogger<RetainedProcessorActivationHostedService>? _logger = logger;
     private readonly TimeProvider _timeProvider = timeProvider ?? TimeProvider.System;
@@ -35,9 +36,9 @@ public sealed class RetainedProcessorActivationHostedService(
                         .RunOnceAsync(stoppingToken).ConfigureAwait(false);
                     if (result.ClaimedBranches + result.PromotedBranches > 0) delay = TimeSpan.Zero;
                 }
-                catch (Exception exception) when (_failureClassifier?.TryClassify(exception, out _) == true)
+                catch (Exception exception) when (TryClassifyDatabaseFailure(exception, out _))
                 {
-                    _failureClassifier.TryClassify(exception, out var errorNumber);
+                    TryClassifyDatabaseFailure(exception, out var errorNumber);
                     _logger?.LogWarning("Retained processor iteration deferred after SQL error {SqlErrorNumber} ({ExceptionType}); a fresh iteration will revalidate durable work.",
                         errorNumber, exception.GetType().Name);
                 }
@@ -46,5 +47,12 @@ public sealed class RetainedProcessorActivationHostedService(
             }
         }
         catch (OperationCanceledException) when (stoppingToken.IsCancellationRequested) { }
+    }
+
+    private bool TryClassifyDatabaseFailure(Exception exception, out int errorNumber)
+    {
+        errorNumber = 0;
+        return _failureClassifier?.TryClassify(exception, out errorNumber) == true ||
+            databaseFailureClassifier?.TryClassify(exception, out errorNumber) == true;
     }
 }

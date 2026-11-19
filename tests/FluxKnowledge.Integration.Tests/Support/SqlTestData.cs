@@ -95,6 +95,7 @@ internal static class SqlTestData
                 .UseSqlServer(fixture.ConnectionString)
                 .Options);
         await ExecuteResetBatchAsync(context, $"""
+            IF OBJECT_ID(N'dbo.TextChunkWindowBackfillStates',N'U') IS NOT NULL DELETE FROM dbo.TextChunkWindowBackfillStates;
             {Delete(context.AuditEvents)}
             {Delete(context.SourceDeletionCleanupItems)}
             {Delete(context.SourceDeletionOperations)}

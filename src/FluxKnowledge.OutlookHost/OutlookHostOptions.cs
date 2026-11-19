@@ -76,7 +76,11 @@ internal sealed record OutlookAttachmentPayload(
 internal sealed record OutlookMessagePayload(
     ReadOnlyMemory<byte> Body,
     string BodyContentType,
-    IReadOnlyList<OutlookAttachmentPayload> Attachments);
+    IReadOnlyList<OutlookAttachmentPayload> Attachments)
+{
+    public string? Subject { get; init; }
+    public string? Sender { get; init; }
+}
 
 internal enum OutlookComFailureReason
 {

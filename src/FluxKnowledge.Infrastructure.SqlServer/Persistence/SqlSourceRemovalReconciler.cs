@@ -1,8 +1,11 @@
 using FluxKnowledge.Application.Ports;
 using FluxKnowledge.Application.Contracts;
+using FluxKnowledge.Application.Gpu;
+using FluxKnowledge.Domain.Gpu;
 using FluxKnowledge.Domain.Sources;
 using FluxKnowledge.Infrastructure.SqlServer.Persistence.Entities;
 using Microsoft.EntityFrameworkCore;
+using Microsoft.EntityFrameworkCore.Storage;
 using System.Data;
 using System.Diagnostics;
 using System.Text.Json;
@@ -10,7 +13,8 @@ using System.Text.Json;
 namespace FluxKnowledge.Infrastructure.SqlServer.Persistence;
 
 public sealed class SqlSourceRemovalReconciler(IDbContextFactory<FluxKnowledgeDbContext> factory,
-    TimeProvider clock, ISourceObservationReader observations, Guid? targetRootId = null) : ISourceRemovalReconciler
+    TimeProvider clock, ISourceObservationReader observations, Guid? targetRootId = null,
+    IGpuSchedulerWakeSignal? schedulerWake = null) : ISourceRemovalReconciler
 {
     private const int PageSize = 128;
     private readonly SemaphoreSlim _owner = new(1, 1);
@@ -196,12 +200,16 @@ public sealed class SqlSourceRemovalReconciler(IDbContextFactory<FluxKnowledgeDb
             await RequireRootAsync(db, root, ct).ConfigureAwait(false);
             using var authority = observations.OpenRoot(Restore(root));
             var current = await db.SourcePendingChanges.SingleOrDefaultAsync(x => x.Id == progress.Scope.Id, ct).ConfigureAwait(false);
-            if (current is null || current.Generation != progress.Scope.Generation) return;
+            if (current is null || current.Generation != progress.Scope.Generation ||
+                (current.ReasonFlags & SourcePendingReasons.RemovalPending) == 0) return;
+            await SqlGpuSchedulerStore.AcquireMutationLockAsync(db, transaction.GetDbTransaction(), ct).ConfigureAwait(false);
             current.ReasonFlags &= ~SourcePendingReasons.RemovalPending;
             if (current.ReasonFlags == 0) db.SourcePendingChanges.Remove(current);
+            await SqlGpuSchedulerStore.RecordWakeAsync(db, GpuSchedulerWakeReason.Reconciliation, clock.GetUtcNow(), ct).ConfigureAwait(false);
             await db.SaveChangesAsync(ct).ConfigureAwait(false);
             authority.ValidateCurrent();
             await transaction.CommitAsync(ct).ConfigureAwait(false);
+            schedulerWake?.Notify(GpuSchedulerWakeReason.Reconciliation);
         }).ConfigureAwait(false);
     }
 

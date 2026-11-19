@@ -24,15 +24,17 @@ public sealed class CpuStageSqlRecoveryTests(NativeSqlServerFixture fixture) : I
     [InlineData(PipelineStage.Normalise, "rolled-back")]
     [InlineData(PipelineStage.CanonicalIndex, "before-write")]
     [InlineData(PipelineStage.CanonicalIndex, "rolled-back")]
+    [InlineData(PipelineStage.Extract, "before-write", PipelineOperations.ExtractDocument)]
+    [InlineData(PipelineStage.Extract, "rolled-back", PipelineOperations.ExtractDocument)]
     public async Task Transient_cpu_failure_retains_leases_and_reclaims_the_same_delivery(
-        PipelineStage stage, string failurePoint)
+        PipelineStage stage, string failurePoint, string? operation = null)
     {
         await SqlTestData.ClearPipelineAsync(fixture);
         var clock = new Clock();
         var seeded = await SqlTestData.SeedWorkItemAsync(fixture, clock.GetUtcNow(),
-            PublicJobState.WorkerQueued, null, stage: stage, operation: Operation(stage));
+            PublicJobState.WorkerQueued, null, stage: stage, operation: operation ?? Operation(stage));
         var factory = SqlTestData.CreateFactory(fixture);
-        var worker = new Worker(factory, clock, stage, failurePoint, SqlFailure(-2));
+        var worker = new Worker(factory, clock, stage, failurePoint, SqlFailure(-2), operation);
         await using var services = Services(factory, clock, worker);
         var pump = services.GetRequiredService<OutboxPumpService>();
 
@@ -67,14 +69,15 @@ public sealed class CpuStageSqlRecoveryTests(NativeSqlServerFixture fixture) : I
     [NativeSqlServerTheory]
     [InlineData(PipelineStage.Normalise)]
     [InlineData(PipelineStage.CanonicalIndex)]
-    public async Task Lost_commit_acknowledgement_preserves_the_completed_output(PipelineStage stage)
+    [InlineData(PipelineStage.Extract, PipelineOperations.ExtractDocument)]
+    public async Task Lost_commit_acknowledgement_preserves_the_completed_output(PipelineStage stage, string? operation = null)
     {
         await SqlTestData.ClearPipelineAsync(fixture);
         var clock = new Clock();
         var seeded = await SqlTestData.SeedWorkItemAsync(fixture, clock.GetUtcNow(),
-            PublicJobState.WorkerQueued, null, stage: stage, operation: Operation(stage));
+            PublicJobState.WorkerQueued, null, stage: stage, operation: operation ?? Operation(stage));
         var factory = SqlTestData.CreateFactory(fixture);
-        var worker = new Worker(factory, clock, stage, "committed", SqlFailure(-2));
+        var worker = new Worker(factory, clock, stage, "committed", SqlFailure(-2), operation);
         await using var services = Services(factory, clock, worker);
         var pump = services.GetRequiredService<OutboxPumpService>();
 
@@ -96,19 +99,23 @@ public sealed class CpuStageSqlRecoveryTests(NativeSqlServerFixture fixture) : I
     [InlineData(PipelineStage.Normalise, -2, false)]
     [InlineData(PipelineStage.CanonicalIndex, 1205, true)]
     [InlineData(PipelineStage.Extract, -2, false)]
-    [InlineData(PipelineStage.Embed, -2, false)]
+    [InlineData(PipelineStage.Embed, 2601, false)]
+    [InlineData(PipelineStage.Publish, 2601, false)]
+    [InlineData(PipelineStage.Extract, 2601, false, PipelineOperations.ExtractDocument)]
+    [InlineData(PipelineStage.Extract, -2, true, PipelineOperations.ExtractDocument)]
+    [InlineData(PipelineStage.Extract, -2, false, PipelineOperations.ExtractVisio)]
     public async Task Unsupported_stages_and_unclassified_failures_remain_terminal(
-        PipelineStage stage, int number, bool mixed)
+        PipelineStage stage, int number, bool mixed, string? operation = null)
     {
         await SqlTestData.ClearPipelineAsync(fixture);
         var clock = new Clock();
         var seeded = await SqlTestData.SeedWorkItemAsync(fixture, clock.GetUtcNow(),
-            PublicJobState.WorkerQueued, null, stage: stage, operation: Operation(stage));
+            PublicJobState.WorkerQueued, null, stage: stage, operation: operation ?? Operation(stage));
         var factory = SqlTestData.CreateFactory(fixture);
         Exception failure = stage == PipelineStage.Normalise
             ? new InvalidOperationException("Execution Timeout Expired.")
             : mixed ? SqlFailure(number, 2601) : SqlFailure(number);
-        await using var services = Services(factory, clock, new Worker(factory, clock, stage, "before-write", failure));
+        await using var services = Services(factory, clock, new Worker(factory, clock, stage, "before-write", failure, operation));
 
         Assert.Equal(1, await services.GetRequiredService<OutboxPumpService>().PumpOnceAsync(CancellationToken.None));
         await using var check = factory.CreateDbContext();
@@ -117,6 +124,44 @@ public sealed class CpuStageSqlRecoveryTests(NativeSqlServerFixture fixture) : I
         Assert.Null(job.LeaseOwner);
         Assert.NotNull((await check.OutboxMessages.SingleAsync()).DispatchedAtUtc);
         Assert.Empty(await check.Artifacts.ToListAsync());
+    }
+
+    [NativeSqlServerFact]
+    public async Task Document_extract_cancellation_preserves_the_claim()
+    {
+        await SqlTestData.ClearPipelineAsync(fixture);
+        var clock = new Clock();
+        var seeded = await SqlTestData.SeedWorkItemAsync(fixture, clock.GetUtcNow(), PublicJobState.WorkerQueued,
+            null, stage: PipelineStage.Extract, operation: PipelineOperations.ExtractDocument);
+        var factory = SqlTestData.CreateFactory(fixture);
+        using var cancellation = new CancellationTokenSource();
+        await using var services = Services(factory, clock, new Worker(factory, clock, PipelineStage.Extract,
+            "before-write", new OperationCanceledException(cancellation.Token), PipelineOperations.ExtractDocument, cancellation.Cancel));
+        await Assert.ThrowsAnyAsync<OperationCanceledException>(async () =>
+            await services.GetRequiredService<OutboxPumpService>().PumpOnceAsync(cancellation.Token));
+        await using var check = factory.CreateDbContext();
+        var job = await check.Jobs.SingleAsync(value => value.Id == seeded.JobId.Value);
+        Assert.Equal((int)PublicJobState.WorkerProcessing, job.PublicState);
+        Assert.NotNull(job.LeaseOwner);
+        Assert.Null(job.Reason);
+    }
+
+    [NativeSqlServerTheory]
+    [InlineData(true)]
+    [InlineData(false)]
+    public async Task Document_extract_file_and_native_failures_remain_terminal(bool fileFailure)
+    {
+        await SqlTestData.ClearPipelineAsync(fixture);
+        var clock = new Clock();
+        var seeded = await SqlTestData.SeedWorkItemAsync(fixture, clock.GetUtcNow(), PublicJobState.WorkerQueued,
+            null, stage: PipelineStage.Extract, operation: PipelineOperations.ExtractDocument);
+        var factory = SqlTestData.CreateFactory(fixture);
+        Exception failure = fileFailure ? new IOException("synthetic file failure") : new InvalidOperationException("synthetic native failure");
+        await using var services = Services(factory, clock, new Worker(factory, clock, PipelineStage.Extract,
+            "before-write", failure, PipelineOperations.ExtractDocument));
+        Assert.Equal(1, await services.GetRequiredService<OutboxPumpService>().PumpOnceAsync(default));
+        await using var check = factory.CreateDbContext();
+        Assert.Equal((int)PublicJobState.Failed, (await check.Jobs.SingleAsync(value => value.Id == seeded.JobId.Value)).PublicState);
     }
 
     private static ServiceProvider Services(IDbContextFactory<FluxKnowledgeDbContext> factory, Clock clock, Worker worker)
@@ -135,6 +180,7 @@ public sealed class CpuStageSqlRecoveryTests(NativeSqlServerFixture fixture) : I
         PipelineStage.Normalise => PipelineOperations.NormaliseText,
         PipelineStage.CanonicalIndex => PipelineOperations.CanonicalIndex,
         PipelineStage.Embed => PipelineOperations.Embed,
+        PipelineStage.Publish => PipelineOperations.Publish,
         _ => PipelineOperations.ExtractUtf8
     };
 
@@ -145,23 +191,29 @@ public sealed class CpuStageSqlRecoveryTests(NativeSqlServerFixture fixture) : I
     }
 
     private sealed class Worker(IDbContextFactory<FluxKnowledgeDbContext> factory, Clock clock,
-        PipelineStage stage, string failurePoint, Exception failure) : IStageWorker
+        PipelineStage stage, string failurePoint, Exception failure, string? operation = null, Action? firstAction = null) : IStageWorker
     {
-        public string Operation => CpuStageSqlRecoveryTests.Operation(stage);
+        public string Operation => operation ?? CpuStageSqlRecoveryTests.Operation(stage);
         public int Calls { get; private set; }
+        private StageWorkItem? _firstWork;
         public async ValueTask ExecuteAsync(StageWorkItem work, CancellationToken token)
         {
             Calls++;
+            if (Calls == 1) { _firstWork = work; firstAction?.Invoke(); }
             if (Calls == 1 && failurePoint == "before-write") throw failure;
             var store = new SqlStageTransitionStore(factory,
                 Calls == 1 && failurePoint == "rolled-back" ? new Fault(failure) : null, clock, sourceAdmission: new global::FluxKnowledge.Integration.Tests.Support.FixtureSourceAdmission(factory));
             var text = "retained CPU checkpoint";
-            await store.TransitionAsync(new(work.DispatchMessage, work.Job,
+            if (Calls == 2)
+                await Assert.ThrowsAsync<InvalidOperationException>(() => store.TransitionAsync(Request(_firstWork!), token).AsTask());
+            await store.TransitionAsync(Request(work), token);
+            if (Calls == 1 && failurePoint == "committed") throw failure;
+
+            StageTransitionRequest Request(StageWorkItem current) => new(current.DispatchMessage, current.Job,
                 new(Guid.NewGuid(), stage, Convert.ToHexStringLower(SHA256.HashData(Encoding.UTF8.GetBytes(text))),
                     "text/plain", text, clock.GetUtcNow()),
-                stage + 1, stage == PipelineStage.Normalise ? PipelineOperations.CanonicalIndex : PipelineOperations.Embed,
-                "test-cpu-worker"), token);
-            if (Calls == 1 && failurePoint == "committed") throw failure;
+                stage + 1, stage switch { PipelineStage.Extract => PipelineOperations.NormaliseText,
+                    PipelineStage.Normalise => PipelineOperations.CanonicalIndex, _ => PipelineOperations.Embed }, "test-cpu-worker");
         }
     }
 
@@ -170,7 +222,7 @@ public sealed class CpuStageSqlRecoveryTests(NativeSqlServerFixture fixture) : I
         public ValueTask AfterArtifactWrittenAsync(CancellationToken token) => ValueTask.FromException(failure);
     }
 
-    private static SqlException SqlFailure(params int[] numbers)
+    internal static SqlException SqlFailure(params int[] numbers)
     {
         var flags = BindingFlags.Instance | BindingFlags.NonPublic;
         var errors = (SqlErrorCollection)Activator.CreateInstance(typeof(SqlErrorCollection), flags, null, null, null)!;

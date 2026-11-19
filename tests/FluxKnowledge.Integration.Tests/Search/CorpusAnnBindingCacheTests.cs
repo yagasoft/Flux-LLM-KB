@@ -1,11 +1,53 @@
 using FluxKnowledge.Application.Indexing;
 using FluxKnowledge.Infrastructure.SqlServer.Search;
+using FluxKnowledge.Application.Ports;
+using FluxKnowledge.Infrastructure.SqlServer.Persistence;
+using Microsoft.EntityFrameworkCore;
 using Xunit;
 
 namespace FluxKnowledge.Integration.Tests.Search;
 
 public sealed class CorpusAnnBindingCacheTests
 {
+    [Fact]
+    public async Task Late_loaded_metadata_is_compared_to_the_query_versions_at_actual_use()
+    {
+        var cache=new CorpusAnnBindingCache();var epoch=Guid.NewGuid();var artifact=Guid.NewGuid();
+        var before=Guid.NewGuid();var after=Guid.NewGuid();var binding=new CanonicalBindingKey(artifact,Guid.NewGuid(),1);
+        var segment=Segment('a');
+        var started=new TaskCompletionSource(TaskCreationOptions.RunContinuationsAsynchronously);
+        var release=new TaskCompletionSource(TaskCreationOptions.RunContinuationsAsynchronously);
+        var loading=cache.GetAsync(epoch,segment,async ct =>
+        {
+            started.SetResult();await release.Task.WaitAsync(ct);
+            return new(new Dictionary<CanonicalBindingKey,long[]> {[binding]=[1]},new HashSet<CanonicalBindingKey>(),512,
+                new Dictionary<Guid,Guid> {[artifact]=before});
+        },default).AsTask();
+        await started.Task;
+        var current=new Dictionary<Guid,Guid> {[artifact]=after};
+        Assert.False(cache.InvalidateChangedArtifacts(current)); // Old entry is still in flight.
+        var generation=new IndexGenerationDescriptor(Guid.NewGuid(),"profile",2,"synthetic",new string('a',64),3,new(epoch,1),2,1);
+        var reader=new SqlCorpusRetrievalReader(new UnusedFactory(),cache);
+        var selection=new SqlCorpusRetrievalReader.CachedScopeSelection(reader,generation,new(new HashSet<CanonicalBindingKey> {binding},current));
+        release.SetResult();await loading;
+        var error=await Assert.ThrowsAsync<PassageRetrievalRefusalException>(() => selection.ReadSegmentKeysAsync(new Lease(generation),new("all",[],null),segment,default).AsTask());
+        Assert.Equal("warming",error.Message);
+        Assert.Null(cache.TryGet(epoch,segment));
+    }
+
+    [Fact]
+    public async Task Rule_versions_are_distinct_and_invalidation_removes_only_affected_segments()
+    {
+        var cache=new CorpusAnnBindingCache();var epoch=Guid.NewGuid();var artifact=Guid.NewGuid();var version=Guid.NewGuid();
+        ValueTask<SegmentBindingGroups> Load(CancellationToken _) => ValueTask.FromResult(Groups() with {ArtifactVersions=new Dictionary<Guid,Guid> {[artifact]=version}});
+        await cache.GetAsync(epoch,Segment('a'),Load,default,"policy1");
+        Assert.Null(cache.TryGet(epoch,Segment('a'),"policy2"));
+        await cache.GetAsync(epoch,Segment('b'),_ => ValueTask.FromResult(Groups() with {ArtifactVersions=new Dictionary<Guid,Guid>()}),default,"policy1");
+        Assert.True(cache.InvalidateChangedArtifacts(new Dictionary<Guid,Guid> {[artifact]=Guid.NewGuid()}));
+        Assert.Null(cache.TryGet(epoch,Segment('a'),"policy1"));
+        Assert.NotNull(cache.TryGet(epoch,Segment('b'),"policy1"));
+    }
+
     [Fact]
     public async Task Readiness_is_nonblocking_during_loading_and_concurrent_preparations_share_one_complete_load()
     {
@@ -90,5 +132,17 @@ public sealed class CorpusAnnBindingCacheTests
     {
         public DateTimeOffset Now { get; set; } = DateTimeOffset.UnixEpoch;
         public override DateTimeOffset GetUtcNow() => Now;
+    }
+
+    private sealed class UnusedFactory : IDbContextFactory<FluxKnowledgeDbContext>
+    {
+        public FluxKnowledgeDbContext CreateDbContext()=>throw new InvalidOperationException("The cache invariant requires no SQL calls.");
+    }
+    private sealed class Lease(IndexGenerationDescriptor generation) : ICorpusGenerationLease
+    {
+        public Guid LeaseId { get; }=Guid.NewGuid();
+        public IndexGenerationDescriptor Generation=>generation;
+        public ValueTask<bool> IsCurrentAsync(CancellationToken cancellationToken)=>ValueTask.FromResult(true);
+        public ValueTask DisposeAsync()=>ValueTask.CompletedTask;
     }
 }

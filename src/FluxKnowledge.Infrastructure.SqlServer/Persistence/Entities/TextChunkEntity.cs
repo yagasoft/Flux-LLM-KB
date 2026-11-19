@@ -15,4 +15,5 @@ public sealed class TextChunkEntity
     public string SearchInputHash { get; set; } = string.Empty;
     public string SearchText { get; private set; } = string.Empty;
     public ArtifactEntity Artifact { get; set; } = null!;
+    public TextChunkWindowEligibilityEntity? WindowEligibility { get; set; }
 }

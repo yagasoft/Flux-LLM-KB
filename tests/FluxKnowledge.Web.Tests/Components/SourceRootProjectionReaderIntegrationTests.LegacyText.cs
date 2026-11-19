@@ -14,11 +14,15 @@ namespace FluxKnowledge.Web.Tests.Components;
 public sealed partial class SourceRootProjectionReaderIntegrationTests
 {
     [NativeSqlServerTheory]
-    [InlineData("Unknown", false, true)]
-    [InlineData("DeferredPolicy", false, true)]
-    [InlineData("Unknown", true, true)]
-    [InlineData("Unknown", true, false)]
-    public async Task Unadmitted_legacy_text_reports_policy_assessment_in_detail_and_overview_without_mutating_history(string classification, bool oversized, bool withPending)
+    [InlineData("Unknown", false, true, false)]
+    [InlineData("DeferredPolicy", false, true, false)]
+    [InlineData("Unknown", true, true, false)]
+    [InlineData("Unknown", true, false, false)]
+    [InlineData("Unknown", false, true, true)]
+    [InlineData("Unknown", true, true, true)]
+    [InlineData("Unknown", true, false, true)]
+    public async Task Unadmitted_legacy_text_reports_policy_assessment_in_detail_and_overview_without_mutating_history(
+        string classification, bool oversized, bool withPending, bool lowerRootLimit)
     {
         var root = Guid.NewGuid();
         var revision = Guid.NewGuid();
@@ -26,6 +30,7 @@ public sealed partial class SourceRootProjectionReaderIntegrationTests
         var factory = new TestDbContextFactory(_fixture.ConnectionString);
         var pending = Activity(revision, SourceActivityState.Pending);
         var retained = Activity(revision, SourceActivityState.CancelledSuperseded);
+        var limit = lowerRootLimit ? 100 : SourcePolicyDefaults.MaximumTextBytes;
         retained.ActivityKind = (int)SourceActivityKind.DocumentParsing;
         retained.ExecutionClass = (int)ExecutionClass.DeferredCapability;
         retained.RequiredCapability = "source-artifact-store";
@@ -42,12 +47,12 @@ public sealed partial class SourceRootProjectionReaderIntegrationTests
             {
                 Id = root, CanonicalPath = $"E:\\source-projection-tests\\{root:N}",
                 DisplayName = "Legacy text assessment", State = (int)SourceRootState.Enabled,
-                ConfigurationRevision = 1, MaximumFileBytes = SourcePolicyDefaults.MaximumTextBytes,
+                ConfigurationRevision = 1, MaximumFileBytes = limit,
                 CreatedAtUtc = now, UpdatedAtUtc = now
             });
             var source = Revision(revision, root, "retained.dart", now, false);
             source.Classification = classification;
-            if (oversized) source.ByteLength = SourcePolicyDefaults.MaximumTextBytes + 1;
+            source.ByteLength = oversized ? limit + 1 : limit;
             setup.SourceRevisions.Add(source);
             setup.SourceActivities.Add(retained);
             if (withPending) setup.SourceActivities.Add(pending);

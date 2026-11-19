@@ -114,7 +114,7 @@
                     {
                         <article class="running-task-row" @key="task.Id">
                             @if (string.IsNullOrWhiteSpace(task.FullPath)) { <strong>@task.SourceName</strong> }
-                            else { <FilePath FullPath="@task.FullPath" ArchivePath="@task.ArchivePath" /> }
+                            else { <FilePath FullPath="@task.FullPath" ArchivePath="@task.ArchivePath" ShowFullPath="true" /> }
                             <p>@task.SourceName · @task.Stage · @task.State @(task.IsHistorical ? "· Previous revision" : "")</p>
                             <p>Confirmed worker attempt elapsed at this sample: @PipelineFileExplorer.Elapsed(task.AttemptStartedAtUtc, activity.ObservedAtUtc).</p>
                             @if (task.PipelineRecordId is { } record) { <a href="@($"/corpus/{record}")">View pipeline record</a> }

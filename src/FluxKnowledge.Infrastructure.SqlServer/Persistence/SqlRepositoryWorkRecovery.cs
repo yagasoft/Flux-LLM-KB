@@ -228,7 +228,8 @@ internal static class SqlRepositoryWorkRecovery
     }
 
     internal static async Task<RepositorySourceDeferral?> CheckCheckpointAsync(FluxKnowledgeDbContext context,
-        JobEntity job, EmbeddingGpuRuntime? runtime, CancellationToken ct, EmbeddingProfile? expectedProfile = null)
+        JobEntity job, EmbeddingGpuRuntime? runtime, CancellationToken ct, EmbeddingProfile? expectedProfile = null,
+        bool issueCheckpointReceipts = false)
     {
         if (job.Stage < (int)PipelineStage.Embed) return null;
         var enrolled = await context.PipelineRecords.AnyAsync(value => value.Id == job.PipelineRecordId && value.RepositoryRecoveryBindingJson != null, ct);
@@ -273,10 +274,14 @@ internal static class SqlRepositoryWorkRecovery
                 expectedProfile is not null && (draft.ModelFingerprint != expectedProfile.ModelFingerprint || draft.Dimensions != expectedProfile.Dimensions) ||
                 runtime is not null && (draft.ModelFingerprint != runtime.Profile.ModelFingerprint || draft.Dimensions != runtime.Profile.Dimensions))
                 return new("repository-checkpoint-profile-or-epoch-changed", true);
-            var checksum = await SqlEmbeddingCheckpointStore.ReadCheckpointChecksumAsync(context, draft, job.PipelineRecordId,
-                job.SourceRevision, job.Stage == (int)PipelineStage.Publish, ct);
-            if (completedEmbedding is not null && completedEmbedding.ContentHash != checksum)
-                return new("repository-completed-embedding-checksum-invalid", true);
+            await SqlEmbeddingCheckpointStore.ValidateStoredVectorsAsync(context, draft, job.PipelineRecordId, job.SourceRevision, ct);
+            if (completedEmbedding is not null)
+            {
+                var checksum = await SqlEmbeddingCheckpointStore.ReadCheckpointChecksumAsync(context, draft, job.PipelineRecordId,
+                    job.SourceRevision, requireComplete: true, ct);
+                if (completedEmbedding.ContentHash != checksum)
+                    return new("repository-completed-embedding-checksum-invalid", true);
+            }
             var source = await (from record in context.PipelineRecords join revision in context.SourceRevisions on record.SourceRevisionId equals revision.Id
                 where record.Id == job.PipelineRecordId select revision).SingleAsync(ct);
             if (explicitRecovery && !await SqlExplicitGpuRecovery.HasCurrentInputAsync(context, source.Id, ct))
@@ -294,13 +299,21 @@ internal static class SqlRepositoryWorkRecovery
                 try { _ = await SqlEmbeddingRetry.ReadInputBindingAsync(context, record, canonical, draft, ct); }
                 catch (NativeOperationException) { return new("repository-canonical-input-integrity-failed", true); }
             }
-            if (needsGpuProof && await context.EmbeddingGpuRequests.AnyAsync(value => value.ParentJobId == embedJob.Id, ct))
+            var hasGpuRequests = needsGpuProof && await context.EmbeddingGpuRequests.AnyAsync(value => value.ParentJobId == embedJob.Id, ct);
+            if (hasGpuRequests)
             {
                 if (runtime is null) return new("repository-gpu-runtime-verification-required", true);
                 _ = await SqlEmbeddingRetry.ReadSettledGpuBindingAsync(context, embedJob, draft, runtime, ct,
                     repositoryRecovery: qualifiedGpuReplay, allowUnresolvedGroup: qualifiedGpuReplay && job.Stage == (int)PipelineStage.Embed,
-                    allowUnstartedHandoff: job.Stage == (int)PipelineStage.Embed);
+                    allowUnstartedHandoff: job.Stage == (int)PipelineStage.Embed,
+                    reuseCheckpointValidation: job.Stage == (int)PipelineStage.Embed,
+                    issueCheckpointValidation: issueCheckpointReceipts && job.Stage == (int)PipelineStage.Embed);
             }
+            else if (completedEmbedding is null)
+                // Old CPU/legacy checkpoints have no successful native group proof.
+                // Keep their full validation rather than trusting only a row count.
+                _ = await SqlEmbeddingCheckpointStore.ReadCheckpointChecksumAsync(context, draft, job.PipelineRecordId,
+                    job.SourceRevision, requireComplete: false, ct);
             return null;
         }
         catch (NativeOperationException) { return new("repository-gpu-outcome-cleanup-or-binding-unconfirmed", true); }

@@ -26,7 +26,7 @@ public interface IRetainedSourceReader
         CancellationToken cancellationToken)
     {
         var retained = await ReadBytesAsync(sourceRevisionId, cancellationToken).ConfigureAwait(false);
-        return await RetainedSourceReadLease.VerifyAsync(retained.SourceRevisionId,
+        return await RetainedSourceReadLease.OpenAsync(retained.SourceRevisionId,
             new MemoryStream(retained.Bytes, writable: false), retained.ContentSha256,
             retained.ByteLength, maximumByteLength, cancellationToken).ConfigureAwait(false);
     }
@@ -42,7 +42,7 @@ public sealed record RetainedArtifactInspection(
     string ContentSha256,
     long ByteLength);
 
-/// <summary>Checksum-verified immutable retained source bytes; no source-adapter path is exposed.</summary>
+/// <summary>Owned retained source bytes with their recorded identity; no source-adapter path is exposed.</summary>
 public sealed record RetainedSourceBytes(
     SourceRevisionId SourceRevisionId,
     byte[] Bytes,

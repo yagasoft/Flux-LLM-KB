@@ -23,10 +23,18 @@
   supporting work with tangible user improvements. Preserve these priorities
   through compaction and handoffs; the delivery record is
   `I:\Codex Workspaces\Operational Evidence\FluxKnowledge\startup-shutdown-stability-20261013\delivery-priorities-and-post-mvp-roadmap.md`.
-- For feature closeout on `codex/...`, use `scripts/dev/complete-feature.ps1`;
-  do not manually substitute its sequence. On failure, report JSON `failed_step`
-  and `log_path`, fix the failure within authorised scope and rerun. Script use
-  does not authorise production actions.
+- Run full closeout only at the very end of the chat, once the full plan is
+  finished and no further in-scope implementation, fixes, deployment or live
+  validation remains. Do not run full closeout between development or deployment
+  iterations. For coordinated work across chats, wait until all participating
+  chats have finished and their reviewed changes are integrated. Use focused
+  checks, builds and appropriate independent review during
+  development; existing production approval and safety gates still apply.
+- At final feature closeout on `codex/...`, use
+  `scripts/dev/complete-feature.ps1`; do not manually substitute its sequence.
+  On failure, report JSON `failed_step` and `log_path`, fix the failure within
+  authorised scope, then rerun final closeout after the remaining work is finished.
+  Script use does not authorise production actions.
 
 ## Hard rule: central model cache and download prohibition
 
@@ -57,7 +65,7 @@ supporting tool used for this application.
   are not sufficient identities. Include tokenizer/projector/config dependencies
   and conversion inputs, tool versions and output hashes where applicable.
 - **Normal application operation is offline for model acquisition.** Pass
-  explicit verified local paths and use providers' offline/local-files-only
+  explicit locally pinned paths, use metadata checks during normal loading, and use providers' offline/local-files-only
   modes. Never allow startup, import, restore, tests, model loading, fallback,
   retry, deployment or a context switch to initiate an implicit download. Audit
   wrappers and transitive loaders too; a helper command or library API is not an
@@ -93,6 +101,21 @@ supporting tool used for this application.
 
 ## Repository Guidance
 
+- Use file size and modification date for normal change detection and reconciliation,
+  including watcher-triggered and manual rescans. Hash source content once on first
+  ingestion for duplicate detection, and again after a size/date change. Keep path,
+  containment, ownership and exact-generation checks.
+- The user accepts some loss from corruption in the personal KB. Do not add full
+  retained-file, ANN-file or model-weight checksum scans during normal operation,
+  startup or loading, or replace them with elaborate verification receipts or
+  background corruption scans. Keep functional metadata identities, bounded format
+  and length checks, offline local model paths, and the J: acquisition rules above.
+- Keep safe recovery and exact input/model/ownership binding. Reuse validated
+  checkpoints instead of repeatedly reading and hashing unchanged completed history.
+  Keep command confirmations, path/configuration keys and test/benchmark hashing.
+- Use direct comparisons for search deduplication and protected pagination bindings.
+  Keep passage integrity checks and reuse them for unchanged passage text; keep
+  saved-knowledge identities and framework token protection.
 - Keep public repo content free of private memories, raw transcripts, credentials, embeddings from private material, and generated private wiki exports.
 - Use SQL Server as canonical persistence, SQL Full-Text for lexical retrieval and embedded USearch for the rebuildable ANN projection.
 - Use MCP, CLI, and REST as first-class integration surfaces.

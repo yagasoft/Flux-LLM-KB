@@ -10,6 +10,7 @@ using FluxKnowledge.Integration.Tests.Support;
 using Microsoft.Data.SqlClient;
 using Microsoft.EntityFrameworkCore;
 using Microsoft.Extensions.DependencyInjection;
+using Microsoft.Extensions.Logging;
 using System.Collections.Immutable;
 using Xunit;
 
@@ -270,7 +271,9 @@ public sealed class DerivedIndexRecoveryIntegrationTests(NativeSqlServerFixture 
         var root = Path.Combine(Path.GetTempPath(), $"FluxKnowledgeRecovery_{Guid.NewGuid():N}");
         try
         {
-            using var fixture = CreateFaultingCoordinator(root, new InvalidOperationException("configuration invalid"));
+            var original = new InvalidOperationException("configuration invalid");
+            var logger = new RecoveryFailureLogger();
+            using var fixture = CreateFaultingCoordinator(root, original, logger);
             var coordinator = fixture.Coordinator;
 
             await coordinator.RunOnceAsync(CancellationToken.None);
@@ -278,6 +281,9 @@ public sealed class DerivedIndexRecoveryIntegrationTests(NativeSqlServerFixture 
             Assert.Equal(DerivedIndexRecoveryState.OperatorActionRequired, coordinator.Snapshot.State);
             Assert.Equal(DerivedIndexRecoveryFailureCategory.ConfigurationInvalid, coordinator.Snapshot.FailureCategory);
             Assert.Null(coordinator.Snapshot.NextRetryAtUtc);
+            Assert.Same(original, logger.Exception);
+            Assert.Contains(Environment.ProcessId.ToString(), logger.Message);
+            Assert.Contains("attempt 1", logger.Message);
         }
         finally
         {
@@ -1037,7 +1043,9 @@ public sealed class DerivedIndexRecoveryIntegrationTests(NativeSqlServerFixture 
         var connection = Assert.IsType<SqlConnection>(field!.GetValue(lease));
         await connection.CloseAsync();
 
-        await Assert.ThrowsAsync<InvalidOperationException>(async () => await lease.DisposeAsync());
+        Assert.False(await lease.IsHeldAsync(CancellationToken.None));
+        await lease.DisposeAsync();
+        await lease.DisposeAsync();
 
         var reacquired = await store.TryAcquireExclusiveLeaseAsync(TimeSpan.Zero, CancellationToken.None);
         Assert.NotNull(reacquired);
@@ -1298,7 +1306,8 @@ public sealed class DerivedIndexRecoveryIntegrationTests(NativeSqlServerFixture 
         return vectors;
     }
 
-    private static FaultingCoordinatorFixture CreateFaultingCoordinator(string root, Exception fault)
+    private static FaultingCoordinatorFixture CreateFaultingCoordinator(string root, Exception fault,
+        ILogger<DerivedIndexRecoveryCoordinator>? logger = null)
     {
         var services = new ServiceCollection();
         var options = new UsearchIndexOptions(root);
@@ -1309,9 +1318,24 @@ public sealed class DerivedIndexRecoveryIntegrationTests(NativeSqlServerFixture 
         services.AddScoped<UsearchGenerationBuilder>();
         services.AddSingleton<DerivedIndexFileSystem>();
         services.AddSingleton(TimeProvider.System);
+        if (logger is not null) services.AddSingleton(logger);
         services.AddSingleton<DerivedIndexRecoveryCoordinator>();
         var provider = services.BuildServiceProvider(new ServiceProviderOptions { ValidateScopes = true });
         return new FaultingCoordinatorFixture(provider, provider.GetRequiredService<DerivedIndexRecoveryCoordinator>());
+    }
+
+    private sealed class RecoveryFailureLogger : ILogger<DerivedIndexRecoveryCoordinator>
+    {
+        public Exception? Exception { get; private set; }
+        public string Message { get; private set; } = "";
+        public IDisposable? BeginScope<TState>(TState state) where TState : notnull => null;
+        public bool IsEnabled(LogLevel logLevel) => true;
+        public void Log<TState>(LogLevel logLevel, EventId eventId, TState state, Exception? exception,
+            Func<TState, Exception?, string> formatter)
+        {
+            Exception = exception;
+            Message = formatter(state, exception);
+        }
     }
 
     private static FaultingCoordinatorFixture CreatePathProbeCoordinator(string root,
@@ -1413,6 +1437,7 @@ public sealed class DerivedIndexRecoveryIntegrationTests(NativeSqlServerFixture 
 
     private sealed class NoopRecoveryLease : IDerivedIndexRecoveryLease
     {
+        public ValueTask<bool> IsHeldAsync(CancellationToken cancellationToken) => ValueTask.FromResult(true);
         public ValueTask DisposeAsync() => ValueTask.CompletedTask;
     }
 

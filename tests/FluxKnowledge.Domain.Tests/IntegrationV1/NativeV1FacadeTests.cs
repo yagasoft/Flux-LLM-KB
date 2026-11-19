@@ -276,6 +276,8 @@ public sealed class NativeV1FacadeTests
             CallCount++;
             return ValueTask.FromResult<IReadOnlyList<KnowledgeSearchResult>>([]);
         }
+        public ValueTask<IReadOnlyList<KnowledgeSearchResult>> SearchCodexWorkspaceAsync(
+            string query, string cwd, int limit, CancellationToken cancellationToken) => throw new NotSupportedException();
         public ValueTask<IReadOnlyList<KnowledgeGraphResult>> GraphAsync(string node, int maxDepth, int maxResults, CancellationToken cancellationToken)
         {
             CallCount++;

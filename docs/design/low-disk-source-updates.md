@@ -8,12 +8,13 @@ native cleanup protections remain required.
 
 ## One operating policy
 
-Journal and watcher events drive normal updates. An identified file content
-event forces normal ingestion even when identity, size and modification time
-match. The fallback is a weekly metadata inventory: membership, physical file
-identity, size and modification time. Existing unchanged content is reused;
+Journal and watcher events select paths for normal size/date checks. An identified
+file event does not force ingestion when size and modification time match. The
+fallback is a weekly metadata inventory: membership, size and modification time.
+Existing unchanged content is reused;
 the inventory does not hash source or retained bytes for assurance. Hashing
-during actual ingestion, deduplication and retained-content consumption stays.
+is performed once on first ingestion for duplicate identity and after a detected
+size/date change. Retained consumption does not pre-read the body for checksums.
 
 There is no automatic checksum schedule, unsealed-file timer or restoration
 recapture of otherwise unchanged content. Seals and old capture receipts remain
@@ -22,8 +23,8 @@ does not manufacture a seal, checksum time or continuous journal coverage.
 
 Epochs, generations, root/configuration fences and safe observation leases still
 protect concurrent ownership. An initial or recovery baseline is a metadata
-inventory, with content reads only for new/changed files or actual pending file
-events. A journal gap retains its explicit old/replacement cursor receipt;
+inventory, with content reads only for new or size/date-changed files. A journal
+gap retains its explicit old/replacement cursor receipt;
 bounded journal retry and a dashboard warning remain. Pause/resume may require
 metadata reconciliation but must not force unchanged-content recapture.
 
@@ -41,27 +42,30 @@ excluding roots undergoing deletion, move from their prior interval through the
 audited transition before new worker admission. New roots use the weekly default.
 The compatibility field `reconciliationSeconds` defaults to 604,800 and rejects
 other supplied values; UI and mutations describe the effective policy clearly.
-Explicit `source_sync` with `fullContent: true` provides a manual full
-rescan/reindex through normal ingestion. Ordinary sync uses metadata. Manual
-full work has a distinct request/manifest marker and is never scheduled by
-journal uncertainty or missing proof. Retired verification commands cannot
+Explicit `source_sync` with the compatibility `fullContent: true` field provides a manual
+full metadata reconciliation. It no longer forces unchanged files to be read.
+The old request/manifest marker remains compatible; journal uncertainty and missing
+proof do not schedule checksum work. Retired verification commands cannot
 reopen checksum work.
 
 ## Reuse, events and membership
 
-Metadata reuse checks the current admitted source path, physical identity,
-identity/size/modification time, current revision/artifact binding and retained
+Metadata reuse checks the current admitted source path, size/modification time,
+current revision/artifact binding and retained
 metadata under owned root/configuration/lease fences. It does not require the
 old observation's seal or recovery epoch to match. The retained hash keeps its
-original ingestion provenance. Newer relevant dirty generations prevent reuse
-and remain pending; only an actual capture may satisfy content-event debt.
+original ingestion provenance. Newer relevant dirty generations remain pending;
+a metadata check may satisfy only the exact claimed generation. A same-size/date
+physical replacement updates inventory identity and clears old file-specific
+journal and seal facts without relabelling immutable history.
 
 An absent inventory metadata receipt does not itself require a content read.
 The current unique unsuppressed physical revision's original ingestion identity,
 size and nonnull modification time may initialise explicitly `MetadataOnly`
 inventory facts when all match current safe source and retained leases. This
 keeps the original artifact/hash authority and current root/plan fences, records
-no capture generation or verification time, and cannot acknowledge a file event.
+no capture generation or verification time. Exact claimed file events may be
+acknowledged after a current size/date check.
 Missing or conflicting ingestion facts still require ordinary ingestion. Existing
 malformed or conflicting receipt bindings are not silently repaired.
 
@@ -131,11 +135,11 @@ Focused SQL/native checks cover transition replay and rollback, active-reader
 refusal, cancellation/late finish, retained history, newer events, exact
 generation acknowledgement, queue capacity and Git/current-path ownership.
 Isolated functional staging covers additions, edits, renames, moves and deletes
-through indexed readback, including event-triggered metadata-equal edits and
-the explicitly accepted missed edit without an event.
+through indexed readback, including the explicitly accepted missed metadata-equal
+edit both with and without a file event.
 
-After focused tests, review the complete change and run the prescribed canonical
-closeout. Prepare exact release bindings, rollback and bounded live validation
+After focused tests, review the complete change. Run the prescribed canonical
+closeout only once all work in the chat is finished. Prepare exact release bindings, rollback and bounded live validation
 for independent operational review. Both production roots stay paused while
 preparing. The user's continuing deployment/validation authority applies to
 this change; it does not authorise unrelated retention or ownership cleanup.

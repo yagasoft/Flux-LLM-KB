@@ -2,7 +2,7 @@ using FluxKnowledge.Application.Models;
 
 namespace FluxKnowledge.Infrastructure.Inference.Models;
 
-/// <summary>Reuses a verified bundle only while its exact files and ancestors stay
+/// <summary>Reuses a local metadata-checked bundle while its exact files and ancestors stay
 /// protected by the original lease. Native model sessions still have per-work ownership.</summary>
 public sealed class PinnedLocalModelStore(ILocalModelStore inner) : ILocalModelStore, IDisposable
 {

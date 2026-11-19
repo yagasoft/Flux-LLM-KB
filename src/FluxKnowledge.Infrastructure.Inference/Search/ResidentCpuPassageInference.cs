@@ -88,7 +88,10 @@ public sealed class ResidentCpuPassageInference : IScheduledPassageInference, IA
         lock (_sync)
         {
             ObjectDisposedException.ThrowIf(_closed, this);
-            _warm ??= Task.Run(() => LoadAsync(_shutdown.Token), CancellationToken.None);
+            // Only a pre-allocation refusal with confirmed owner release may be
+            // retried. Unknown native/cleanup failures keep their original task.
+            if (_warm is null || _warm.IsFaulted && _warm.Exception!.InnerExceptions is [CpuWarmupMemoryUnavailableException])
+                _warm = Task.Run(() => LoadAsync(_shutdown.Token), CancellationToken.None);
             warm = _warm;
         }
         return warm.WaitAsync(cancellationToken);

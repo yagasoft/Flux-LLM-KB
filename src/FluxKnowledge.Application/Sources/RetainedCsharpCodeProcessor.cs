@@ -135,11 +135,9 @@ public sealed class RetainedCsharpCodeProcessor(
         }
 
         cancellationToken.ThrowIfCancellationRequested();
-        var actualHash = Convert.ToHexStringLower(SHA256.HashData(retained.Bytes));
         if (retained.SourceRevisionId != claim.SourceRevisionId ||
             retained.ByteLength < 0 ||
             retained.ByteLength != retained.Bytes.LongLength ||
-            !string.Equals(retained.ContentSha256, actualHash, StringComparison.Ordinal) ||
             !string.Equals(retained.ContentSha256, claim.InputSha256, StringComparison.Ordinal))
         {
             return Blocked(claim, "retained-artifact-checksum-invalid");

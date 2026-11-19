@@ -119,7 +119,7 @@ public sealed class LocalModelStoreTests
         Assert.True(result.Succeeded, result.ReasonCode);
         Assert.True(result.ReceiptPersisted);
         var lease = Assert.IsType<VerifiedLocalModelLease>(result.Lease);
-        Assert.Equal("model-bundle-verified", result.ReasonCode);
+        Assert.Equal("model-bundle-local-available", result.ReasonCode);
         Assert.True(await fixture.ReceiptExistsAsync(result.ReceiptLocation));
 
         var buffer = new byte[4];
@@ -163,7 +163,7 @@ public sealed class LocalModelStoreTests
     }
 
     [Fact]
-    public async Task Incorrect_declared_hash_refuses_after_a_fresh_read()
+    public async Task Declared_artifact_identity_selects_a_local_path_without_rehashing_its_contents()
     {
         await using var fixture = await LocalModelFixture.CreateAsync();
         var manifest = await fixture.SeedCompleteBundleAsync();
@@ -173,9 +173,11 @@ public sealed class LocalModelStoreTests
 
         var result = await fixture.Store.ResolveAsync(invalidManifest, CancellationToken.None);
 
-        Assert.False(result.Succeeded);
-        Assert.Equal("model-artifact-sha256-mismatch", result.ReasonCode);
-        Assert.Null(result.Lease);
+        using var lease = result.Lease;
+        Assert.True(result.Succeeded, result.ReasonCode);
+        Assert.Equal("model-bundle-local-available", result.ReasonCode);
+        Assert.NotNull(lease);
+        Assert.All(result.Files, file => Assert.Null(file.ObservedSha256));
         Assert.True(result.ReceiptPersisted);
     }
 
@@ -408,19 +410,19 @@ public sealed class LocalModelStoreTests
     }
 
     [Fact]
-    public async Task Earlier_receipt_does_not_bypass_a_fresh_hash_after_payload_corruption()
+    public async Task Earlier_metadata_receipt_does_not_bypass_a_changed_local_file_length()
     {
         await using var fixture = await LocalModelFixture.CreateAsync();
         var manifest = await fixture.SeedCompleteBundleAsync();
         var first = await fixture.Store.ResolveAsync(manifest, CancellationToken.None);
         Assert.True(first.Succeeded, first.ReasonCode);
         first.Lease!.Dispose();
-        await File.WriteAllTextAsync(fixture.ArtifactPath(manifest.Files[0]), "xxxxxxxxxx");
+        await File.WriteAllTextAsync(fixture.ArtifactPath(manifest.Files[0]), "short");
 
         var second = await fixture.Store.ResolveAsync(manifest, CancellationToken.None);
 
         Assert.False(second.Succeeded);
-        Assert.Equal("model-artifact-sha256-mismatch", second.ReasonCode);
+        Assert.Equal("model-artifact-length-mismatch", second.ReasonCode);
         Assert.Null(second.Lease);
     }
 
@@ -448,7 +450,7 @@ public sealed class LocalModelStoreTests
     }
 
     [Fact]
-    public async Task Cancellation_while_verifying_releases_the_current_payload_handle()
+    public async Task Cancellation_during_metadata_check_releases_the_current_payload_handle()
     {
         await using var fixture = await LocalModelFixture.CreateAsync();
         var manifest = await fixture.SeedCompleteBundleAsync();
@@ -495,17 +497,19 @@ public sealed class LocalModelStoreTests
 
         Assert.True(result.Succeeded, result.ReasonCode);
         using var receipt = JsonDocument.Parse(await fixture.ReadReceiptAsync(result.ReceiptLocation));
-        Assert.Equal("flux-offline-model-gate/1", receipt.RootElement.GetProperty("verifierVersion").GetString());
+        Assert.Equal("flux-offline-model-metadata/2", receipt.RootElement.GetProperty("verifierVersion").GetString());
+        Assert.False(receipt.RootElement.GetProperty("verified").GetBoolean());
+        Assert.Equal(0, receipt.RootElement.GetProperty("verifiedBytes").GetInt64());
         result.Lease!.Dispose();
     }
 
     [Fact]
-    public async Task Read_failure_is_a_receipted_refusal_and_releases_the_current_payload_handle()
+    public async Task Metadata_failure_is_a_receipted_refusal_and_releases_the_current_payload_handle()
     {
         await using var fixture = await LocalModelFixture.CreateAsync();
         var manifest = await fixture.SeedCompleteBundleAsync();
         var store = new LocalModelStore(
-            () => new FailingReadVerificationFiles(WindowsModelVerificationFiles.OpenForTest(fixture.ModelRoot)));
+            () => new FailingMetadataVerificationFiles(WindowsModelVerificationFiles.OpenForTest(fixture.ModelRoot)));
 
         var result = await store.ResolveAsync(manifest, CancellationToken.None);
 
@@ -607,18 +611,23 @@ public sealed class LocalModelStoreTests
         IModelVerificationFile inner,
         CancellationTokenSource cancellation) : IModelVerificationFile
     {
-        public long ByteLength => inner.ByteLength;
-
-        public ValueTask<int> ReadAsync(long offset, Memory<byte> buffer, CancellationToken cancellationToken)
+        public long ByteLength
         {
-            cancellation.Cancel();
-            return ValueTask.FromCanceled<int>(cancellationToken);
+            get
+            {
+                cancellation.Cancel();
+                cancellation.Token.ThrowIfCancellationRequested();
+                return inner.ByteLength;
+            }
         }
+
+        public ValueTask<int> ReadAsync(long offset, Memory<byte> buffer, CancellationToken cancellationToken) =>
+            throw new InvalidOperationException("Metadata checks must not read the payload.");
 
         public void Dispose() => inner.Dispose();
     }
 
-    private sealed class FailingReadVerificationFiles(IModelVerificationFiles inner) : IModelVerificationFiles
+    private sealed class FailingMetadataVerificationFiles(IModelVerificationFiles inner) : IModelVerificationFiles
     {
         public async ValueTask<ModelVerificationFileOpenResult> OpenReadAsync(
             ModelArtifactSpecification specification,
@@ -627,7 +636,7 @@ public sealed class LocalModelStoreTests
             var opened = await inner.OpenReadAsync(specification, cancellationToken);
             return opened.File is null
                 ? opened
-                : ModelVerificationFileOpenResult.Found(new FailingReadVerificationFile(opened.File));
+                : ModelVerificationFileOpenResult.Found(new FailingMetadataVerificationFile(opened.File));
         }
 
         public ValueTask<ModelReceiptPersistenceResult> PersistReceiptAsync(
@@ -637,12 +646,12 @@ public sealed class LocalModelStoreTests
         public void Dispose() => inner.Dispose();
     }
 
-    private sealed class FailingReadVerificationFile(IModelVerificationFile inner) : IModelVerificationFile
+    private sealed class FailingMetadataVerificationFile(IModelVerificationFile inner) : IModelVerificationFile
     {
-        public long ByteLength => inner.ByteLength;
+        public long ByteLength => throw new IOException("synthetic-metadata-failure");
 
         public ValueTask<int> ReadAsync(long offset, Memory<byte> buffer, CancellationToken cancellationToken) =>
-            ValueTask.FromException<int>(new IOException("synthetic-read-failure"));
+            throw new InvalidOperationException("Metadata checks must not read the payload.");
 
         public void Dispose() => inner.Dispose();
     }

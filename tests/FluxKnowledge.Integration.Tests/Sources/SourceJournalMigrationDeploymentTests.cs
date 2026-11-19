@@ -1,6 +1,7 @@
 using System.Diagnostics;
 using System.Security.Cryptography;
 using FluxKnowledge.Infrastructure.SqlServer.Persistence.Entities;
+using FluxKnowledge.Infrastructure.SqlServer.Persistence;
 using FluxKnowledge.Integration.Tests.Support;
 using Microsoft.EntityFrameworkCore;
 using Microsoft.EntityFrameworkCore.Infrastructure;
@@ -17,6 +18,7 @@ public sealed class SourceJournalMigrationDeploymentTests(NativeSqlServerFixture
         var factory = SqlTestData.CreateFactory(fixture);
         await using var db = await factory.CreateDbContextAsync();
         await db.GetService<IMigrator>().MigrateAsync();
+        await SqlSourceDeletionPendingQueueIndex.EnsureAsync(db,default);
         var area = Path.Combine(@"I:\Codex Workspaces\Staging\FluxKnowledge", "JournalHeldIntent-" + Guid.NewGuid().ToString("N"));
         Directory.CreateDirectory(area);
         try

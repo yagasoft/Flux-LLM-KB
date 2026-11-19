@@ -104,6 +104,7 @@ public static class OutboxWorkerServiceCollectionExtensions
             csharpCompilerServiceRegistrationProbe));
         services.TryAddScoped<RetainedProcessorActivationService>();
         services.TryAddSingleton<IRetainedProcessorFailureClassifier, SqlRetainedProcessorFailureClassifier>();
+        services.TryAddSingleton<IHostedDatabaseFailureClassifier, SqlHostedDatabaseFailureClassifier>();
         services.TryAddEnumerable(ServiceDescriptor.Singleton<IHostedService, RetainedProcessorActivationHostedService>());
         services.TryAddScoped<DeferredActivityReplayService>();
         services.TryAddScoped<IDeferredContentReprocessor>(

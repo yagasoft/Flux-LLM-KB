@@ -13,6 +13,17 @@ public interface ISourceArtifactPublicationGate
     ValueTask<ISourceArtifactPublicationLease?> TryAcquireExclusiveAsync(
         string contentSha256,
         CancellationToken cancellationToken);
+
+    /// <summary>Acquires the longest available prefix without waiting on a conflicting publisher.</summary>
+    ValueTask<ISourceArtifactPublicationBatchLease?> TryAcquireExclusiveBatchAsync(
+        IReadOnlyList<string> orderedContentHashes,
+        CancellationToken cancellationToken);
 }
 
 public interface ISourceArtifactPublicationLease : IAsyncDisposable;
+
+public interface ISourceArtifactPublicationBatchLease : IAsyncDisposable
+{
+    int AcquiredCount { get; }
+    ValueTask<bool> IsHeldAsync(string contentSha256, CancellationToken cancellationToken);
+}

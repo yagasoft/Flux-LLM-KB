@@ -7,7 +7,7 @@ using Xunit;
 
 namespace FluxKnowledge.Web.Tests.Composition;
 
-public sealed class BgeCpuWarmupServiceTests
+public sealed partial class BgeCpuWarmupServiceTests
 {
     [Fact]
     public async Task Throwing_shutdown_callback_does_not_skip_draining_or_native_cleanup()

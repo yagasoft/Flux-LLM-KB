@@ -5,6 +5,7 @@ using FluxKnowledge.Web.Components.Status;
 using Microsoft.Data.SqlClient;
 using Microsoft.EntityFrameworkCore;
 using Xunit;
+using ManualClock = FluxKnowledge.Web.Tests.Components.OverviewSnapshotCoordinatorTests.ManualClock;
 
 namespace FluxKnowledge.Web.Tests.Components;
 
@@ -17,8 +18,15 @@ public sealed class SqlProjectionReadBudgetTests
     {
         var original = terminationNotice ? SqlFailure(0, 0, 3621) : SqlFailure(0);
         var factory = new FailingFactory(original, waitForCancellation: true);
+        var clock = new ManualClock();
+        var read = Reader(factory, clock).ReadOverviewAsync(default).AsTask();
+        await factory.Entered.Task.WaitAsync(TimeSpan.FromSeconds(3));
+        clock.Advance(TimeSpan.FromMilliseconds(4999));
+        Assert.False(factory.ObservedToken.IsCancellationRequested);
+        Assert.False(read.IsCompleted);
+        clock.Advance(TimeSpan.FromMilliseconds(1));
         var failure = await Assert.ThrowsAsync<OverviewReadBudgetExceededException>(
-            () => Reader(factory).ReadOverviewAsync(default).AsTask().WaitAsync(TimeSpan.FromSeconds(5)));
+            () => read.WaitAsync(TimeSpan.FromSeconds(3)));
         Assert.Same(original, failure.InnerException);
         Assert.True(factory.ObservedToken.IsCancellationRequested);
     }
@@ -61,8 +69,12 @@ public sealed class SqlProjectionReadBudgetTests
     {
         var original = SqlFailure(number);
         var factory = new FailingFactory(original, waitForCancellation: true);
+        var clock = new ManualClock();
+        var read = Reader(factory, clock).ReadOverviewAsync(default).AsTask();
+        await factory.Entered.Task.WaitAsync(TimeSpan.FromSeconds(3));
+        clock.Advance(TimeSpan.FromSeconds(5));
         Assert.Same(original, await Assert.ThrowsAsync<SqlException>(
-            () => Reader(factory).ReadOverviewAsync(default).AsTask().WaitAsync(TimeSpan.FromSeconds(5))));
+            () => read.WaitAsync(TimeSpan.FromSeconds(3))));
         Assert.True(factory.ObservedToken.IsCancellationRequested);
     }
 
@@ -73,8 +85,12 @@ public sealed class SqlProjectionReadBudgetTests
     {
         var original = terminationNotice ? SqlFailure(0, 3621, 1205) : SqlFailure(0, 1205);
         var factory = new FailingFactory(original, waitForCancellation: true);
+        var clock = new ManualClock();
+        var read = Reader(factory, clock).ReadOverviewAsync(default).AsTask();
+        await factory.Entered.Task.WaitAsync(TimeSpan.FromSeconds(3));
+        clock.Advance(TimeSpan.FromSeconds(5));
         Assert.Same(original, await Assert.ThrowsAsync<SqlException>(
-            () => Reader(factory).ReadOverviewAsync(default).AsTask().WaitAsync(TimeSpan.FromSeconds(5))));
+            () => read.WaitAsync(TimeSpan.FromSeconds(3))));
     }
 
     [Theory]
@@ -87,8 +103,8 @@ public sealed class SqlProjectionReadBudgetTests
             () => Reader(new(original, false)).ReadOverviewAsync(default).AsTask()));
     }
 
-    private static SqlProjectionReader Reader(FailingFactory factory) =>
-        new(factory, new RecoveryStatus(), new SqlGpuSchedulerStore(factory));
+    private static SqlProjectionReader Reader(FailingFactory factory, TimeProvider? clock = null) =>
+        new(factory, new RecoveryStatus(), new SqlGpuSchedulerStore(factory), timeProvider: clock);
 
     private sealed class RecoveryStatus : IDerivedIndexRecoveryStatus
     {

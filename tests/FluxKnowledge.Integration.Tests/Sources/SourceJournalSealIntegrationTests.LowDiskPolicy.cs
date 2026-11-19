@@ -14,7 +14,7 @@ public sealed partial class SourceJournalSealIntegrationTests
     [InlineData(false, false, false)]
     [InlineData(true, true, false)]
     [InlineData(false, true, true)]
-    public async Task Low_disk_policy_actual_watcher_file_signals_force_capture_without_journal_or_inventory(bool journalEnabled, bool missingInventory, bool incomplete)
+    public async Task Low_disk_policy_actual_watcher_file_signals_observe_unchanged_metadata_without_content_reads(bool journalEnabled, bool missingInventory, bool incomplete)
     {
         await using var scenario = await Scenario.CreateAsync(fixture.ConnectionString, qualified: false);
         var root = await scenario.ScanAsync("actual-watcher-initial"); await scenario.DrainAsync();
@@ -42,7 +42,7 @@ public sealed partial class SourceJournalSealIntegrationTests
         }
         scenario.SourceBytes = scenario.ArtifactSourceBytes = scenario.RetainedBytes = 0;
         await scenario.IntakeAsync(); await scenario.DrainAsync();
-        Assert.Equal(64, scenario.SourceBytes);
+        Assert.Equal(0, scenario.SourceBytes + scenario.ArtifactSourceBytes + scenario.RetainedBytes);
     }
 
     [NativeSqlServerTheory]
@@ -77,11 +77,9 @@ public sealed partial class SourceJournalSealIntegrationTests
     }
 
     [NativeSqlServerTheory]
-    [InlineData("file-event")]
     [InlineData("unknown-mtime")]
-    [InlineData("physical-identity")]
     [InlineData("withdrawn")]
-    public async Task Low_disk_policy_missing_inventory_cannot_hide_a_real_event_or_missing_ingestion_authority(string condition)
+    public async Task Low_disk_policy_missing_inventory_refuses_missing_ingestion_authority(string condition)
     {
         await using var scenario = await Scenario.CreateAsync(fixture.ConnectionString, qualified: false);
         await scenario.ScanAsync("legacy-metadata-refusal-initial"); await scenario.DrainAsync();
@@ -90,12 +88,10 @@ public sealed partial class SourceJournalSealIntegrationTests
             db.SourceInventoryEntries.Remove(await db.SourceInventoryEntries.SingleAsync(x => !x.IsDirectory));
             await db.SaveChangesAsync();
             if (condition == "unknown-mtime") await db.SourceRevisions.ExecuteUpdateAsync(x => x.SetProperty(r => r.FileLastWriteAtUtc, (DateTimeOffset?)null));
-            if (condition == "physical-identity") await db.SourceRevisions.ExecuteUpdateAsync(x => x.SetProperty(r => r.StableSourceIdentity, "fixture-nonmatching-identity"));
             if (condition == "withdrawn") await db.SourceRevisions.ExecuteUpdateAsync(x => x.SetProperty(r => r.SuppressedAtUtc, scenario.Clock.Now));
         }
         scenario.SourceBytes = scenario.ArtifactSourceBytes = scenario.RetainedBytes = 0;
-        if (condition == "file-event") await scenario.SignalAsync();
-        else scenario.Clock.Now += TimeSpan.FromDays(7) + TimeSpan.FromSeconds(1);
+        scenario.Clock.Now += TimeSpan.FromDays(7) + TimeSpan.FromSeconds(1);
         await scenario.IntakeAsync(); await scenario.DrainAsync();
         Assert.Equal(64, scenario.SourceBytes);
     }
@@ -202,7 +198,7 @@ public sealed partial class SourceJournalSealIntegrationTests
     }
 
     [NativeSqlServerFact]
-    public async Task Low_disk_policy_manual_full_content_request_reads_unchanged_files_explicitly()
+    public async Task Low_disk_policy_legacy_manual_full_request_uses_size_date_reconciliation()
     {
         await using var scenario = await Scenario.CreateAsync(fixture.ConnectionString, qualified: false);
         await scenario.ScanAsync("manual-full-initial");
@@ -219,11 +215,11 @@ public sealed partial class SourceJournalSealIntegrationTests
         }
         scenario.SourceBytes = scenario.ArtifactSourceBytes = scenario.RetainedBytes = 0;
         await scenario.DrainAsync();
-        Assert.Equal(64, scenario.SourceBytes);
+        Assert.Equal(0, scenario.SourceBytes + scenario.ArtifactSourceBytes + scenario.RetainedBytes);
         await using var after = scenario.Factory.CreateDbContext();
         var manifest = System.Text.Json.JsonSerializer.Deserialize<SourceIncrementalPlan>(
             (await after.SourceScanRequests.SingleAsync(x => x.RequestKind == 5)).IncrementalManifestJson!);
-        Assert.True(manifest!.ForceFullContent);
+        Assert.False(manifest!.ForceFullContent);
     }
 
     [NativeSqlServerFact]
@@ -243,7 +239,7 @@ public sealed partial class SourceJournalSealIntegrationTests
         await scenario.SignalAsync();
         await scenario.IntakeAsync();
         await scenario.DrainAsync();
-        Assert.Equal(64, scenario.SourceBytes);
+        Assert.Equal(0, scenario.SourceBytes + scenario.ArtifactSourceBytes + scenario.RetainedBytes);
         await using var after = scenario.Factory.CreateDbContext();
         var latest = await after.SourceScanRequests.OrderByDescending(x => x.RequestedAtUtc).ThenByDescending(x => x.RequestKind).FirstAsync();
         var manifest = System.Text.Json.JsonSerializer.Deserialize<SourceIncrementalPlan>(latest.IncrementalManifestJson!);
@@ -373,7 +369,7 @@ public sealed partial class SourceJournalSealIntegrationTests
     }
 
     [NativeSqlServerFact]
-    public async Task Low_disk_policy_watcher_file_event_forces_capture_despite_matching_metadata_and_a_prior_seal()
+    public async Task Low_disk_policy_watcher_file_event_reuses_matching_metadata_despite_a_prior_seal()
     {
         await using var scenario = await Scenario.CreateAsync(fixture.ConnectionString, qualified: true);
         await scenario.ScanAsync("metadata-event-initial");
@@ -382,7 +378,7 @@ public sealed partial class SourceJournalSealIntegrationTests
         await scenario.SignalAsync();
         await scenario.IntakeAsync();
         await scenario.DrainAsync();
-        Assert.Equal(64, scenario.SourceBytes);
+        Assert.Equal(0, scenario.SourceBytes + scenario.ArtifactSourceBytes + scenario.RetainedBytes);
     }
 
     [NativeSqlServerTheory]

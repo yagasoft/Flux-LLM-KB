@@ -44,6 +44,61 @@ The combined migration, native-builder, format-1-reader and physical-path suite 
 
 Add meaningful tests first for behaviour/invariant changes. All ordinary tests are synthetic/model-free; dedicated staging tests must positively prove ANN use. Release builds retain zero warnings. Existing production evidence is context, not permission or proof of the new implementation.
 
+### Paired staging comparison on 18 November 2026
+
+Baseline `14b5ed329f701d4eb040ccd9571148dbd601700a`. The opt-in
+`Publication_formats_preserve_frozen_ANN_and_cited_retrieval` test ran both
+formats through the ordinary publication workers, SQL Server and USearch in
+disposable staging. Each used 12,001 baseline vectors and three one-vector
+additions. Matching SHA-256 digests covered passage text and all 12,004 final
+vector payloads. Format 2 used a maximum of 2,048 vectors per segment and
+ended with ten active segments.
+
+| Measurement | Format 1 | Format 2 |
+| --- | ---: | ---: |
+| Total persisted membership rows after three updates | 48,011 | 24,043 |
+| Net new membership rows per one-vector update | 12,002 / 12,003 / 12,004 | 10 / 11 / 12 |
+| One-vector update through publication, three updates | 14.21 / 14.24 / 15.35 s | 0.66 / 0.52 / 1.21 s |
+| Cold preparation and REST search p50 / p95 | 0.907 / 1.179 s | 0.622 / 0.711 s |
+| Warm REST search p50 / p95 | 0.898 / 1.960 s | 0.336 / 0.405 s |
+| Mean ANN recall@10 against exact dot products, allowing cutoff ties | 100% | 100% |
+| Expected REST top result and exact citation readback | 24/24 each | 24/24 each |
+
+Format 1 persisted 48,011 generation-vector rows. Format 2 persisted 12,004
+segment-vector rows, 12,004 current-member rows and 35 generation-segment links.
+Each format-2 addition contributed one vector to the segment, one current
+member and a new manifest's worth of segment links. The test excludes transient
+candidate worklists from the persisted totals. All 48 timed REST calls per
+format reached native ANN and returned hybrid-ready responses. Both formats
+reopened the persisted index after an in-process HTTP host restart, read an
+existing citation, returned `409 evidence-stale` after the cited record was
+marked deleted, and left zero query leases.
+
+The cold series evicted idle format-2 native handles and included explicit
+preparation in the time to a hybrid-ready response. SQL, OS file and
+previously built immutable reader metadata caches could stay warm. The warm
+series ran the same query immediately afterwards. There were 24 measurements
+per format and condition, with nearest-rank p95. The test used the real REST
+routes through ASP.NET TestServer, deterministic embeddings and global
+queries. Production indexing continued on the same machine, with separate
+staging catalogues and storage. The formats ran sequentially, so the timings
+describe this single paired run under background load.
+Trained-model relevance, process-cold latency and production capacity remain
+unqualified by this comparison.
+
+On the same baseline, 22 focused SQL and native recovery cases passed. They
+covered interruption before and after the segment metadata seal, reuse of
+validated files on replay, failure before write, after rollback and after
+commit, convergence on one visible generation, refusal of stale candidates,
+and owner acknowledgement during native shutdown. Faults were injected in the
+test process against staging SQL and native files. This run did not terminate
+the standalone application process mid-publication.
+
+Reproduce with the restricted disposable SQL variables, set
+`FLUXKNOWLEDGE_TEST_SCALE=1` and filter the Release Web test project by
+`FullyQualifiedName~Publication_formats_preserve_frozen_ANN`. The comparison
+TRX contains the full timing series and the individual assertions.
+
 ## Task 1 — Publish and search a segmented generation
 
 Deliverable: an isolated ordinary publication creates a version-2 manifest, reuses an unaffected segment on a second publication, and searches it through the real supported query path.

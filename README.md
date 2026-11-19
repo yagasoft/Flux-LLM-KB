@@ -46,11 +46,12 @@ preserve knowledge between sessions. It is designed for one trusted local user.
 | Native processing | Scheduled CPU/GPU work, offline model adapters and a desktop companion for Outlook/Visio COM operations. |
 
 Sources pass through retained snapshots, extraction, normalisation, indexing
-and publication. Processing uses checksum-verified retained bytes; SQL controls
+and publication. Processing reads protected retained files; SQL controls
 current revisions and publication. Durable leases and resumable work protect
 against duplicate or stale completion.
 
-Models load from verified local files and are never downloaded implicitly.
+Models load from protected local files under `J:\Models`, checked by path and
+length without rereading weight checksums, and are never downloaded implicitly.
 Local interfaces expose bounded, secret-filtered results; mutations use
 preview-bound confirmation and idempotency keys.
 

@@ -23,7 +23,7 @@ permission.
 
 ## Retained processing and lifecycle
 
-Processors consume only bounded, checksum-verified retained artifacts bound to
+Processors consume only bounded, protected retained artifacts bound to
 the durable revision. They do not reopen originals. Archive path and size
 checks, parser limits, completion ownership and publication fences remain
 mandatory. C# analysis does not build projects, restore dependencies, execute

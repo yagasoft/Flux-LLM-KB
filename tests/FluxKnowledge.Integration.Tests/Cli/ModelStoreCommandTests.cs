@@ -27,7 +27,7 @@ public sealed class ModelStoreCommandTests
         Assert.Empty(error.ToString());
         using var document = JsonDocument.Parse(output.ToString());
         Assert.True(document.RootElement.GetProperty("succeeded").GetBoolean());
-        Assert.Equal("model-bundle-verified", document.RootElement.GetProperty("reasonCode").GetString());
+        Assert.Equal("model-bundle-local-available", document.RootElement.GetProperty("reasonCode").GetString());
         Assert.True(document.RootElement.GetProperty("receiptPersisted").GetBoolean());
     }
 

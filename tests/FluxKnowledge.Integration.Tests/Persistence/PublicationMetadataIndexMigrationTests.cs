@@ -17,6 +17,7 @@ public sealed class PublicationMetadataIndexMigrationTests(NativeSqlServerFixtur
     {
         await using var environment = await SqlToUsearchRebuildTests.PipelineEnvironment.CreateAsync(fixture,
             "Native admission observes the additive metadata index.", segmented: true);
+        await using(var db=environment.Factory.CreateDbContext()) await SqlSourceDeletionPendingQueueIndex.EnsureAsync(db,default);
         var source = FluxKnowledge.Testing.RepositoryFiles.Root();
         var area = Path.Combine(@"I:\Codex Workspaces\Staging\FluxKnowledge", "JournalMigration-" + Guid.NewGuid().ToString("N"));
         Directory.CreateDirectory(area);
@@ -50,6 +51,7 @@ public sealed class PublicationMetadataIndexMigrationTests(NativeSqlServerFixtur
             "Pinned migration SQL preserves the canonical control.", segmented: true);
         await environment.AddRetainedAndPumpAsync("Retained migration executor control.");
         await using var context = await environment.Factory.CreateDbContextAsync();
+        await context.GetService<IMigrator>().MigrateAsync("20261101195325_AddVectorPublicationMetadata");
         var baseline = await FingerprintsAsync(context);
         var source = FluxKnowledge.Testing.RepositoryFiles.Root();
         var area = Path.Combine(@"I:\Codex Workspaces\Staging\FluxKnowledge", "VectorMetadataSql-" + Guid.NewGuid().ToString("N"));
@@ -72,6 +74,7 @@ public sealed class PublicationMetadataIndexMigrationTests(NativeSqlServerFixtur
         }
         finally
         {
+            await context.Database.MigrateAsync();
             if (!Path.GetFullPath(area).StartsWith(@"I:\Codex Workspaces\Staging\FluxKnowledge\VectorMetadataSql-", StringComparison.OrdinalIgnoreCase))
                 throw new IOException("Unsafe metadata migration fixture cleanup.");
             Directory.Delete(area, true);
@@ -88,6 +91,7 @@ public sealed class PublicationMetadataIndexMigrationTests(NativeSqlServerFixtur
         var migrations = context.Database.GetMigrations().ToArray();
         var position = Array.FindIndex(migrations, value => value.EndsWith("_AddVectorPublicationMetadata", StringComparison.Ordinal));
         Assert.True(position > 0);
+        await context.GetService<IMigrator>().MigrateAsync(migrations[position]);
         var baseline = await FingerprintsAsync(context);
         await AssertShapeAsync(context);
         var migrator = context.GetService<IMigrator>();

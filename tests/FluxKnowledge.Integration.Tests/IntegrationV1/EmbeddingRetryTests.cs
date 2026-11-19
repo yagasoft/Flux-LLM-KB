@@ -35,6 +35,39 @@ public sealed partial class EmbeddingRetryTests(NativeSqlServerFixture fixture, 
     private static readonly EmbeddingGpuRuntime Runtime = new("synthetic-embed", new string('a', 64), Profile, 1024);
 
     [NativeSqlServerTheory]
+    [InlineData(false)]
+    [InlineData(true)]
+    public async Task Retry_confirmation_is_stable_until_the_persisted_canonical_window_version_changes(bool changeVersion)
+    {
+        await using var environment = await SeedAsync();
+        var failed = await FailAsync(environment);
+        var command = Mutation(failed.Work.Job.JobId.Value);
+        var service = Service(environment);
+        var preview = await service.PreviewAsync(command, "test", CancellationToken.None);
+        var second = await service.PreviewAsync(command, "test", CancellationToken.None);
+        var canonical = Assert.Single(preview.Targets, value => value.TargetId.StartsWith("canonical-artifact:", StringComparison.Ordinal));
+        Assert.Equal(canonical, Assert.Single(second.Targets, value => value.TargetId == canonical.TargetId));
+        if (changeVersion)
+        {
+            await using var db = await environment.Factory.CreateDbContextAsync();
+            (await db.Artifacts.SingleAsync(value => value.PipelineRecordId == failed.Work.Job.PipelineRecordId.Value &&
+                value.Stage == (int)PipelineStage.CanonicalIndex)).WindowEligibilityVersion = Guid.NewGuid();
+            await db.SaveChangesAsync();
+            var error = await Assert.ThrowsAsync<NativeOperationException>(() => service.CommitAsync(command,
+                preview.ConfirmationId, "window-version-changed", "test", CancellationToken.None).AsTask());
+            Assert.Equal("operation-fenced", error.ReasonCode);
+            Assert.Empty(await db.NativeOperationReceipts.Where(value => value.IdempotencyKey == "window-version-changed").ToArrayAsync());
+            Assert.Equal((int)PublicJobState.Failed, (await db.Jobs.SingleAsync(value => value.Id == failed.Work.Job.JobId.Value)).PublicState);
+        }
+        else
+        {
+            await service.CommitAsync(command, preview.ConfirmationId, "stable-window-version", "test", CancellationToken.None);
+            await using var db = await environment.Factory.CreateDbContextAsync();
+            Assert.Equal((int)PublicJobState.WorkerQueued, (await db.Jobs.SingleAsync(value => value.Id == failed.Work.Job.JobId.Value)).PublicState);
+        }
+    }
+
+    [NativeSqlServerTheory]
     [InlineData(0)]
     [InlineData(1)]
     [InlineData(int.MaxValue)]

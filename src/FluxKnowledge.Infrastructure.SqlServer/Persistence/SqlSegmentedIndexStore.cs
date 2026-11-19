@@ -10,6 +10,7 @@ using FluxKnowledge.Application.Pipeline;
 using FluxKnowledge.Application.Ports;
 using FluxKnowledge.Application.Sources;
 using FluxKnowledge.Infrastructure.SqlServer.Persistence.Entities;
+using FluxKnowledge.Infrastructure.SqlServer.Workers;
 using Microsoft.EntityFrameworkCore;
 
 namespace FluxKnowledge.Infrastructure.SqlServer.Persistence;
@@ -50,7 +51,8 @@ public sealed partial class SqlSegmentedIndexStore(
         // Each attempt has a distinct identity. Retry never combines partial worklists.
         var id = Guid.NewGuid();
         try { return await PrepareOwnedAsync(id, draftGenerationId, cancellationToken); }
-        catch (PublicationSnapshotConflictException exception)
+        catch (Exception exception) when (exception is PublicationSnapshotConflictException ||
+            new SqlRetainedProcessorFailureClassifier().TryClassify(exception, out _))
         {
             // Metadata preview has unwound and no native handle was opened by this phase.
             try { await AbandonAsync(id, cancellationToken); }

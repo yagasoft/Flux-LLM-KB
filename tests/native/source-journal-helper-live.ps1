@@ -4,9 +4,10 @@ param([Parameter(Mandatory)][string]$SourceRoot,[Parameter(Mandatory)][string]$L
  [Parameter(Mandatory)][string]$CandidatePayloadPath,[Parameter(Mandatory)][string]$CandidateManifestPath,
  [Parameter(Mandatory)][string]$ExpectedCandidateManifestSha256,[Parameter(Mandatory)][string]$EvidenceRoot,
  [ValidateSet('success','post-start-policy-drift','rollback-probe-failure')][string[]]$Scenarios=@('success','post-start-policy-drift','rollback-probe-failure'),
- [switch]$ApplyIsolated)
+ [switch]$ApplyIsolated,[switch]$PreserveJournalPolicy,[switch]$RepairDisabled)
 $ErrorActionPreference='Stop'
 Set-StrictMode -Version Latest
+if($RepairDisabled -and !$PreserveJournalPolicy){throw 'Repair-disabled qualification requires the preserved-policy mode.'}
 Import-Module (Join-Path $SourceRoot 'scripts/deploy/incremental-source-journal-helper.psm1') -Force
 Import-Module (Join-Path $SourceRoot 'scripts/deploy/incremental-source-journal-helper-task.psm1') -Force
 function Assert-True([bool]$Value,[string]$Message){if(!$Value){throw $Message}}
@@ -96,12 +97,16 @@ foreach($scenario in $Scenarios){
    $nativeRows[0].CommandLine -cin @(('"'+$original.Executable+'" '+$original.Arguments),($original.Executable+' '+$original.Arguments))) 'Native helper command line/SYSTEM identity does not satisfy the canonical writer exemption.'
   [IO.File]::WriteAllText((Join-Path $root 'journal/qualification-sentinel.txt'),'Preserve this synthetic journal sentinel.')
   $options=[FluxKnowledge.Application.Ports.SourceJournalOptions]::new();$options.PipeName='FluxKnowledge.SourceJournal.staging-'+$id;$options.ApprovedVolumes=@($volume)
+  if($PreserveJournalPolicy){
+   @{Version=1;PipeName=$options.PipeName;ApprovedVolumes=@($volume);RepairEnabled=(!$RepairDisabled)}|
+    ConvertTo-Json -Depth 4|Set-Content -LiteralPath (Join-Path $root 'journal-policy.json') -Encoding utf8
+  }
   $client=[FluxKnowledge.Integrations.Files.SourceJournalPipeClient]::new($options)
   $sim=@{Scenario=$scenario;Probes=0;StoppedChecks=0;NativeQueries=0;NativeReads=0;CandidateTransportConfirmations=0;RollbackTransportConfirmations=0}
   $nativeContext=@{Ports=$null}
   $state=New-SourceJournalHelperUpdate -InstallRoot $root -TaskName $taskName -ReleaseId ('{0:yyyyMMddTHHmmssZ}-60f83b2b958d' -f [DateTime]::UtcNow) `
    -CandidatePath $input -ExpectedCandidateSha256 (Get-SourceJournalHelperPayloadManifest $input).Sha256 -TaskObservation $original `
-   -PipeName $options.PipeName -ApprovedVolumes @($volume)
+   -PipeName $options.PipeName -ApprovedVolumes @($volume) -PreserveJournalPolicy:$PreserveJournalPolicy
   $stopped={
    $sim.StoppedChecks++
    if(@(Get-NetTCPConnection -LocalPort 5149,5150 -State Listen -ErrorAction SilentlyContinue).Count){throw 'Owned scale staging is running.'}
@@ -118,7 +123,9 @@ foreach($scenario in $Scenarios){
       if($page.Start -ne $cursor -or $page.Next.NextUsn -lt $cursor.NextUsn){throw 'SYSTEM journal response changed the requested cursor.'}
      }
      $outcome=[SourceJournalPipeQualification]::Repair($repair,$repairRequest)
-     if([string]$outcome -cne 'AlreadyReadable'){throw 'SYSTEM repair transport did not confirm the approved caller/readable file.'}
+     $expectedRepair=if($PreserveJournalPolicy -and $RepairDisabled){'Unavailable'}else{'AlreadyReadable'}
+     $sim.RepairOutcome=[string]$outcome
+     if([string]$outcome -cne $expectedRepair){throw 'SYSTEM repair transport did not confirm the approved repair mode.'}
      $last=$null;break
     }catch{$last=$_;Start-Sleep -Milliseconds 250}
    }while($watch.Elapsed.TotalSeconds -lt 20)
@@ -142,13 +149,20 @@ foreach($scenario in $Scenarios){
   # Retain observations before assertions, including an unexpected recovery.
   [ordered]@{Scenario=$scenario;OriginalTask=$original;FinalTask=$after;Callbacks=$sim;Completed=$state.Completed;
    RollbackVerified=$state.RollbackVerified;Phase=$state.Phase;Failure=$(if($failure){$failure.Exception.Message}else{$null});
-   FailureDetails=$(if($failure){$failure.ToString()}else{$null});ObservedAtUtc=[DateTimeOffset]::UtcNow}|
+   FailureDetails=$(if($failure){$failure.ToString()}else{$null});
+   FailureScriptStackTrace=$(if($failure){$failure.ScriptStackTrace}else{$null});
+   FailureTarget=$(if($failure){[string]$failure.TargetObject}else{$null});
+   FailureHResult=$(if($failure){$failure.Exception.HResult}else{$null});
+   OldPayloadMoved=$state.OldPayloadMoved;CandidatePlaced=$state.CandidatePlaced;ObservedAtUtc=[DateTimeOffset]::UtcNow}|
    ConvertTo-Json -Depth 8|Set-Content -LiteralPath (Join-Path $packet 'observation.json') -Encoding utf8
   Assert-True ($after.DefinitionSha256 -ceq $original.DefinitionSha256 -and $after.SecuritySha256 -ceq $original.SecuritySha256) 'Native task definition/security changed.'
   Assert-True ($sim.NativeQueries -ge 1 -and $sim.NativeReads -ge 1 -and $sim.StoppedChecks -gt 0) 'Native callbacks did not execute after their factory returned.'
   Assert-True ([IO.File]::ReadAllText((Join-Path $root 'journal/qualification-sentinel.txt')) -ceq 'Preserve this synthetic journal sentinel.') 'Repair journal sentinel changed.'
   Assert-True ((Get-FileHash -LiteralPath (Join-Path $root 'policy.json')).Hash -ceq $install.ExpectedPolicySha256 -and
    (Get-FileHash -LiteralPath (Join-Path $root 'root-read-plan.json')).Hash -ceq $install.ExpectedRootReadPlanSha256) 'Source policy or root read plan changed.'
+  if($PreserveJournalPolicy){
+   Assert-True (!$state.Policy.Attempted -and (Get-FileHash -LiteralPath (Join-Path $root 'journal-policy.json')).Hash -ceq $state.Policy.BeforeHash) 'Payload-only update changed the existing journal policy.'
+  }
   if($scenario -ceq 'success'){
    Assert-True ($null -eq $failure -and $state.Completed -and $after.Enabled -and $after.Running -and
     $sim.CandidateTransportConfirmations -eq 1 -and $sim.RollbackTransportConfirmations -eq 0) 'Native helper update did not complete.'

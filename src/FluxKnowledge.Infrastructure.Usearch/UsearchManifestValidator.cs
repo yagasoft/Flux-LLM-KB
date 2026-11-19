@@ -54,11 +54,8 @@ public sealed class UsearchManifestValidator(UsearchIndexOptions options, IIndex
         using var held = paths.AcquireManifest(generation.IndexPath);
         var expected = JsonSerializer.SerializeToUtf8Bytes(new ManifestFile(2, generation.CorpusStamp,
             generation.ModelFingerprint, generation.Dimensions, manifest.Segments));
-        using var file = File.OpenRead(Path.Combine(generation.IndexPath, "manifest.json"));
-        if (file.Length != expected.Length || generation.MetadataChecksum != Convert.ToHexStringLower(SHA256.HashData(expected)) ||
-            new Guid(Convert.FromHexString(generation.MetadataChecksum)[..16]) != generation.Id ||
-            generation.MetadataChecksum != Convert.ToHexStringLower(SHA256.HashData(file)))
-            throw new IndexGenerationValidationException("manifest-file-proof-mismatch");
+        if (new FileInfo(Path.Combine(generation.IndexPath, "manifest.json")).Length != expected.Length)
+            throw new IndexGenerationValidationException("manifest-file-length-mismatch");
     }
 
     private sealed record ManifestFile(int FormatVersion, CorpusPublicationStamp CorpusStamp, string ModelFingerprint,

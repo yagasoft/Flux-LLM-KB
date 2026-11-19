@@ -5,8 +5,10 @@ namespace FluxKnowledge.Infrastructure.Usearch;
 /// <summary>Legacy remains the default; SQL format admission cannot be bypassed by a process flag.</summary>
 public sealed class SegmentedIndexPublisher(UsearchGenerationBuilder legacy, ISegmentedIndexStore store,
     IDerivedIndexRecoveryStore recovery, UsearchSegmentBuilder segments, UsearchManifestValidator manifests,
-    bool enabled) : IIndexGenerationPublisher
+    bool enabled, IRetainedProcessorFailureClassifier? failureClassifier = null) : IIndexGenerationPublisher
 {
+    private bool IsTransientSql(Exception exception) => failureClassifier?.TryClassify(exception, out _) == true;
+
     public async ValueTask<IndexGenerationCandidateSnapshot> BuildAndPlaceAsync(Guid indexGenerationId, CancellationToken cancellationToken)
     {
         if (!await store.IsRequiredAsync(cancellationToken)) return await legacy.BuildAndPlaceAsync(indexGenerationId, cancellationToken);
@@ -14,7 +16,7 @@ public sealed class SegmentedIndexPublisher(UsearchGenerationBuilder legacy, ISe
         segments.RequireCapacity(0);
         // Actual build execution holds shared recovery ownership, then durable candidate/process pins cover a lost session.
         await using var held = await recovery.TryAcquireSharedLeaseAsync(TimeSpan.FromSeconds(5), cancellationToken)
-            ?? throw new InvalidOperationException("segmented-publication-maintenance-active");
+            ?? throw new FluxKnowledge.Application.Pipeline.PublicationSnapshotConflictException("segmented-publication-maintenance-active");
         var candidate = await store.PrepareAsync(indexGenerationId, cancellationToken);
         try
         {
@@ -27,7 +29,7 @@ public sealed class SegmentedIndexPublisher(UsearchGenerationBuilder legacy, ISe
             return new(manifest.Generation, [], candidate.ExpectedStamp, candidate.Id);
         }
         catch (Exception exception) when (exception is FluxKnowledge.Application.Pipeline.PublicationSnapshotConflictException or
-            FluxKnowledge.Application.Indexing.IndexStorageCapacityException)
+            FluxKnowledge.Application.Indexing.IndexStorageCapacityException || IsTransientSql(exception))
         {
             // These refusals occur between native units; BuildOne has returned and disposed its handles.
             // Arbitrary I/O/native/disposal failures retain the pin because execution outcome may be unknown.

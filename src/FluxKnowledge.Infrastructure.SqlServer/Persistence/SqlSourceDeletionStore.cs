@@ -68,7 +68,8 @@ public sealed partial class SqlSourceDeletionStore(
             if (operation.State == 1 && operation.LeaseId == attemptedLease && operation.LeaseExpiresAtUtc > now)
             {
                 await transaction.CommitAsync(cancellationToken).ConfigureAwait(false);
-                return new SourceDeletionWorkItem(operation.Id, operation.SourceRootId, attemptedLease, operation.Phase);
+                return new SourceDeletionWorkItem(operation.Id, operation.SourceRootId, attemptedLease, operation.Phase)
+                { LeaseExpiresAtUtc = operation.LeaseExpiresAtUtc };
             }
             if (operation.State != 0 && !(operation.State == 1 &&
                 (operation.LeaseExpiresAtUtc is null || operation.LeaseExpiresAtUtc <= now)))
@@ -80,9 +81,15 @@ public sealed partial class SqlSourceDeletionStore(
             operation.LeaseId = attemptedLease;
             operation.LeaseExpiresAtUtc = now.Add(LeaseDuration);
             operation.UpdatedAtUtc = now;
+            if (await SqlOutlookSourceReservations.ProtectsDeletionAsync(context, operation.SourceRootId, cancellationToken).ConfigureAwait(false))
+            {
+                await RefuseAsync(context, transaction, operation, SqlOutlookSourceReservations.DeleteRefusal, cancellationToken).ConfigureAwait(false);
+                return null;
+            }
             await context.SaveChangesAsync(cancellationToken).ConfigureAwait(false);
             await transaction.CommitAsync(cancellationToken).ConfigureAwait(false);
-            return new SourceDeletionWorkItem(operation.Id, operation.SourceRootId, operation.LeaseId.Value, operation.Phase);
+            return new SourceDeletionWorkItem(operation.Id, operation.SourceRootId, attemptedLease, operation.Phase)
+            { LeaseExpiresAtUtc = operation.LeaseExpiresAtUtc };
         }).ConfigureAwait(false);
     }
 
@@ -125,6 +132,9 @@ public sealed partial class SqlSourceDeletionStore(
             if (ReadPreviousOutcome(claimedOperation, workItem) is { } previousOutcome) return previousOutcome;
             var operation = claimedOperation!;
 
+            if (await SqlOutlookSourceReservations.ProtectsDeletionAsync(context, operation.SourceRootId, cancellationToken).ConfigureAwait(false))
+                return await RefuseAsync(context, transaction, operation, SqlOutlookSourceReservations.DeleteRefusal, cancellationToken).ConfigureAwait(false);
+
             if (string.Equals(operation.Phase, "cleanup-files", StringComparison.Ordinal))
             {
                 var sourceState = await context.SourceRootConfigurations.Where(root => root.Id == operation.SourceRootId)
@@ -163,49 +173,42 @@ public sealed partial class SqlSourceDeletionStore(
                 return await RefuseAsync(context, transaction, operation, "source-delete-not-fenced", cancellationToken).ConfigureAwait(false);
             }
 
-            if (await context.OutlookCaptureProfiles.AnyAsync(value => value.SourceRootId == root.Id, cancellationToken).ConfigureAwait(false))
+            if (await SqlOutlookSourceReservations.ProtectsDeletionAsync(context, root.Id, cancellationToken).ConfigureAwait(false))
             {
-                return await RefuseAsync(context, transaction, operation, "outlook-source-delete-unsupported", cancellationToken).ConfigureAwait(false);
+                return await RefuseAsync(context, transaction, operation, SqlOutlookSourceReservations.DeleteRefusal, cancellationToken).ConfigureAwait(false);
             }
 
-            var revisionIds = await context.SourceRevisions
-                .Where(value => value.SourceRootId == root.Id)
-                .Select(value => value.Id)
-                .ToArrayAsync(cancellationToken)
-                .ConfigureAwait(false);
-            var recordIds = await context.PipelineRecords
-                .Where(value => value.SourceRevisionId.HasValue && revisionIds.Contains(value.SourceRevisionId.Value))
-                .Select(value => value.Id)
-                .ToArrayAsync(cancellationToken)
-                .ConfigureAwait(false);
-            var sourceGpuTaskIds = recordIds.Length == 0
-                ? []
-                : await context.GpuMiniTasks.Where(value =>
-                        context.Jobs.Any(job => job.Id == value.ParentJobId && recordIds.Contains(job.PipelineRecordId)))
-                    .Select(value => value.Id)
-                    .ToArrayAsync(cancellationToken)
-                    .ConfigureAwait(false);
-            var localOcrTaskIds = recordIds.Length == 0
-                ? []
-                : await context.DocumentOcrRequests.Where(value => recordIds.Contains(value.PipelineRecordId))
-                    .Select(value => value.MiniTaskId)
-                    .ToArrayAsync(cancellationToken)
-                    .ConfigureAwait(false);
-            var localOcrTaskSet = localOcrTaskIds.ToHashSet();
-            var localEmbeddingTaskIds = embeddingRuntime is null ? [] : await SqlEmbeddingGpuRequestStore.OwnedLocalTasks(context, embeddingRuntime)
-                .Where(task => context.Jobs.Any(job => job.Id == task.ParentJobId && recordIds.Contains(job.PipelineRecordId)))
-                .Select(task => task.Id).ToArrayAsync(cancellationToken).ConfigureAwait(false);
-            var localEmbeddingTaskSet = localEmbeddingTaskIds.ToHashSet();
-            if (sourceGpuTaskIds.Any(taskId => !localOcrTaskSet.Contains(taskId) && !localEmbeddingTaskSet.Contains(taskId)) ||
-                await SqlEmbeddingGpuRequestStore.HasContradictoryRequestsAsync(context, recordIds, localEmbeddingTaskIds, cancellationToken).ConfigureAwait(false))
+            // This phase removes only retired projection memberships. Reclassifying
+            // every historical execution for each 1,000-row page is quadratic in
+            // source history. Keep fresh execution/page fences here; the full
+            // ownership and graph proof below still runs on every payload unit.
+            if (operation.Phase is "cleanup-memberships" or "purge-records" &&
+                await SqlSourceDeletionOwnership.HasUnconfirmedWorkAsync(context, root.Id, cancellationToken).ConfigureAwait(false))
+                return await CommitUnitAsync(context, transaction, operation, operation.Phase, cancellationToken,
+                    "source-delete-native-cleanup-pending", progressed: false, continueImmediately: false).ConfigureAwait(false);
+            if (operation.Phase == "cleanup-memberships")
+            {
+                if (await HasActiveWorkAsync(context, root.Id, timeProvider.GetUtcNow(), cancellationToken).ConfigureAwait(false))
+                    return await CommitUnitAsync(context, transaction, operation, operation.Phase, cancellationToken,
+                        "source-delete-work-active", progressed: false, continueImmediately: false).ConfigureAwait(false);
+                return await DeleteMembershipUnitAsync(context, transaction, operation, cancellationToken).ConfigureAwait(false);
+            }
+
+            var revisionIds = SqlSourceDeletionOwnership.RevisionIds(context, root.Id);
+            var recordIds = SqlSourceDeletionOwnership.RecordIds(context, root.Id);
+            var ownership = await SqlSourceDeletionOwnership.ReadAsync(context, root.Id, embeddingRuntime, cancellationToken).ConfigureAwait(false);
+            if (!ownership.IsOwned)
             {
                 return await RefuseAsync(context, transaction, operation, "source-delete-external-execution-owned", cancellationToken).ConfigureAwait(false);
             }
+            var sourceGpuTaskIds = ownership.TaskIds;
+            var localOcrTaskSet = ownership.OcrTaskIds.ToHashSet();
+            var localEmbeddingTaskSet = ownership.EmbeddingTaskIds.ToHashSet();
             var activeLocalTaskIds = sourceGpuTaskIds.Length == 0
                 ? []
                 : await context.GpuMiniTasks.Where(value =>
-                        sourceGpuTaskIds.Contains(value.Id) &&
-                        value.ExecutionState == (int)Domain.Gpu.GpuMiniTaskExecutionState.Active)
+                        value.ExecutionState == (int)Domain.Gpu.GpuMiniTaskExecutionState.Active && value.ParentJobId.HasValue &&
+                        context.Jobs.Any(job => job.Id == value.ParentJobId && recordIds.Contains(job.PipelineRecordId)))
                     .Select(value => value.Id)
                     .ToArrayAsync(cancellationToken)
                     .ConfigureAwait(false);
@@ -225,20 +228,18 @@ public sealed partial class SqlSourceDeletionStore(
                     IsAfterCutover(operation.Phase) ? operation.Phase : "draining", cancellationToken,
                     "source-delete-native-cleanup-pending", progressed: false, continueImmediately: false).ConfigureAwait(false);
             }
-            if (await HasActiveWorkAsync(context, root.Id, revisionIds, recordIds, timeProvider.GetUtcNow(), cancellationToken).ConfigureAwait(false))
+            if (await HasActiveWorkAsync(context, root.Id, timeProvider.GetUtcNow(), cancellationToken).ConfigureAwait(false))
             {
                 return await CommitUnitAsync(context, transaction, operation,
                     IsAfterCutover(operation.Phase) ? operation.Phase : "draining", cancellationToken,
                     "source-delete-work-active", progressed: false, continueImmediately: false).ConfigureAwait(false);
             }
 
-            if (await HasCrossRootDependencyAsync(context, revisionIds, recordIds, cancellationToken).ConfigureAwait(false))
+            if (await HasCrossRootDependencyAsync(context, root.Id, cancellationToken).ConfigureAwait(false))
             {
                 return await RefuseAsync(context, transaction, operation, "source-delete-cross-root-dependency", cancellationToken).ConfigureAwait(false);
             }
 
-            if (operation.Phase == "cleanup-memberships")
-                return await DeleteMembershipUnitAsync(context, transaction, operation, cancellationToken).ConfigureAwait(false);
             if (operation.Phase == "purge-records")
             {
                 if (await context.SourceDeletionCleanupItems.AnyAsync(value => value.SourceDeletionOperationId == operation.Id &&
@@ -247,37 +248,70 @@ public sealed partial class SqlSourceDeletionStore(
                         "source-delete-segment-retirement-pending", progressed: false, continueImmediately: false);
                 if (await HasOwnedMembershipsAsync(context, root.Id, cancellationToken).ConfigureAwait(false))
                     return await RefuseAsync(context, transaction, operation, "source-delete-membership-changed", cancellationToken).ConfigureAwait(false);
+                var executionGraph=await AssertOwnedGraphPurgeReadyAsync(context,recordIds,cancellationToken);
                 if (!await DetachTerminalCandidateProvenanceAsync(context, root.Id, recordIds, cancellationToken))
                     return await CommitUnitAsync(context, transaction, operation, operation.Phase, cancellationToken,
                         "source-delete-publication-execution-unconfirmed", progressed: false, continueImmediately: false);
-                await DeleteOwnedGraphAsync(context, root.Id, revisionIds, recordIds, cancellationToken).ConfigureAwait(false);
+                var vectorPage = await OwnedVectors(context,root.Id).OrderBy(value => value.VectorId)
+                    .Select(value => value.VectorId).Take(PurgePayloadBatchSize).ToArrayAsync(cancellationToken);
+                if (vectorPage.Length > 0)
+                {
+                    if (await context.Vectors.AnyAsync(value => vectorPage.Contains(value.VectorId) && !value.IsDeleted,cancellationToken))
+                        return await RefuseAsync(context,transaction,operation,"source-delete-vector-not-withdrawn",cancellationToken);
+                    await context.Vectors.Where(value => vectorPage.Contains(value.VectorId)).ExecuteDeleteAsync(cancellationToken);
+                    return await CommitUnitAsync(context,transaction,operation,operation.Phase,cancellationToken);
+                }
+                var chunkPage = await context.TextChunks.Where(value => value.Artifact.PipelineRecord.SourceRevisionId.HasValue &&
+                        value.Artifact.PipelineRecord.SourceRevision!.SourceRootId == root.Id)
+                    .OrderBy(value => value.Id).Select(value => value.Id).Take(PurgePayloadBatchSize).ToArrayAsync(cancellationToken);
+                if (chunkPage.Length > 0)
+                {
+                    await context.TextChunks.Where(value => chunkPage.Contains(value.Id)).ExecuteDeleteAsync(cancellationToken);
+                    return await CommitUnitAsync(context,transaction,operation,operation.Phase,cancellationToken);
+                }
+                if(await DeleteOwnedExecutionPageAsync(context,executionGraph,cancellationToken).ConfigureAwait(false))
+                    return await CommitUnitAsync(context,transaction,operation,operation.Phase,cancellationToken);
+                if (await DeleteOwnedAuditPageAsync(context, root.Id, cancellationToken).ConfigureAwait(false))
+                    return await CommitUnitAsync(context, transaction, operation, operation.Phase, cancellationToken);
+                // Keep ownership sets on SQL while their principals remain. The
+                // fresh empty audit proof and final graph removal share this unit.
+                if (await DeleteOwnedGraphAsync(context, root.Id, cancellationToken).ConfigureAwait(false))
+                    return await CommitUnitAsync(context, transaction, operation, operation.Phase, cancellationToken).ConfigureAwait(false);
                 if (await context.IndexState.Where(value => value.Id == 1).Select(value => value.RequiredIndexFormat).SingleAsync(cancellationToken) == 1 &&
                     (await SqlPublishedPassageSelection.ReadVectorIdsAsync(context, cancellationToken).ConfigureAwait(false)).Count == 0)
                     await ClearProjectionAndValidateEmptyCatalogueAsync(context, cancellationToken).ConfigureAwait(false);
                 return await CommitUnitAsync(context, transaction, operation, "cleanup-files", cancellationToken).ConfigureAwait(false);
             }
 
-            var targetVectorIds = await ReadTargetVectorIdsAsync(context, recordIds, cancellationToken).ConfigureAwait(false);
+            var targetVectorIds = OwnedVectors(context, root.Id).Select(value => value.VectorId);
             if (!string.Equals(operation.Phase, "rebuild-index", StringComparison.Ordinal))
             {
                 // Withdraw owned unplaced checkpoints in the same durable phase as
                 // their source rows. Recovery between deletion phases must not treat
                 // a deliberately withdrawn partial draft as inconsistent provenance.
-                await context.IndexGenerations.Where(generation => generation.EmbeddingJobId.HasValue && generation.IndexPath == string.Empty &&
+                await context.IndexGenerations.Where(generation => generation.RetiredAtUtc == null && generation.EmbeddingJobId.HasValue && generation.IndexPath == string.Empty &&
                     context.Jobs.Any(job => job.Id == generation.EmbeddingJobId.Value && recordIds.Contains(job.PipelineRecordId)))
                     .ExecuteUpdateAsync(update => update.SetProperty(generation => generation.RetiredAtUtc, timeProvider.GetUtcNow()), cancellationToken).ConfigureAwait(false);
-                if (recordIds.Length > 0)
+                await context.PipelineRecords.Where(record => !record.IsDeleted && recordIds.Contains(record.Id))
+                    .ExecuteUpdateAsync(setters => setters.SetProperty(record => record.IsDeleted, true), cancellationToken).ConfigureAwait(false);
+                var cursor = operation.WithdrawalVectorCursor ?? 0;
+                var page = await OwnedVectors(context, root.Id).Where(vector => !vector.IsDeleted && vector.VectorId > cursor)
+                    .OrderBy(vector => vector.VectorId).Select(vector => vector.VectorId).Take(PayloadBatchSize)
+                    .ToArrayAsync(cancellationToken).ConfigureAwait(false);
+                if (page.Length > 0)
                 {
-                    await context.PipelineRecords.Where(record => recordIds.Contains(record.Id))
-                        .ExecuteUpdateAsync(setters => setters.SetProperty(record => record.IsDeleted, true), cancellationToken)
-                        .ConfigureAwait(false);
+                    // Ownership of these IDs was frozen by the selection above
+                    // under this same serializable publication transaction.
+                    await context.Vectors.Where(vector => page.Contains(vector.VectorId))
+                        .ExecuteUpdateAsync(setters => setters.SetProperty(vector => vector.IsDeleted, true), cancellationToken).ConfigureAwait(false);
+                    if (await context.Vectors.AnyAsync(vector => page.Contains(vector.VectorId) && !vector.IsDeleted, cancellationToken))
+                        return await RefuseAsync(context, transaction, operation, "source-delete-withdrawal-not-committed", cancellationToken);
+                    operation.WithdrawalVectorCursor = page[^1];
+                    if (page.Length == PayloadBatchSize)
+                        return await CommitUnitAsync(context, transaction, operation, operation.Phase, cancellationToken).ConfigureAwait(false);
                 }
-                if (targetVectorIds.Length > 0)
-                {
-                    await context.Vectors.Where(vector => targetVectorIds.Contains(vector.VectorId))
-                        .ExecuteUpdateAsync(setters => setters.SetProperty(vector => vector.IsDeleted, true), cancellationToken)
-                        .ConfigureAwait(false);
-                }
+                if (await OwnedVectors(context, root.Id).AnyAsync(vector => !vector.IsDeleted, cancellationToken))
+                    return await RefuseAsync(context, transaction, operation, "source-delete-withdrawal-changed", cancellationToken);
 
                 return await CommitUnitAsync(context, transaction, operation, "rebuild-index", cancellationToken).ConfigureAwait(false);
             }
@@ -342,36 +376,15 @@ public sealed partial class SqlSourceDeletionStore(
     }
 
 
-    private static async Task<long[]> ReadTargetVectorIdsAsync(
-        FluxKnowledgeDbContext context,
-        IReadOnlyCollection<Guid> recordIds,
-        CancellationToken cancellationToken)
-    {
-        if (recordIds.Count == 0)
-        {
-            return [];
-        }
-
-        return await (
-                from vector in context.Vectors
-                join chunk in context.TextChunks on vector.TextChunkId equals chunk.Id
-                join artifact in context.Artifacts on chunk.ArtifactId equals artifact.Id
-                where recordIds.Contains(artifact.PipelineRecordId)
-                select vector.VectorId)
-            .ToArrayAsync(cancellationToken).ConfigureAwait(false);
-    }
-
     private async Task CaptureCleanupTargetsAsync(
         FluxKnowledgeDbContext context,
         SourceDeletionOperationEntity operation,
-        IReadOnlyCollection<Guid> revisionIds,
-        IReadOnlyCollection<Guid> recordIds,
-        IReadOnlyCollection<long> targetVectorIds,
+        IQueryable<Guid> revisionIds,
+        IQueryable<Guid> recordIds,
+        IQueryable<long> targetVectorIds,
         CancellationToken cancellationToken)
     {
-        var artifacts = revisionIds.Count == 0
-            ? []
-            : await context.SourceArtifacts.Where(artifact => revisionIds.Contains(artifact.SourceRevisionId))
+        var artifacts = await context.SourceArtifacts.Where(artifact => revisionIds.Contains(artifact.SourceRevisionId))
                 .Select(artifact => new { artifact.StoreRelativePath, artifact.ContentSha256, artifact.ByteLength })
                 .ToArrayAsync(cancellationToken).ConfigureAwait(false);
         var distinctArtifacts = artifacts.DistinctBy(artifact => new { artifact.StoreRelativePath, artifact.ContentSha256, artifact.ByteLength }).ToArray();
@@ -397,9 +410,7 @@ public sealed partial class SqlSourceDeletionStore(
             });
         }
 
-        var ownedGenerationIds = recordIds.Count == 0
-            ? []
-            : (await context.Artifacts.Where(artifact =>
+        var ownedGenerationIds = (await context.Artifacts.Where(artifact =>
                     recordIds.Contains(artifact.PipelineRecordId) &&
                     artifact.Stage == (int)PipelineStage.Embed &&
                     artifact.ContentType == EmbedDraftDefaults.ArtifactContentType)
@@ -414,17 +425,24 @@ public sealed partial class SqlSourceDeletionStore(
             where recordIds.Contains(job.PipelineRecordId)
             select generation.Id).ToArrayAsync(cancellationToken).ConfigureAwait(false);
         ownedGenerationIds = ownedGenerationIds.Union(checkpointIds).ToArray();
-        var generations = targetVectorIds.Count == 0 && ownedGenerationIds.Length == 0
-                ? []
-                : await (
-                    from generation in context.IndexGenerations
-                    where generation.FormatVersion == 1 && (ownedGenerationIds.Contains(generation.Id) ||
-                          context.IndexGenerationVectors.Any(membership =>
-                              membership.GenerationId == generation.Id &&
-                              targetVectorIds.Contains(membership.VectorId)))
-                    select generation)
-                .Distinct()
-                .ToArrayAsync(cancellationToken).ConfigureAwait(false);
+        IQueryable<Guid>? candidateIds = null;
+        if (await targetVectorIds.AnyAsync(cancellationToken).ConfigureAwait(false))
+            candidateIds = context.IndexGenerationVectors.Where(membership => targetVectorIds.Contains(membership.VectorId))
+                .Select(membership => membership.GenerationId).Distinct();
+        if (ownedGenerationIds.Length > 0)
+        {
+            var ownedIds = context.IndexGenerations.Where(generation => ownedGenerationIds.Contains(generation.Id))
+                .Select(generation => generation.Id);
+            candidateIds = candidateIds is null ? ownedIds : candidateIds.Union(ownedIds);
+        }
+        // Discover distinct references before materialising generations. A
+        // correlated EXISTS can repeatedly scan the source graph per generation.
+        var generations = candidateIds is null ? [] : await (
+                from generation in context.IndexGenerations
+                join candidateId in candidateIds on generation.Id equals candidateId
+                where generation.FormatVersion == 1
+                select generation).TagWith("source-delete-generation-targets")
+            .ToArrayAsync(cancellationToken).ConfigureAwait(false);
         foreach (var generation in generations)
         {
             generation.RetiredAtUtc ??= timeProvider.GetUtcNow();
@@ -456,7 +474,7 @@ public sealed partial class SqlSourceDeletionStore(
     }
 
     private static async Task<bool> DetachTerminalCandidateProvenanceAsync(FluxKnowledgeDbContext context, Guid rootId,
-        IReadOnlyCollection<Guid> recordIds, CancellationToken cancellationToken)
+        IQueryable<Guid> recordIds, CancellationToken cancellationToken)
     {
         var jobs = context.Jobs.Where(value => recordIds.Contains(value.PipelineRecordId)).Select(value => value.Id);
         var drafts = context.IndexGenerations.Where(value => value.EmbeddingJobId != null && jobs.Contains(value.EmbeddingJobId.Value)).Select(value => value.Id);
@@ -543,7 +561,12 @@ public sealed partial class SqlSourceDeletionStore(
         if (!hasCanonicalVectors && !hasOtherUnplacedDrafts)
         {
             await context.IndexGenerationVectors.ExecuteDeleteAsync(cancellationToken).ConfigureAwait(false);
-            await context.IndexGenerations.ExecuteDeleteAsync(cancellationToken).ConfigureAwait(false);
+            // Later deletion units still prove exact request/task ownership using
+            // this generation and its job/epoch/profile binding. Keep that proof
+            // until ordinary owned execution cleanup has removed every request.
+            await context.IndexGenerations.Where(generation =>
+                    !context.EmbeddingGpuRequests.Any(request => request.GenerationId == generation.Id))
+                .ExecuteDeleteAsync(cancellationToken).ConfigureAwait(false);
         }
     }
 
@@ -573,7 +596,7 @@ public sealed partial class SqlSourceDeletionStore(
         candidate.Vectors.All(vector =>
             vector.Dimensions == candidate.Generation.Dimensions &&
             string.Equals(vector.ModelFingerprint, candidate.Generation.ModelFingerprint, StringComparison.Ordinal) &&
-            string.Equals(vector.PayloadChecksum, Convert.ToHexStringLower(SHA256.HashData(vector.Values)), StringComparison.Ordinal)) &&
+            vector.Values.Length == checked(vector.Dimensions * sizeof(float))) &&
         string.Equals(
             candidate.Generation.MetadataChecksum,
             ComputeMetadataChecksum(candidate.Generation.ModelFingerprint, candidate.Generation.Dimensions, candidate.Vectors),
@@ -596,11 +619,12 @@ public sealed partial class SqlSourceDeletionStore(
     private static async Task<bool> HasActiveWorkAsync(
         FluxKnowledgeDbContext context,
         Guid rootId,
-        IReadOnlyCollection<Guid> revisionIds,
-        IReadOnlyCollection<Guid> recordIds,
         DateTimeOffset now,
-        CancellationToken cancellationToken) =>
-        await context.SourceScanJobs.AnyAsync(value => value.LeaseOwner != null && value.LeaseExpiresAtUtc > now &&
+        CancellationToken cancellationToken)
+    {
+        var revisionIds = SqlSourceDeletionOwnership.RevisionIds(context, rootId);
+        var recordIds = SqlSourceDeletionOwnership.RecordIds(context, rootId);
+        return await context.SourceScanJobs.AnyAsync(value => value.LeaseOwner != null && value.LeaseExpiresAtUtc > now &&
                 context.SourceScanRequests.Any(request => request.Id == value.SourceScanRequestId && request.SourceRootId == rootId), cancellationToken)
             .ConfigureAwait(false) ||
         await context.Jobs.AnyAsync(value => recordIds.Contains(value.PipelineRecordId) &&
@@ -612,18 +636,15 @@ public sealed partial class SqlSourceDeletionStore(
             .ConfigureAwait(false) ||
         await context.SourceProcessorBranches.AnyAsync(value => revisionIds.Contains(value.SourceRevisionId) && value.LeaseOwner != null && value.LeaseExpiresAtUtc > now, cancellationToken)
             .ConfigureAwait(false);
+    }
 
     private static async Task<bool> HasCrossRootDependencyAsync(
         FluxKnowledgeDbContext context,
-        IReadOnlyCollection<Guid> revisionIds,
-        IReadOnlyCollection<Guid> recordIds,
+        Guid rootId,
         CancellationToken cancellationToken)
     {
-        if (recordIds.Count == 0)
-        {
-            return false;
-        }
-
+        var revisionIds = SqlSourceDeletionOwnership.RevisionIds(context, rootId);
+        var recordIds = SqlSourceDeletionOwnership.RecordIds(context, rootId);
         return await context.PipelineRecords.AnyAsync(value =>
                 !recordIds.Contains(value.Id) &&
                 ((value.ParentRevisionRecordId.HasValue && recordIds.Contains(value.ParentRevisionRecordId.Value)) ||
@@ -634,40 +655,18 @@ public sealed partial class SqlSourceDeletionStore(
                 recordIds.Contains(value.ResultingPipelineRecordId.Value), cancellationToken).ConfigureAwait(false);
     }
 
-    private static async Task DeleteOwnedGraphAsync(
+    private static async Task<bool> DeleteOwnedGraphAsync(
         FluxKnowledgeDbContext context,
         Guid rootId,
-        IReadOnlyCollection<Guid> revisionIds,
-        IReadOnlyCollection<Guid> recordIds,
         CancellationToken cancellationToken)
     {
-        var branchIds = revisionIds.Count == 0
-            ? []
-            : await context.SourceProcessorBranches.Where(value => revisionIds.Contains(value.SourceRevisionId))
-                .Select(value => value.Id).ToArrayAsync(cancellationToken).ConfigureAwait(false);
-        var activityIds = revisionIds.Count == 0
-            ? []
-            : await context.SourceActivities.Where(value => revisionIds.Contains(value.SourceRevisionId))
-                .Select(value => value.Id).ToArrayAsync(cancellationToken).ConfigureAwait(false);
-        var scanRequestIds = await context.SourceScanRequests.Where(value => value.SourceRootId == rootId)
-            .Select(value => value.Id).ToArrayAsync(cancellationToken).ConfigureAwait(false);
-        var artifactIds = recordIds.Count == 0
-            ? []
-            : await context.Artifacts.Where(value => recordIds.Contains(value.PipelineRecordId))
-                .Select(value => value.Id).ToArrayAsync(cancellationToken).ConfigureAwait(false);
-        var chunkIds = artifactIds.Length == 0
-            ? []
-            : await context.TextChunks.Where(value => artifactIds.Contains(value.ArtifactId))
-                .Select(value => value.Id).ToArrayAsync(cancellationToken).ConfigureAwait(false);
+        var revisionIds = SqlSourceDeletionOwnership.RevisionIds(context, rootId);
+        var recordIds = SqlSourceDeletionOwnership.RecordIds(context, rootId);
+        var branches = context.SourceProcessorBranches.Where(value => revisionIds.Contains(value.SourceRevisionId));
+        var branchIds = branches.Select(value => value.Id);
+        var activities = context.SourceActivities.Where(value => revisionIds.Contains(value.SourceRevisionId));
+        var activityIds = activities.Select(value => value.Id);
 
-        await DeleteOwnedLocalModelExecutionGraphAsync(context, recordIds, cancellationToken).ConfigureAwait(false);
-
-        await context.AuditEvents.Where(value => value.SourceRootId == rootId ||
-                (value.SourceScanRequestId.HasValue && scanRequestIds.Contains(value.SourceScanRequestId.Value)) ||
-                (value.SourceRevisionId.HasValue && revisionIds.Contains(value.SourceRevisionId.Value)) ||
-                (value.SourceActivityId.HasValue && activityIds.Contains(value.SourceActivityId.Value)) ||
-                (value.PipelineRecordId.HasValue && recordIds.Contains(value.PipelineRecordId.Value)))
-            .ExecuteDeleteAsync(cancellationToken).ConfigureAwait(false);
         await context.SourceScanOutbox.Where(value => context.SourceScanRequests.Any(request => request.Id == value.SourceScanRequestId && request.SourceRootId == rootId))
             .ExecuteDeleteAsync(cancellationToken).ConfigureAwait(false);
         await context.SourceScanJobs.Where(value => context.SourceScanRequests.Any(request => request.Id == value.SourceScanRequestId && request.SourceRootId == rootId))
@@ -677,9 +676,9 @@ public sealed partial class SqlSourceDeletionStore(
 
         // A publication binds the physical document owner, its hidden document input,
         // retained-processor branch, and the selected pipeline revision.  Remove only
-        // publications wholly owned by this fenced source before deleting any of those
-        // principals; cross-root dependencies were refused before this graph is reached.
-        if (revisionIds.Count > 0)
+        // publications bound to an owned revision before deleting those principals;
+        // preserve either ownership arm and the preceding cross-root refusals.
+        if (await revisionIds.AnyAsync(cancellationToken).ConfigureAwait(false))
         {
             await context.DocumentPublications.Where(value =>
                     revisionIds.Contains(value.OwnerSourceRevisionId) ||
@@ -687,31 +686,27 @@ public sealed partial class SqlSourceDeletionStore(
                 .ExecuteDeleteAsync(cancellationToken).ConfigureAwait(false);
         }
 
-        if (branchIds.Length > 0)
+        if (await branchIds.AnyAsync(cancellationToken).ConfigureAwait(false))
         {
-            var forceRequestIds = await context.SourceProcessorForceRequests
+            var forceRequests = context.SourceProcessorForceRequests
                 .Where(value => branchIds.Contains(value.SourceProcessorBranchId) ||
-                    revisionIds.Contains(value.SourceRevisionId) || activityIds.Contains(value.SourceActivityId))
-                .Select(value => value.Id)
-                .ToArrayAsync(cancellationToken).ConfigureAwait(false);
-            var actionIds = await context.OperatorActionActionLedger
+                    revisionIds.Contains(value.SourceRevisionId) || activityIds.Contains(value.SourceActivityId));
+            var forceRequestIds = forceRequests.Select(value => value.Id);
+            var actions = context.OperatorActionActionLedger
                 .Where(value => branchIds.Contains(value.SourceProcessorBranchId) ||
-                    (value.SourceProcessorForceRequestId.HasValue && forceRequestIds.Contains(value.SourceProcessorForceRequestId.Value)))
-                .Select(value => value.ActionId)
-                .ToArrayAsync(cancellationToken).ConfigureAwait(false);
-            if (actionIds.Length > 0)
+                    (value.SourceProcessorForceRequestId.HasValue && forceRequestIds.Contains(value.SourceProcessorForceRequestId.Value)));
+            var actionIds = actions.Select(value => value.ActionId);
+            if (await actionIds.AnyAsync(cancellationToken).ConfigureAwait(false))
             {
                 await context.OperatorActionOperationLedger.Where(value => actionIds.Contains(value.ActionId))
                     .ExecuteDeleteAsync(cancellationToken).ConfigureAwait(false);
                 await context.SourceProcessorActionIgnoreHeads.Where(value => actionIds.Contains(value.ActionId))
                     .ExecuteDeleteAsync(cancellationToken).ConfigureAwait(false);
-                await context.OperatorActionActionLedger.Where(value => actionIds.Contains(value.ActionId))
-                    .ExecuteDeleteAsync(cancellationToken).ConfigureAwait(false);
+                await actions.ExecuteDeleteAsync(cancellationToken).ConfigureAwait(false);
             }
-            if (forceRequestIds.Length > 0)
+            if (await forceRequestIds.AnyAsync(cancellationToken).ConfigureAwait(false))
             {
-                await context.SourceProcessorForceRequests.Where(value => forceRequestIds.Contains(value.Id))
-                    .ExecuteDeleteAsync(cancellationToken).ConfigureAwait(false);
+                await forceRequests.ExecuteDeleteAsync(cancellationToken).ConfigureAwait(false);
             }
             await context.SourceProcessorCodeBlockedDiagnostics.Where(value => branchIds.Contains(value.SourceProcessorBranchId)).ExecuteDeleteAsync(cancellationToken).ConfigureAwait(false);
             await context.SourceProcessorCodeCompletionReceipts.Where(value => branchIds.Contains(value.SourceProcessorBranchId)).ExecuteDeleteAsync(cancellationToken).ConfigureAwait(false);
@@ -721,46 +716,44 @@ public sealed partial class SqlSourceDeletionStore(
             await context.SourceProcessorCodeDocuments.Where(value => branchIds.Contains(value.SourceProcessorBranchId)).ExecuteDeleteAsync(cancellationToken).ConfigureAwait(false);
             await context.SourceProcessorBranchMembers.Where(value => branchIds.Contains(value.BranchId)).ExecuteDeleteAsync(cancellationToken).ConfigureAwait(false);
             await context.SourceProcessorAttempts.Where(value => branchIds.Contains(value.BranchId)).ExecuteDeleteAsync(cancellationToken).ConfigureAwait(false);
-            await context.SourceProcessorBranches.Where(value => branchIds.Contains(value.Id)).ExecuteDeleteAsync(cancellationToken).ConfigureAwait(false);
+            await branches.ExecuteDeleteAsync(cancellationToken).ConfigureAwait(false);
         }
 
-        if (revisionIds.Count > 0)
+        if (await revisionIds.AnyAsync(cancellationToken).ConfigureAwait(false))
         {
             await context.DeferredCapabilities.Where(value => revisionIds.Contains(value.SourceRevisionId)).ExecuteDeleteAsync(cancellationToken).ConfigureAwait(false);
         }
 
-        if (activityIds.Length > 0)
+        if (await activityIds.AnyAsync(cancellationToken).ConfigureAwait(false))
         {
             await context.SourceActivityRelations.Where(value => activityIds.Contains(value.PredecessorActivityId) || activityIds.Contains(value.SuccessorActivityId)).ExecuteDeleteAsync(cancellationToken).ConfigureAwait(false);
-            await context.SourceActivities.Where(value => activityIds.Contains(value.Id)).ExecuteDeleteAsync(cancellationToken).ConfigureAwait(false);
+            await activities.ExecuteDeleteAsync(cancellationToken).ConfigureAwait(false);
         }
 
-        if (chunkIds.Length > 0)
+        if (await recordIds.AnyAsync(cancellationToken).ConfigureAwait(false))
         {
-            var vectorIds = await context.Vectors.Where(value => chunkIds.Contains(value.TextChunkId)).Select(value => value.VectorId).ToArrayAsync(cancellationToken).ConfigureAwait(false);
-            if (vectorIds.Length > 0)
-            {
-                await context.Vectors.Where(value => vectorIds.Contains(value.VectorId)).ExecuteDeleteAsync(cancellationToken).ConfigureAwait(false);
-            }
-            await context.TextChunks.Where(value => chunkIds.Contains(value.Id)).ExecuteDeleteAsync(cancellationToken).ConfigureAwait(false);
-        }
-
-        if (recordIds.Count > 0)
-        {
-            var identityIds = await context.PipelineRecords.Where(value => recordIds.Contains(value.Id)).Select(value => value.SourceIdentityId).ToArrayAsync(cancellationToken).ConfigureAwait(false);
-            await context.Artifacts.Where(value => recordIds.Contains(value.PipelineRecordId)).ExecuteDeleteAsync(cancellationToken).ConfigureAwait(false);
+            // The sole caller already proved vectors/chunks/execution empty in
+            // this serializable unit. Keep principals for the next payload page.
+            if (await DeleteOwnedArtifactPageAsync(context, recordIds, cancellationToken).ConfigureAwait(false)) return true;
+            // Records are about to disappear. This one ownership set must stay
+            // frozen; all other selectors still have their live SQL principals.
+            var identityIds = await context.PipelineRecords.Where(value => recordIds.Contains(value.Id))
+                .Select(value => value.SourceIdentityId).Distinct().ToArrayAsync(cancellationToken).ConfigureAwait(false);
             await context.OutboxMessages.Where(value => recordIds.Contains(value.PipelineRecordId)).ExecuteDeleteAsync(cancellationToken).ConfigureAwait(false);
-            var ownedJobIds = await context.Jobs.Where(value => recordIds.Contains(value.PipelineRecordId)).Select(value => value.Id).ToArrayAsync(cancellationToken).ConfigureAwait(false);
+            var ownedJobIds = context.Jobs.Where(value => recordIds.Contains(value.PipelineRecordId)).Select(value => value.Id);
             if (await context.IndexGenerations.AnyAsync(value => value.EmbeddingJobId.HasValue && ownedJobIds.Contains(value.EmbeddingJobId.Value) && value.RetiredAtUtc == null, cancellationToken).ConfigureAwait(false))
                 throw new InvalidOperationException("source-delete-checkpoint-not-retired");
             await context.IndexGenerations.Where(value => value.EmbeddingJobId.HasValue && ownedJobIds.Contains(value.EmbeddingJobId.Value))
                 .ExecuteUpdateAsync(update => update.SetProperty(value => value.EmbeddingJobId, (Guid?)null), cancellationToken).ConfigureAwait(false);
             await context.Jobs.Where(value => recordIds.Contains(value.PipelineRecordId)).ExecuteDeleteAsync(cancellationToken).ConfigureAwait(false);
             await context.PipelineRecords.Where(value => recordIds.Contains(value.Id)).ExecuteDeleteAsync(cancellationToken).ConfigureAwait(false);
-            await context.SourceIdentities.Where(value => identityIds.Contains(value.Id) && !context.PipelineRecords.Any(record => record.SourceIdentityId == value.Id)).ExecuteDeleteAsync(cancellationToken).ConfigureAwait(false);
+            foreach (var identityPage in identityIds.Chunk(1_000))
+                await context.SourceIdentities.Where(value => identityPage.Contains(value.Id) &&
+                    !context.PipelineRecords.Any(record => record.SourceIdentityId == value.Id))
+                    .ExecuteDeleteAsync(cancellationToken).ConfigureAwait(false);
         }
 
-        if (revisionIds.Count > 0)
+        if (await revisionIds.AnyAsync(cancellationToken).ConfigureAwait(false))
         {
             await context.SourceArtifacts.Where(value => revisionIds.Contains(value.SourceRevisionId)).ExecuteDeleteAsync(cancellationToken).ConfigureAwait(false);
             while (await context.SourceRevisions.Where(value => value.SourceRootId == rootId &&
@@ -768,18 +761,22 @@ public sealed partial class SqlSourceDeletionStore(
             {
             }
         }
+        return false;
     }
 
-    private static async Task DeleteOwnedLocalModelExecutionGraphAsync(
-        FluxKnowledgeDbContext context,
-        IReadOnlyCollection<Guid> recordIds,
-        CancellationToken cancellationToken)
+    private static async Task<LocalExecutionGraph> AssertOwnedGraphPurgeReadyAsync(FluxKnowledgeDbContext context,IQueryable<Guid> recordIds,CancellationToken ct)
     {
-        if (recordIds.Count == 0)
-        {
-            return;
-        }
+        if (await context.IndexGenerations.AnyAsync(generation => generation.EmbeddingJobId.HasValue && generation.RetiredAtUtc == null &&
+            context.Jobs.Any(job => job.Id == generation.EmbeddingJobId && recordIds.Contains(job.PipelineRecordId)),ct))
+            throw new InvalidOperationException("source-delete-checkpoint-not-retired");
+        return await ReadOwnedLocalModelExecutionGraphAsync(context,recordIds,ct);
+    }
 
+    private sealed record LocalExecutionGraph(Guid[] MiniTaskIds,Guid[] BatchIds);
+
+    private static async Task<LocalExecutionGraph> ReadOwnedLocalModelExecutionGraphAsync(
+        FluxKnowledgeDbContext context,IQueryable<Guid> recordIds,CancellationToken cancellationToken)
+    {
         var miniTaskIds = await context.DocumentOcrRequests
             .Where(request => recordIds.Contains(request.PipelineRecordId))
             .Select(request => request.MiniTaskId)
@@ -797,9 +794,7 @@ public sealed partial class SqlSourceDeletionStore(
                 .ToArrayAsync(cancellationToken)
                 .ConfigureAwait(false);
         if (batchIds.Length > 0 &&
-            await context.GpuMiniTasks.AnyAsync(
-                    task => task.BatchId.HasValue && batchIds.Contains(task.BatchId.Value) && !miniTaskIds.Contains(task.Id),
-                    cancellationToken).ConfigureAwait(false))
+            await HasForeignBatchTaskAsync(context,miniTaskIds,batchIds,cancellationToken).ConfigureAwait(false))
         {
             throw new InvalidOperationException("source-delete-local-ocr-shared-batch");
         }
@@ -810,39 +805,7 @@ public sealed partial class SqlSourceDeletionStore(
             throw new InvalidOperationException("source-delete-local-ocr-active-batch");
         }
 
-        if (batchIds.Length > 0)
-        {
-            await context.GpuExecutorEvidence.Where(value => batchIds.Contains(value.BatchId))
-                .ExecuteDeleteAsync(cancellationToken).ConfigureAwait(false);
-            await context.GpuExecutorResultReceipts.Where(value => batchIds.Contains(value.BatchId))
-                .ExecuteDeleteAsync(cancellationToken).ConfigureAwait(false);
-            await context.GpuExecutorDispatches.Where(value => batchIds.Contains(value.BatchId))
-                .ExecuteDeleteAsync(cancellationToken).ConfigureAwait(false);
-            await context.GpuSchedulerOperationReceipts.Where(value => value.BatchId.HasValue && batchIds.Contains(value.BatchId.Value))
-                .ExecuteDeleteAsync(cancellationToken).ConfigureAwait(false);
-        }
-
-        if (miniTaskIds.Length > 0)
-        {
-            await context.EmbeddingGpuRequests.Where(value => miniTaskIds.Contains(value.MiniTaskId))
-                .ExecuteDeleteAsync(cancellationToken).ConfigureAwait(false);
-            await context.DocumentOcrRequests.Where(value => miniTaskIds.Contains(value.MiniTaskId))
-                .ExecuteDeleteAsync(cancellationToken).ConfigureAwait(false);
-            await context.GpuMiniTasks.Where(value => miniTaskIds.Contains(value.Id))
-                .ExecuteDeleteAsync(cancellationToken).ConfigureAwait(false);
-        }
-        // A malformed or pre-scheduler request can lack its mini task. It is still owned by
-        // the fenced record and must not survive after the parent record is removed.
-        await context.DocumentOcrRequests.Where(value => recordIds.Contains(value.PipelineRecordId))
-            .ExecuteDeleteAsync(cancellationToken).ConfigureAwait(false);
-        await context.EmbeddingGpuRequests.Where(value => recordIds.Contains(value.PipelineRecordId))
-            .ExecuteDeleteAsync(cancellationToken).ConfigureAwait(false);
-
-        if (batchIds.Length > 0)
-        {
-            await context.GpuBatches.Where(value => batchIds.Contains(value.Id))
-                .ExecuteDeleteAsync(cancellationToken).ConfigureAwait(false);
-        }
+        return new(miniTaskIds,batchIds);
     }
 
     private async Task<SourceDeletionRunResult> RefuseAsync(

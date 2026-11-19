@@ -36,7 +36,17 @@ public sealed record OutlookProfileStatusProjection(
     DateTimeOffset UpdatedAtUtc,
     DateTimeOffset? LastSuccessfulCatchUpAtUtc,
     IReadOnlyList<string> Warnings,
-    IReadOnlyList<OutlookFolderStatusProjection> Folders);
+    IReadOnlyList<OutlookFolderStatusProjection> Folders,
+    OutlookFolderVerificationStatus? Verification = null)
+{
+    public Guid? WatchedSourceRootId { get; init; }
+    public DateTimeOffset? LastSuccessfulExportAtUtc { get; init; }
+}
+
+public sealed record OutlookFolderVerificationStatus(DateTimeOffset ExpiresAtUtc, OutlookBrowseFailureCode? Failure)
+{
+    public bool IsPending => Failure is null;
+}
 
 public sealed record OutlookPageProjection(IReadOnlyList<OutlookProfileStatusProjection> Profiles)
 {
@@ -231,11 +241,28 @@ public sealed class SqlOutlookProjectionReader(
     public async ValueTask<OutlookPageProjection> ReadAsync(CancellationToken cancellationToken)
     {
         await using var context = await contextFactory.CreateDbContextAsync(cancellationToken).ConfigureAwait(false);
+        var autoEnableBrowses = SqlOutlookCaptureStore.AutoEnableBrowses(context).AsNoTracking();
         var profiles = await context.OutlookCaptureProfiles.AsNoTracking()
             .Where(profile => profile.State != (int)OutlookCaptureState.Stale)
             .OrderBy(profile => profile.DisplayName)
+            .Select(profile => new
+            {
+                Profile = profile,
+                LastSuccessfulExportAtUtc = context.OutlookCaptureExports
+                    .Where(export => profile.WatchedSourceRootId != null && export.ProfileId == profile.Id &&
+                        export.WatchedPublishedAtUtc != null)
+                    .OrderByDescending(export => export.WatchedPublishedAtUtc)
+                    .Select(export => export.WatchedPublishedAtUtc)
+                    .FirstOrDefault(),
+                Verification = autoEnableBrowses
+                    .Where(browse => browse.ProfileId == profile.Id &&
+                        browse.ConfigurationRevision == profile.ConfigurationRevision &&
+                        profile.State == (int)OutlookCaptureState.Disabled)
+                    .Select(browse => new { browse.ExpiresAtUtc, browse.FailureCode })
+                    .FirstOrDefault()
+            })
             .ToListAsync(cancellationToken).ConfigureAwait(false);
-        var profileIds = profiles.Select(profile => profile.Id).ToArray();
+        var profileIds = profiles.Select(row => row.Profile.Id).ToArray();
         var folders = await context.OutlookCaptureFolders.AsNoTracking()
             .Where(folder => profileIds.Contains(folder.ProfileId) && folder.State != (int)OutlookCaptureState.Disabled)
             .OrderBy(folder => folder.DisplayName)
@@ -254,9 +281,12 @@ public sealed class SqlOutlookProjectionReader(
             .ToDictionaryAsync(row => row.ProfileId, row => row.CompletedAtUtc, cancellationToken)
             .ConfigureAwait(false);
 
+        var now = DateTimeOffset.UtcNow;
+
         var results = new List<OutlookProfileStatusProjection>(profiles.Count);
-        foreach (var profile in profiles)
+        foreach (var row in profiles)
         {
+            var profile = row.Profile;
             OutlookSpoolStatus spool;
             try
             {
@@ -293,7 +323,17 @@ public sealed class SqlOutlookProjectionReader(
                 profile.IncrementalBasis == (int)OutlookIncrementalBasis.ReceivedTime
                     ? ["Received-time capture may miss older moved messages; run manual reconciliation when needed."]
                     : [],
-                folderResults));
+                folderResults,
+                row.Verification is { } browse
+                    ? new OutlookFolderVerificationStatus(
+                        browse.ExpiresAtUtc,
+                        browse.FailureCode is { } failure ? (OutlookBrowseFailureCode)failure
+                            : browse.ExpiresAtUtc <= now ? OutlookBrowseFailureCode.Expired : null)
+                    : null)
+            {
+                WatchedSourceRootId = profile.WatchedSourceRootId,
+                LastSuccessfulExportAtUtc = row.LastSuccessfulExportAtUtc
+            });
         }
         return new OutlookPageProjection(results);
 

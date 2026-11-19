@@ -73,6 +73,7 @@ public sealed class OutlookPageState(
     IOutlookOperatorPolicy operatorPolicy,
     TimeProvider timeProvider)
 {
+    private readonly SemaphoreSlim _reloadGate = new(1, 1);
     private Guid? _browseCorrelationId;
     private string? _browseDraftFingerprint;
     private string? _browseTargetPathFingerprint;
@@ -81,8 +82,18 @@ public sealed class OutlookPageState(
     public IReadOnlyList<OutlookBrowseFolderProjection> BrowseFolders { get; private set; } = [];
     public IReadOnlyList<OutlookSpoolChoice> SpoolChoices => spoolValidator.Choices;
 
-    public async ValueTask ReloadAsync(CancellationToken cancellationToken) =>
-        Projection = await projectionReader.ReadAsync(cancellationToken).ConfigureAwait(false);
+    public async ValueTask ReloadAsync(CancellationToken cancellationToken)
+    {
+        await _reloadGate.WaitAsync(cancellationToken).ConfigureAwait(false);
+        try
+        {
+            Projection = await projectionReader.ReadAsync(cancellationToken).ConfigureAwait(false);
+        }
+        finally
+        {
+            _reloadGate.Release();
+        }
+    }
 
     public async ValueTask<OutlookBrowseRequest> RequestBrowseAsync(
         OutlookProfileDraft draft,
@@ -148,8 +159,19 @@ public sealed class OutlookPageState(
         return folders;
     }
 
-    public async ValueTask<OutlookOperationReceipt> SaveAsync(
+    public ValueTask<OutlookOperationReceipt> SaveAsync(
         OutlookProfileDraft draft,
+        CancellationToken cancellationToken) =>
+        SaveAsync(draft, verifyFolderPath: null, cancellationToken);
+
+    public ValueTask<OutlookOperationReceipt> VerifyAndEnableAsync(
+        OutlookProfileDraft draft,
+        CancellationToken cancellationToken) =>
+        SaveAsync(draft with { Enable = false }, draft.TargetFolderPath, cancellationToken);
+
+    private async ValueTask<OutlookOperationReceipt> SaveAsync(
+        OutlookProfileDraft draft,
+        string? verifyFolderPath,
         CancellationToken cancellationToken)
     {
         ArgumentNullException.ThrowIfNull(draft);
@@ -187,7 +209,11 @@ public sealed class OutlookPageState(
             spool,
             draft.Enable,
             draft.ProfileId is null ? null : draft.ConfigurationRevision,
-            draft.Enable ? _browseCorrelationId : null);
+            draft.Enable ? _browseCorrelationId : null)
+        {
+            VerifyFolderPath = verifyFolderPath
+        };
+        request.Validate();
         var receipt = await store.SaveProfileAsync(request, cancellationToken).ConfigureAwait(false);
         if (!receipt.Accepted || !receipt.Committed)
         {
@@ -195,7 +221,10 @@ public sealed class OutlookPageState(
         }
 
         InvalidateBrowse();
-        await ReloadAsync(cancellationToken).ConfigureAwait(false);
+        if (verifyFolderPath is null)
+        {
+            await ReloadAsync(cancellationToken).ConfigureAwait(false);
+        }
         return receipt;
     }
 

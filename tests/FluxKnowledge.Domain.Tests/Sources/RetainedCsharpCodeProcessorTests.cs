@@ -282,6 +282,20 @@ public sealed class RetainedCsharpCodeProcessorTests
     }
 
     [Fact]
+    public async Task Processor_reuses_parent_content_identity_and_retains_code_disclosure_proofs()
+    {
+        var bytes = System.Text.Encoding.UTF8.GetBytes("public class MetadataOnlyParent { }");
+        var claim = RetainedCsharpCodeTestData.Claim(bytes, inputSha256: new string('a', 64));
+        var retained = RetainedCsharpCodeTestData.Retained(claim.SourceRevisionId, bytes) with { ContentSha256 = claim.InputSha256 };
+        var processor = new RetainedCsharpCodeProcessor(new RetainedCsharpCodeTestData.Reader(retained),
+            new RetainedCsharpCodeTestData.Disclosure());
+        var completion = await processor.ProcessAsync(claim, CancellationToken.None);
+        Assert.Equal("success", completion.OutcomeCode);
+        Assert.Contains(completion.Symbols, value => value.LocalName == "MetadataOnlyParent");
+        Assert.NotNull(completion.DocumentFingerprint);
+    }
+
+    [Fact]
     public async Task Processor_reads_only_verified_retained_bytes_and_checks_integrity_before_input_size()
     {
         var oversized = new byte[RetainedCsharpCodeProcessor.MaximumInputBytes + 1];

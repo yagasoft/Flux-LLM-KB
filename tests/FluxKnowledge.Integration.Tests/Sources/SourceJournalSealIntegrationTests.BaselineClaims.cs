@@ -11,7 +11,7 @@ public sealed partial class SourceJournalSealIntegrationTests
     [NativeSqlServerTheory]
     [InlineData(false)]
     [InlineData(true)]
-    public async Task A_new_baseline_claim_captures_existing_content_debt_and_acknowledges_only_its_frozen_generation(bool laterSignal)
+    public async Task A_new_baseline_claim_observes_unchanged_content_and_acknowledges_only_its_frozen_generation(bool laterSignal)
     {
         await using var scenario = await Scenario.CreateAsync(fixture.ConnectionString, qualified: true);
         var first = await FailBaselineAsync(scenario);
@@ -29,7 +29,7 @@ public sealed partial class SourceJournalSealIntegrationTests
         if (laterSignal) scenario.BeforeReuse = _ => SignalDegradedAsync(scenario);
         scenario.SourceBytes = 0;
         await scenario.RunAsync(retry);
-        Assert.Equal(64, scenario.SourceBytes);
+        Assert.Equal(0, scenario.SourceBytes);
         await using var db = scenario.Factory.CreateDbContext();
         var remaining = await db.SourcePendingChanges.SingleOrDefaultAsync(x => x.RelativePath == "one.txt");
         if (laterSignal) { Assert.NotNull(remaining); Assert.True(remaining.Generation > target.Generation); }
@@ -82,7 +82,7 @@ public sealed partial class SourceJournalSealIntegrationTests
         var retry = await scenario.ClaimAsync("baseline-order-retry");
         scenario.SourceBytes = scenario.ArtifactSourceBytes = 0;
         await scenario.RunAsync(retry);
-        Assert.Equal(64, scenario.SourceBytes);
+        Assert.Equal(watcherFirst ? 0 : 64, scenario.SourceBytes);
         await using var verified = scenario.Factory.CreateDbContext();
         var current = await verified.SourceRevisions.OrderByDescending(x => x.Revision).FirstAsync(x => x.CanonicalPath == scenario.Path);
         Assert.Equal(Convert.ToHexStringLower(SHA256.HashData(await File.ReadAllBytesAsync(scenario.Path))), current.ContentSha256);
@@ -120,7 +120,7 @@ public sealed partial class SourceJournalSealIntegrationTests
             scenario.Clock.Now += TimeSpan.FromMinutes(11); scenario.Restart();
             var retry = await scenario.ClaimAsync("unsealed-baseline-retry");
             scenario.SourceBytes = 0; await scenario.RunAsync(retry);
-            Assert.Equal(64, scenario.SourceBytes);
+            Assert.Equal(0, scenario.SourceBytes);
         }
     }
 

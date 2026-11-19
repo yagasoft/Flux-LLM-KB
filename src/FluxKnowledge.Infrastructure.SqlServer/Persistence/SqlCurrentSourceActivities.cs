@@ -26,7 +26,9 @@ public static class SqlCurrentSourceActivities
                 EF.Functions.Collate(revision.ContentSha256, SchemaConfiguration.SchedulerFenceCollation) &&
             !context.PipelineRecords.Any(record => record.SourceRevisionId == revision.Id) &&
             !context.SourceProcessorBranches.Any(branch => branch.SourceRevisionId == revision.Id) &&
-            !context.SourceActivities.Any(owner => owner.Id != activity.Id && owner.SourceRevisionId == revision.Id &&
+            // Pending and Deferred states are disjoint. Keep the owner lookup
+            // keyed by revision/state without a redundant self-ID inequality.
+            !context.SourceActivities.Any(owner => owner.SourceRevisionId == revision.Id &&
                 (owner.State == (int)SourceActivityState.DeferredPolicy || owner.State == (int)SourceActivityState.DeferredUnsupported)) &&
             !context.SourceActivities.Any(successor => successor.SourceRevisionId == revision.Id &&
                 (successor.ProcessorVersion == RetainedDefaultPolicy.Version && successor.DescriptorFingerprint == RetainedDefaultPolicy.TextFingerprint ||

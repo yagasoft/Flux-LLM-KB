@@ -200,6 +200,35 @@ public sealed class SqlNativeOperationStoreTests(NativeSqlServerFixture fixture)
     }
 
     [NativeSqlServerFact]
+    public async Task CommitAsync_rejects_a_Stop_workspace_that_differs_from_the_confirmed_payload()
+    {
+        await ClearAsync();
+        const string action = "note_create";
+        const string surface = "codex-hook";
+        var expectedWorkspace = Guid.NewGuid();
+        var mutation = new KnowledgeMutation(action, Guid.NewGuid().ToString(), "Codex turn synthetic",
+            "Synthetic captured reply", null, null, null, null, null, null, CodexWorkspaceRootId: Guid.NewGuid());
+        var payload = $$"""{"itemId":"{{mutation.ItemId}}","title":"{{mutation.Title}}","body":"{{mutation.Body}}","codexWorkspaceRootId":"{{expectedWorkspace}}"}""";
+        var fingerprint = NativeOperationCanonicalization.CreateRequestFingerprint(action, NativeOperationCanonicalization.CanonicalizeJson(payload), []);
+        var store = CreateStore(new ManualTimeProvider(Now));
+        var preview = await store.CreatePreviewAsync(new NativeActionPreviewRequest(action, payload, surface)
+        {
+            RequestFingerprint = fingerprint,
+            EffectSummary = "Save a captured reply."
+        }, CancellationToken.None);
+        var request = new NativeActionCommitRequest(action, payload, preview.ConfirmationId, "codex-stop-wrong-workspace", surface)
+        {
+            RequestFingerprint = fingerprint,
+            CommitOperation = new KnowledgeMutationCommitOperation(mutation)
+        };
+
+        await AssertReasonAsync("invalid-commit-operation", () => store.CommitAsync(request, CancellationToken.None));
+        await using var context = await SqlTestData.CreateFactory(_fixture).CreateDbContextAsync();
+        Assert.False(await context.KnowledgeItems.AnyAsync(note => note.Title == mutation.Title));
+        Assert.Empty(await context.NativeOperationReceipts.ToListAsync());
+    }
+
+    [NativeSqlServerFact]
     public async Task CommitAsync_rejects_a_corpus_typed_operation_when_its_payload_or_root_admission_is_not_bound_to_the_fingerprinted_request()
     {
         await ClearAsync();

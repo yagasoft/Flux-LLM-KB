@@ -1,6 +1,4 @@
 using System.Globalization;
-using System.Security.Cryptography;
-using System.Text;
 using System.Text.Json;
 
 namespace FluxKnowledge.Application.IntegrationV1;
@@ -37,10 +35,7 @@ public static class NativeV1CursorBindings
         query.View,
         JsonSerializer.Serialize(new
         {
-            queryFingerprint = query.Query is null
-                ? null
-                : Convert.ToHexStringLower(SHA256.HashData(Encoding.UTF8.GetBytes(
-                    NativeV1ContractLimits.CanonicalizeOptionalCodeQuery(query.Query)!))),
+            query = NativeV1ContractLimits.CanonicalizeOptionalCodeQuery(query.Query),
             branchId = GuidText(query.BranchId)
         }),
         "document-id:asc,ordinal:asc",

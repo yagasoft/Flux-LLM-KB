@@ -11,8 +11,8 @@ namespace FluxKnowledge.Infrastructure.SqlServer.Persistence;
 public sealed class NativeV1ProjectionCursorCodec : INativeV1CursorCodec
 {
     private const string ProtectorPurpose = "FluxKnowledge.NativeV1ProjectionCursor/v1";
-    private const int CurrentVersion = 1;
-    private const int MaximumTokenCharacters = 2048;
+    private const int CurrentVersion = 2;
+    private const int MaximumTokenCharacters = 65536;
     private static readonly JsonSerializerOptions SerializerOptions = new(JsonSerializerDefaults.Web);
     private readonly IDataProtector? _protector;
 
@@ -38,8 +38,7 @@ public sealed class NativeV1ProjectionCursorCodec : INativeV1CursorCodec
         {
             var payload = new CursorPayload(
                 CurrentVersion,
-                FingerprintBinding(binding),
-                binding.PageLimit,
+                binding,
                 position);
             return Base64UrlEncode(_protector.Protect(JsonSerializer.SerializeToUtf8Bytes(payload, SerializerOptions)));
         }
@@ -63,12 +62,17 @@ public sealed class NativeV1ProjectionCursorCodec : INativeV1CursorCodec
                 throw InvalidCursor();
             }
 
-            var payload = JsonSerializer.Deserialize<CursorPayload>(
-                _protector.Unprotect(Base64UrlDecode(cursor)),
-                SerializerOptions);
-            if (payload is null || payload.Version != CurrentVersion || payload.PageLimit != binding.PageLimit ||
-                !IsSha256(payload.BindingFingerprint) ||
-                !string.Equals(payload.BindingFingerprint, FingerprintBinding(binding), StringComparison.Ordinal))
+            var bytes = _protector.Unprotect(Base64UrlDecode(cursor));
+            var payload = JsonSerializer.Deserialize<CursorPayload>(bytes, SerializerOptions);
+            if (payload?.Version == 1)
+            {
+                var legacy = JsonSerializer.Deserialize<LegacyCursorPayload>(bytes, SerializerOptions);
+                if (legacy is null || legacy.PageLimit != binding.PageLimit ||
+                    !string.Equals(legacy.BindingFingerprint, LegacyFingerprint(binding), StringComparison.Ordinal)) throw InvalidCursor();
+                ValidatePosition(binding, legacy.Position);
+                return legacy.Position;
+            }
+            if (payload is null || payload.Version != CurrentVersion || payload.Binding != binding)
             {
                 throw InvalidCursor();
             }
@@ -90,7 +94,8 @@ public sealed class NativeV1ProjectionCursorCodec : INativeV1CursorCodec
         ArgumentNullException.ThrowIfNull(binding);
         if (string.IsNullOrWhiteSpace(binding.Family) || string.IsNullOrWhiteSpace(binding.View) ||
             string.IsNullOrWhiteSpace(binding.Ordering) || binding.PageLimit is < 1 or > 100 ||
-            binding.CanonicalFilters.Length > 4096)
+            binding.CanonicalFilters is null || binding.CanonicalFilters.Length > 16384 ||
+            binding.Family.Length > 128 || binding.View.Length > 128 || binding.Ordering.Length > 128)
         {
             throw InvalidCursor();
         }
@@ -119,16 +124,31 @@ public sealed class NativeV1ProjectionCursorCodec : INativeV1CursorCodec
         if (!validShape) throw InvalidCursor();
     }
 
-    private static string FingerprintBinding(NativeV1CursorBinding binding)
-    {
-        var canonical = string.Join("\n", binding.Family, binding.View, binding.CanonicalFilters, binding.Ordering,
-            binding.PageLimit.ToString(System.Globalization.CultureInfo.InvariantCulture));
-        return Convert.ToHexStringLower(SHA256.HashData(Encoding.UTF8.GetBytes(canonical)));
-    }
-
     private static NativeOperationException InvalidCursor() => new("cursor-invalid");
 
-    private static bool IsSha256(string? value) => value is { Length: 64 } && value.All(Uri.IsHexDigit);
+    // Read-only compatibility for already-issued tokens. New tokens compare
+    // complete protected fields and never create these custom fingerprints.
+    private static string LegacyFingerprint(NativeV1CursorBinding binding)
+    {
+        var filters = binding.CanonicalFilters;
+        if (binding.Family == "code")
+        {
+            using var parsed = JsonDocument.Parse(filters);
+            if (!parsed.RootElement.TryGetProperty("query", out var query) ||
+                !parsed.RootElement.TryGetProperty("branchId", out var branch)) throw InvalidCursor();
+            filters = JsonSerializer.Serialize(new
+            {
+                queryFingerprint = query.ValueKind == JsonValueKind.Null ? null : LegacyHash(query.GetString()!),
+                branchId = branch.GetString()
+            });
+        }
+        return LegacyHash(string.Join("\n", binding.Family, binding.View, filters, binding.Ordering,
+            binding.PageLimit.ToString(System.Globalization.CultureInfo.InvariantCulture)));
+    }
+
+    private static string LegacyHash(string value) => Convert.ToHexStringLower(SHA256.HashData(Encoding.UTF8.GetBytes(value)));
+
+    private sealed record LegacyCursorPayload(int Version, string BindingFingerprint, int PageLimit, NativeV1CursorPosition Position);
 
     private static string Base64UrlEncode(byte[] value) =>
         Convert.ToBase64String(value).TrimEnd('=').Replace('+', '-').Replace('/', '_');
@@ -161,7 +181,6 @@ public sealed class NativeV1ProjectionCursorCodec : INativeV1CursorCodec
 
     private sealed record CursorPayload(
         int Version,
-        string BindingFingerprint,
-        int PageLimit,
+        NativeV1CursorBinding Binding,
         NativeV1CursorPosition Position);
 }

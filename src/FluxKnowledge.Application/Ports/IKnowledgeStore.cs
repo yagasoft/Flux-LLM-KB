@@ -7,5 +7,8 @@ public interface IKnowledgeStore
 {
     ValueTask<KnowledgeTarget?> FindTargetAsync(KnowledgeMutation mutation, CancellationToken cancellationToken);
     ValueTask<IReadOnlyList<KnowledgeSearchResult>> SearchAsync(string query, int limit, CancellationToken cancellationToken);
+    ValueTask<Guid?> ResolveCodexWorkspaceAsync(string cwd, CancellationToken cancellationToken);
+    ValueTask<IReadOnlyList<KnowledgeSearchResult>> SearchCodexWorkspaceAsync(
+        string query, string cwd, int limit, CancellationToken cancellationToken);
     ValueTask<IReadOnlyList<KnowledgeGraphResult>> TraverseAsync(string node, int maxDepth, int maxResults, CancellationToken cancellationToken);
 }

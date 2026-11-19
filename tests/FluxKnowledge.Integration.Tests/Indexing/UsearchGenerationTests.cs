@@ -450,6 +450,7 @@ public sealed partial class UsearchGenerationTests : IDisposable
 
     private sealed class Lease : IDerivedIndexRecoveryLease
     {
+        public ValueTask<bool> IsHeldAsync(CancellationToken cancellationToken) => ValueTask.FromResult(true);
         public ValueTask DisposeAsync() => ValueTask.CompletedTask;
     }
 

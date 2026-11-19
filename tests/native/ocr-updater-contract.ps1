@@ -52,7 +52,7 @@ try {
     [void][IO.Directory]::CreateDirectory($CanonicalRecoveryRoot)
     $config=Join-Path $root 'config.json';$hostConfig=Join-Path $root 'host-config.json'
     [IO.File]::WriteAllText($config,'synthetic config');[IO.File]::WriteAllText($hostConfig,'synthetic host config')
-    $plan=@{Version=1;OperationRoot=$root;ReleaseId='fixture-release';ImplementationSha256=(Get-OcrRecoveryImplementationHash);
+    $plan=@{Version=1;Binding=@{Handle=@{BatchId=[Guid]::NewGuid()}};OperationRoot=$root;ReleaseId='fixture-release';ImplementationSha256=(Get-OcrRecoveryImplementationHash);
         OriginalWebSha256=$payloads[0].Sha256;OriginalCompanionSha256=$payloads[1].Sha256;Payloads=$payloads;
         Task=@{Enabled=$true;IdentityHash=$task.IdentityHash;LauncherSha256=$task.LauncherSha256};Commit=$commit;
         ConfigurationPath=$config;ConfigurationSha256=(Get-FileHash $config).Hash;
@@ -197,6 +197,14 @@ try {
     Assert-Refused { & $dispatchHarness @dispatchArguments } 'incompatible-mode'
     [void]$dispatchArguments.Remove('ApplyMigrations');$dispatchArguments.OcrRecoveryOperationRoot=$root
     Assert-Refused { & $dispatchHarness @dispatchArguments } 'apply-requires-reviewed-plan'
+    $cleanupPlan=@{Version=2;Mode='CleanupOnly';TerminalBinding=@{Handle=@{BatchId=[Guid]::NewGuid()}}}
+    if(!(Assert-OcrRecoveryPlanMode $cleanupPlan)){throw 'Cleanup-only mode not recognised.'}
+    $cleanupPlan.Binding=$plan.Binding
+    Assert-Refused {Assert-OcrRecoveryPlanMode $cleanupPlan} 'plan-mode-invalid'
+    $cleanupPlan.Binding=$null;$cleanupPlan.Mode='CompleteAndRequeue'
+    Assert-Refused {Assert-OcrRecoveryPlanMode $cleanupPlan} 'plan-mode-invalid'
+    $cleanupPlan.Mode='CleanupOnly';$cleanupPlan.Version=3
+    Assert-Refused {Assert-OcrRecoveryPlanMode $cleanupPlan} 'plan-mode-invalid'
     'OCR updater contracts passed: actual preflight/dispatch, bound stopped and partial resume, read-only completed drift rejection.'
 } finally {
     $resolved=[IO.Path]::GetFullPath($root)

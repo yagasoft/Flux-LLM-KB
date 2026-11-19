@@ -148,8 +148,10 @@ public sealed class SourceDeletionCoordinatorTests
             ValueTask.FromException<SourceDeletionRunResult>(cleanupError);
 
         public ValueTask<IReadOnlyList<SourceDeletionFileTarget>> ReadPendingCleanupAsync(
-            SourceDeletionWorkItem workItem, CancellationToken cancellationToken) => throw new NotSupportedException();
+            SourceDeletionWorkItem workItem, CancellationToken cancellationToken, int maxTargets = 1) => throw new NotSupportedException();
 
+        public ValueTask<bool> RecordCleanupResultsAsync(SourceDeletionWorkItem workItem,
+            IReadOnlyList<SourceDeletionFileOutcome> outcomes, CancellationToken cancellationToken) => throw new NotSupportedException();
         public ValueTask RecordCleanupResultAsync(SourceDeletionWorkItem workItem, Guid cleanupItemId,
             SourceDeletionFileResult result, CancellationToken cancellationToken) => throw new NotSupportedException();
 

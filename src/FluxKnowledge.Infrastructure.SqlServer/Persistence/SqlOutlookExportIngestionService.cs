@@ -289,6 +289,9 @@ public sealed class SqlOutlookExportIngestionService(
                     ChecksumVerifiedAtUtc = now,
                     ReferenceCount = 1
                 });
+                if (profile.WatchedSourceRootId is not null && profile.WatchedPublicationSuspendedAtUtc is null)
+                    continue;
+
                 var requiredCapability = isSupportedText ? null : RequiredCapability(sidecar.ContentType);
                 await activityWriter.FindOrCreateAsync(
                     context,

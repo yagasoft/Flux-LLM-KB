@@ -16,7 +16,7 @@ namespace FluxKnowledge.Integration.Tests.Indexing;
 public sealed partial class SqlToUsearchRebuildTests
 {
     [NativeSqlServerFact]
-    public async Task Segmented_deletion_reports_committed_reclamation_and_resumes_between_segment_and_manifest()
+    public async Task Segmented_deletion_resumes_after_committed_native_reclamation_before_its_receipt()
     {
         await using var environment = await PipelineEnvironment.CreateAsync(_fixture, "The independent keeper remains published.", segmented: true);
         var recordId = await environment.AddRetainedAndPumpAsync("The temporary rooted source must be removed through every native retirement phase.");
@@ -41,30 +41,44 @@ public sealed partial class SqlToUsearchRebuildTests
         Assert.Equal("rebuild-index", (await store.PurgeAsync(await LeaseDeletionFixtureAsync(environment, operation), null, default)).Phase);
         var candidate = await publisher.BuildAndPlaceAsync(Guid.Empty, default);
         Assert.Equal("cleanup-memberships", (await store.PurgeAsync(await LeaseDeletionFixtureAsync(environment, operation), candidate, default)).Phase);
-        SourceDeletionCoordinator Coordinator() => new(store, publisher,
+        SourceDeletionCoordinator Coordinator(SqlSegmentRetirementOperations maintenance) => new(store, publisher,
             new WindowsSourceDeletionFileStore(environment.ArtifactRoot, environment.IndexRoot),
             new SqlSourceArtifactPublicationGate(environment.Factory), new SqlDerivedIndexRecoveryStore(environment.Factory, TimeProvider.System),
-            indexMaintenance: new SqlSegmentRetirementOperations(environment.Factory, new WindowsIndexProjectionFileStore(environment.IndexRoot),
-                environment.IndexRoot, recovery, TimeProvider.System, new WindowsInteractiveGpuOwnerProbe()));
-        var first = Coordinator(); var checkpoint = false;
-        for (var attempt = 0; attempt < 24 && !checkpoint; attempt++)
+            indexMaintenance: maintenance);
+        var interrupted = false;
+        var retirement = new SqlSegmentRetirementOperations(environment.Factory, new WindowsIndexProjectionFileStore(environment.IndexRoot),
+            environment.IndexRoot, recovery, TimeProvider.System, new WindowsInteractiveGpuOwnerProbe())
         {
-            var progressed = await first.RunOneAsync(default);
+            FileOperationCheckpoint = (phase, _, _) =>
+            {
+                if (phase == "manifest-page-reclaimed")
+                {
+                    interrupted = true;
+                    throw new OperationCanceledException("simulated-shutdown-before-receipt");
+                }
+                return ValueTask.CompletedTask;
+            }
+        };
+        await Assert.ThrowsAsync<OperationCanceledException>(() => Coordinator(retirement).RunOneAsync(default).AsTask());
+        Assert.True(interrupted);
+        {
             await using var db = await environment.Factory.CreateDbContextAsync();
             var current = await db.SourceDeletionOperations.SingleAsync(d => d.Id == operation);
-            if (current.ReasonCode != "source-delete-segment-retirement-progressing") continue;
-            Assert.True(progressed);
-            Assert.Equal(0, current.State); Assert.Null(current.LeaseId);
+            Assert.Equal(1, current.State); Assert.NotNull(current.LeaseId);
             Assert.True(await db.IndexSegments.AnyAsync(s => s.State == 3 && db.SourceDeletionCleanupItems.Any(i =>
                 i.SourceDeletionOperationId == operation && i.StorageKind == 4 && i.RelativePath == s.Id)));
-            var manifestPaths = await db.SourceDeletionCleanupItems.Where(i => i.SourceDeletionOperationId == operation && i.StorageKind == 3)
+            var manifestPaths = await db.SourceDeletionCleanupItems.Where(i => i.SourceDeletionOperationId == operation && i.StorageKind == 3 && i.State == 0)
                 .Select(i => i.RelativePath).ToArrayAsync();
+            Assert.NotEmpty(manifestPaths);
             var manifestIds = manifestPaths.Select(p => Guid.ParseExact(p, "N")).ToArray();
-            Assert.True(await db.IndexGenerations.AnyAsync(g => manifestIds.Contains(g.Id) && g.RetiredAtUtc != null && g.ReclaimedAtUtc == null));
-            checkpoint = true;
+            Assert.Equal(manifestIds.Length, await db.IndexGenerations.CountAsync(g => manifestIds.Contains(g.Id) && g.RetiredAtUtc != null && g.ReclaimedAtUtc != null));
+            // The interrupted worker has unwound. Simulate its durable lease
+            // expiring before a fresh coordinator takes ownership.
+            current.LeaseExpiresAtUtc = DateTimeOffset.UtcNow.AddSeconds(-1);
+            await db.SaveChangesAsync();
         }
-        Assert.True(checkpoint);
-        var resumed = Coordinator();
+        var resumed = Coordinator(new SqlSegmentRetirementOperations(environment.Factory, new WindowsIndexProjectionFileStore(environment.IndexRoot),
+            environment.IndexRoot, recovery, TimeProvider.System, new WindowsInteractiveGpuOwnerProbe()));
         for (var attempt = 0; attempt < 24; attempt++)
         {
             await using var db = await environment.Factory.CreateDbContextAsync();

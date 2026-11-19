@@ -909,7 +909,7 @@ public sealed class SqlRetainedSourceReader(
                 throw new InvalidDataException("The retained artifact has an unexpected byte length.");
             }
             var ownership = new RetainedDirectoryOwnership(privateRootLease, sha256Lease, shardLease);
-            var lease = await RetainedSourceReadLease.VerifyAsync(sourceRevisionId, stream, source.ContentSha256,
+            var lease = await RetainedSourceReadLease.OpenAsync(sourceRevisionId, stream, source.ContentSha256,
                 source.ByteLength, maximumByteLength, cancellationToken, ownership).ConfigureAwait(false);
             return new VerifiedRetainedStream(lease, source.CanonicalPath);
         }

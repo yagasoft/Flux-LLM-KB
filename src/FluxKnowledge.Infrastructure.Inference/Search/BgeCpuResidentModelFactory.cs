@@ -19,8 +19,13 @@ public static class BgeCpuResidentModelFactory
         Func<CancellationToken, Task<IDisposable>> acquireOwner, CancellationToken cancellationToken, int rerankerShards)
         => LoadAsync(stores, acquireOwner, cancellationToken, rerankerShards, RerankerThreads);
 
-    public static async Task<CpuResidentPassageLoad> LoadAsync(BgeGpuModelStores stores,
+    public static Task<CpuResidentPassageLoad> LoadAsync(BgeGpuModelStores stores,
         Func<CancellationToken, Task<IDisposable>> acquireOwner, CancellationToken cancellationToken, int rerankerShards, int rerankerThreads)
+        => LoadAsync(stores, acquireOwner, cancellationToken, rerankerShards, rerankerThreads, FreePhysicalBytes);
+
+    internal static async Task<CpuResidentPassageLoad> LoadAsync(BgeGpuModelStores stores,
+        Func<CancellationToken, Task<IDisposable>> acquireOwner, CancellationToken cancellationToken, int rerankerShards,
+        int rerankerThreads, Func<long?> freePhysicalBytes)
     {
         if (rerankerShards is not (1 or DefaultRerankerShards)) throw new ArgumentOutOfRangeException(nameof(rerankerShards));
         if (rerankerThreads is not (1 or RerankerThreads)) throw new ArgumentOutOfRangeException(nameof(rerankerThreads));
@@ -34,11 +39,14 @@ public static class BgeCpuResidentModelFactory
         {
             for (var index = 0; index < LaneCount; index++)
             {
-                if (FreePhysicalBytes() is not long free || free < (16 + (LaneCount - index) * laneHeadroom) * Gib)
+                if (freePhysicalBytes() is not long free || free < (16 + (LaneCount - index) * laneHeadroom) * Gib)
+                {
+                    if (index == 0) throw new CpuWarmupMemoryUnavailableException();
                     throw new BgeInferenceException("cpu-search-memory-unavailable");
+                }
                 lanes.Add(await OpenLaneAsync(stores, rerankerShards, rerankerThreads, cancellationToken).ConfigureAwait(false));
             }
-            if (FreePhysicalBytes() is not long remaining || remaining < 16 * Gib)
+            if (freePhysicalBytes() is not long remaining || remaining < 16 * Gib)
                 throw new BgeInferenceException("cpu-search-memory-unavailable");
             return new CpuResidentPassageLoad(lanes, owner);
         }

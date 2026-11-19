@@ -13,10 +13,20 @@ internal sealed class LocalSourceFileCapture(
 {
     private int _disposed;
     private int _consumed;
+    // Classification is public mutable input; retention owns a separate copy
+    // of the bytes whose digest was completed before this capture was exposed.
+    private readonly byte[]? _retentionBuffer = snapshot.HasFullBoundedBuffer
+        ? snapshot.ClassificationBuffer.ToArray() : null;
 
     public SourceDiscoveredFile Snapshot { get; } = snapshot;
     internal WindowsSourcePathAccess.SourceReadLease Source { get; } = source;
     internal FileStream Input { get; } = input;
+
+    internal Stream? OpenRetentionBuffer()
+    {
+        ObjectDisposedException.ThrowIf(Volatile.Read(ref _disposed) != 0, this);
+        return _retentionBuffer is null ? null : new MemoryStream(_retentionBuffer, writable: false);
+    }
 
     internal void BeginRetention()
     {

@@ -46,7 +46,7 @@ Already retained revisions and terminal receipts must remain interpretable.
 The observable path is source registration → discovery → retained revision →
 durable work → extraction/normalisation → index generation → publication →
 search and operator status. Source originals are read only by authorised ingress.
-Downstream processors consume checksum-verified retained bytes bound to the
+Downstream processors consume protected retained bytes bound to the
 revision and processor capability.
 
 SQL transactions establish work ownership before dispatch or presentation.
@@ -54,6 +54,38 @@ Leases, generations and operation receipts reject duplicate and stale completion
 Local wake signals and watcher events are hints; reconciliation rereads durable
 state. Retained processor completion wakes source registration immediately, with
 a periodic reconciliation fallback for missed signals.
+
+Source deletion discovers GPU task ownership through the request's pipeline
+record, including mismatched foreign parents. It subtracts already proven local
+tasks in memory and checks remaining task IDs in batches against the unchanged
+supersession and native-cleanup proof. Its artifact inventory computes sharing
+in one SQL query and preserves exact path/hash/length identities in memory.
+Both checks retain the existing serializable transaction and publication fence.
+After a manifest detaches, shared-segment reference checks use batches of at most
+256 supplied IDs. SQL preserves its comparison semantics and returns the supplied
+IDs; unshared segments still pass the same target, pin, state and native-owner checks.
+Source-owned manifest retirement handles at most 16 exact targets per page. It
+commits retirement intents before a fresh, non-retrying file-reclamation phase.
+Each phase checks unconfirmed artifact references once for the page, using a
+bounded comparison tree ordered by the actual text-column collation. This
+preserves exact SQL equality without repeatedly comparing every document body
+against every target or hashing whole bodies. Every physical deletion rechecks
+the source lease, target and original SQL-session ownership. Cleanup receipts
+commit together; a lost acknowledgement reuses the committed reclamation result.
+An already committed retirement with no memberships skips repeated marking.
+The reclaim phase handles at most 16 dependent segments before finishing ready
+manifests, selecting segments through both their retirement operations and exact
+source targets. It keeps generation pin checks setwise for the page, including
+embedding requests and recovery references. The proof belongs to its original
+context and transaction; native owners and source/session authority are still
+checked separately before every physical deletion. A blocked owner never grants
+an extra seventeenth segment attempt.
+Classified SQL timeout, deadlock or lock-timeout failures while acquiring the
+publication fence defer retirement before file authority is granted. Caller
+cancellation and other SQL failures still propagate; no file operation is retried.
+Source status joins the unique earlier-policy eligibility IDs within its original
+SQL statement. Summary and detail retain the same complete proof and categories,
+including Deleting roots, without repeating a correlated assessment for each file.
 
 ZIP and TAR processing enforce archive bounds and member path rules. Office Open
 XML extraction produces one logical UTF-8 result for the original DOCX/XLSX/PPTX.
@@ -64,7 +96,7 @@ element-count ceiling; the separately versioned Visio parser keeps its 64 MiB
 part and two-million-element budgets. Total XML expansion remains 512 MiB with a
 finite depth limit; compression ratios apply to XML opened for extraction, not unopened
 binary media. ZIP expansion permits two nested ZIP levels with one cumulative
-entry and expansion budget. Media metadata uses a checksum-verified retained
+entry and expansion budget. Media metadata uses a protected retained
 stream up to 1 GiB, with a separate 96 MiB parser-read budget; it does not decode
 or publish the media payload.
 
@@ -133,6 +165,23 @@ owner and honour existing pending scopes; their local gate is confined to exact
 request/branch/dispatch selectors and never starts a sibling sweep.
 Cleanup remains available while source admission is closed. Ordinary publication
 reads follow durable owner suppression and continue to expose paused roots.
+
+Opening source admission publishes a durable GPU scheduler wake after the exact
+root configuration is admitted. Recovery shares acknowledgement state across
+scopes and retries failed wake writes, including when admission is already open.
+Clearing a pending removal scope commits its scheduler wake in the same transaction.
+These triggers resume an existing queue after a no-candidate startup decision;
+unchanged recovery passes do not repeatedly trigger admission.
+If source admission changes after an outbox claim, the exact live job and dispatch
+can be deferred together without waiting for their leases to expire. This route
+requires a source-linked record and never resets GPU-owned work.
+
+Temporary database availability failures defer source reconciliation and retained
+processor hosting with a cancellable backoff. Their failed scopes are disposed;
+the next iteration rechecks the deployment hold and durable claims. SQL timeouts
+or pre-login failures therefore do not restart the whole app and reload its models.
+Unrecognised database failures and unrelated programming errors remain faults. This
+hosted-loop policy does not expand permission to retry individual stage mutations.
 
 Exact same-path/hash/length filesystem replacements can reuse one immutable logical
 revision only under owned, single-link, no-follow physical capture. Inventory and
@@ -208,7 +257,7 @@ are RDL, INI, HTML, NDJSON, VTT and URL; content is indexed as text and never
 executed or followed. Applying revised defaults to an existing root is explicit.
 Previously retained policy refusals are re-evaluated one exact item at a time
 through `policy_reprocess`, with a current root revision, unique unsuppressed
-physical binding and checksum proof. Immutable source classification, original
+physical binding and retained-file length/path checks. Immutable source classification, original
 terminal attempts and the last good publication stay intact. Current status
 follows the versioned successor while history remains available.
 An unexecuted earlier-format text activity against an older `Unknown` or `DeferredPolicy`
@@ -247,17 +296,17 @@ physical observations. Unavailable siblings are never treated as deleted, and
 retained bytes or persisted discovery JSON alone cannot authorise suppression.
 Ordinary files under an existing `FollowLinks` setting still ingest through the
 same strict no-follow reader, without this additional suppression authority.
-Same-content replacements with a different physical identity remain unresolved
-rather than relabelling immutable history. The handle prevents writes and renames;
+Same-size/date replacements may reuse their existing logical revision while
+inventory records the current physical identity and clears file-specific journal
+and seal facts. Immutable ingestion history remains unchanged. The handle prevents writes and renames;
 hard-link and access-control changes are checked but are not atomically excluded
 with the SQL commit.
 
 The source detection policy is `events-weekly-metadata-v1`. Journal and watcher
-file events drive ingestion, including identified events with unchanged metadata.
-The weekly fallback compares membership, physical identity, size and modification
-time. Quiet unchanged files are reused without source or retained assurance reads,
+file events select paths for size/date checks. The weekly fallback compares
+membership, size and modification time. Quiet unchanged files are reused without source or retained assurance reads,
 including missing seals, pause/resume and journal recovery. Same-size edits with
-preserved timestamps can be missed without events; silent corruption need not be
+preserved timestamps can be missed even after events; silent corruption need not be
 automatically detected. These are accepted freshness limits. Normal ingestion,
 deduplication and publication retain their hashes and ownership/access safeguards.
 
@@ -267,18 +316,19 @@ manifests, invalidates verification-only work under its physical native-reader
 slot, and adopts the weekly interval for enabled and paused non-deleting roots.
 Specific pending file events and historical receipts remain intact. Journal
 retry and warnings continue independently of scan scheduling. Only explicit
-`source_sync` with `fullContent: true` requests a full content rescan. See
+`source_sync` with the compatibility `fullContent: true` field requests a full metadata
+reconciliation; it no longer forces unchanged content reads. See
 [the source update policy](design/low-disk-source-updates.md).
 
-Owned filesystem scans carry the discovery hashing handle directly into retained
+Owned filesystem and Git scans carry the discovery hashing handle directly into retained
 publication and SQL convergence. The final snapshot already contains scan
 ownership and keeps its object identity through the receipt. Existing retained
-blobs receive their own length/checksum verification without a second original
-content pass. Missing blobs keep the streaming copy/hash and verified atomic
-publication path, using the same held source handle. Captures are consumed once,
+blobs receive length/path checks without a content pass. Missing blobs reuse the
+capture digest and bounded discovery buffer, or copy the held stream without a
+second hash. Captures are consumed once,
 processed sequentially and released before activity planning, with cancellation
-and iterator-disposal backstops. Preview, Git inventories and unowned snapshot
-callers retain their existing contracts and source revalidation.
+and iterator-disposal backstops. Git opening/closing inventory authority remains
+mandatory. Preview and unowned snapshot callers retain source revalidation.
 
 Physical revisions may retain a history parent. Retained policy admission and
 exact settled-document recovery use origin and unique current binding to identify
@@ -305,13 +355,50 @@ index members are preserved. Cleanup uses bounded, no-follow application paths.
 Source originals and model-store files are never deletion targets.
 
 Deletion commits survivor activation and exact cleanup targets before removing
-historical memberships. `cleanup-memberships` removes at most 1,000 rows for one
-owned scalar vector ID per transaction; the cursor advances only after that
-vector is empty. Committed row counts, the last committed lease token and the
+historical memberships. `cleanup-memberships` checks at most 1,000 owned vectors
+and removes at most 16,000 membership rows per transaction. The separate row
+ceiling amortises deletion over historical generation fan-out without enlarging
+the vector inspection page. It checks withdrawal
+and retirement across the entire page before mutation. The cursor advances only
+through the fully cleared prefix, including gaps and vectors with no memberships.
+The generation-retirement guard uses one typed JSON vector page and a query-local
+row-goal hint. Within the same SQL batch and transaction it collects unique
+referenced generation IDs before checking active/retired state. Every page
+membership remains examined; generation status need not be looked up again for
+every historical membership. The transient ID set is rebuilt for each unit.
+High-history qualification covers 32,768 unretired control generations, over a
+million owned and foreign memberships, both cached-plan cardinality orders and
+protected memberships at the end of a full page.
+Retired membership pruning uses fresh scalar active/uncertain-execution and
+native-cleanup checks in both request/task ownership directions. It retains the
+query/publication fences, exact lease and Deleting-root checks, whole-page
+withdrawal/current/segment/retirement proof and behind-cursor refusal. Full
+historical ownership, cross-root and shared-batch checks remain mandatory before
+every vector/chunk/graph purge and native-file reclamation. A phase transition
+cannot fall through to payload deletion in the same unit. Qualification also
+covers 217,685 historical tasks across 20,001 jobs for both OCR and embedding.
+Committed row counts, the last committed lease token and the
 resume phase survive cancellation, ambiguous commit acknowledgement and restart.
-`purge-records` refuses late memberships before removing the owned canonical graph.
+Initial withdrawal updates at most 4,096 vectors per leased transaction and
+persists its cursor with the receipt; a live vector behind that cursor prevents
+cutover. `purge-records` refuses late memberships, unretired checkpoints, shared
+batches, active capacity and unconfirmed native cleanup before deleting any
+payload page. It removes at most 4,096 vectors or chunks per transaction while
+retaining record/request/generation ownership anchors until final graph removal.
+Chunk deletion cascades to its derived window decision.
 The existing 15-minute claim expiry remains the upper wait for recovery of an
 uncommitted claim whose process disappeared; expiry never proves native cleanup.
+
+The stopped OCR maintenance path has a separate version-2 cleanup-only mode for
+an exact legacy uncertain task belonging to a Deleting source. It pins the current
+80-migration history, schema, root/configuration, request/task/job row versions,
+single-member batch, dispatch, admission, owner and unowned capacity slot. Fresh
+OS/driver verification under publication/scheduler locks records physical cleanup
+evidence while preserving task/job state and stored results. It performs no DDL,
+completion or requeue. Replay binds the complete input and committed proof.
+Its incremental release uses candidate Web/Outlook and preserved helper pins for
+start/hold-release admission. Private maintenance evidence remains outside the
+canonical recovery tree; the rollback packet uses the existing ordinary format.
 
 In `cleanup-files`, pending-target reads are read-only. The coordinator acquires
 the existing generation-query or content-hash publication gate, rereads authority
@@ -321,6 +408,20 @@ stale SQL receipt cannot change the new owner's operation. Shared blobs remain
 captured targets until a gated preservation/removal receipt decides their outcome.
 Attention retains its exact resume phase and safe reason; the UI shows committed
 membership counts and last progress without estimating a completion percentage.
+
+Root ownership queries keep revision, record and job sets on SQL Server; exact
+embedding/OCR bindings and archived cleanup proofs remain required. Generation
+metadata referenced by any embedding request survives empty-index cutover until
+ordinary graph cleanup removes that request. Pending file receipts use the
+operational `IX_SourceDeletionCleanupItems_PendingQueue` index on operation,
+state, storage kind and ID. Completed receipts therefore do not accumulate in
+each pending lookup. The unique path index and per-file gated authority reread
+remain. Fresh explicit bootstrap installs the same declaration as the typed
+`-EnsureSourceDeletionPendingQueueIndex` incremental deployment option. This
+performance index changes neither EF migration history nor application readiness.
+Deployment verifies the exact database/history/index state, records a durable
+attempt and reconciles uncertain outcomes without replay; failure retains the
+stopped hosts and deployment hold for reviewed forward recovery.
 
 An expired lease alone does not prove that a Visio process has stopped. Unknown
 process cleanup retains the deletion fence. Failed terminal work is not silently
@@ -366,10 +467,14 @@ start intent recovery proceeds forward under a retained admission hold.
 ## Offline model boundary and English OCR
 
 The model gate resolves a bounded local manifest only against `J:\Models`, pins
-ancestors and files with no-follow handles, verifies immutable identities,
-SHA-256 and byte lengths, and holds read-only handles for the lease. Missing,
-corrupt, offline, recall-required or redirected artifacts refuse execution.
-Verification receipts remain in the model store. There is no downloader or
+ancestors and files with no-follow handles, checks declared identities and byte
+lengths, and holds read-only handles for the lease. Normal startup/load does not
+hash model payloads; same-length corruption may reach the native loader. Missing,
+unavailable, recall-required or redirected artifacts refuse execution. The
+existing metadata receipt records zero checksum-verified bytes and does not claim
+integrity verification. `models verify` retains its command name for compatibility
+and performs these metadata checks. Acquisition integrity remains a separate,
+explicitly authorised activity under `J:\Models`. There is no downloader or
 fallback cache in normal model loading.
 
 Provisioned English OCR uses PaddleOCR-VL 1.6 with layout and page-orientation
@@ -405,8 +510,21 @@ the current scope and limitations.
 
 Outlook capture uses a separately provisioned logged-in COM host. Its schedules,
 leases, spool manifests and captured revisions use the native durable stores.
+The dashboard's **Verify and enable** action saves the profile disabled and queues
+a targeted folder lookup in the same SQL transaction. The existing desktop host
+can complete the lookup after the dashboard closes. A successful, current
+verification selects the folder and enables capture atomically. Pausing, removing
+or resaving the profile invalidates older verification requests. The requested
+path stays in private SQL state and is cleared when the request terminates.
 Normal application startup does not activate Outlook or change desktop tasks.
 Credentials, mail contents and spool data are private runtime material.
+An explicitly bound Outlook profile publishes committed mail bundles into a
+dedicated ordinary filesystem source. It stages searchable Markdown and original
+attachments outside the watched tree, records the exact staged files and legacy
+withdrawal in SQL, and atomically promotes the bundle. The normal source pipeline
+owns discovery, extraction, OCR and search. The private spool keeps the capture
+receipts, original artifacts and cursor evidence. See
+[Outlook as a watched source](design/outlook-watched-source.md) for cutover and rollback.
 
 ## Retrieval and integration surfaces
 
@@ -415,6 +533,38 @@ The installed hybrid passage runtime combines SQL Full-Text, learned BGE
 embeddings, USearch and a cross-encoder reranker for source retrieval. The
 deterministic token-hash provider remains the non-hybrid baseline. SQL
 publication eligibility controls which revision can appear.
+
+Passage validation reuses computed body/search-input digests only for exactly
+unchanged text and context, in a bounded process cache; disclosure and current
+source ownership are checked separately on every request. Deduplication compares
+header/body strings directly. Protected pagination tokens contain the canonical
+query and scope for direct comparison rather than custom hashes. Previously
+issued version 1 tokens retain read-only compatibility verification; mutation
+confirmations, idempotency and framework token protection are unchanged.
+
+Rebuildable ANN projection files are checked by contained path, length, native
+format and structural metadata rather than full-file checksums. New segment
+descriptors retain the schema's 64-character checksum field with an all-zero
+unchecked marker; membership identities remain functional metadata hashes. Older
+projections remain readable. A rollback binary may refuse a newly written
+unchecked projection and need a derived-index rebuild from canonical SQL; keep
+the reviewed admission hold until that recovery is healthy.
+
+Retirement records a bounded file-identity intent before unlinking app-owned
+projection children. A fresh-process retry keeps those original identities and
+absences, so it can finish interrupted deletion without adopting replacement
+files. Incomplete intents and unexpected children refuse deletion. This is
+target ownership metadata, not a payload checksum or background integrity scan.
+
+Source list pages fetch only the latest finished nonverification scan's error
+count per root. Detail reads fetch the current state and latest finished counts
+and audit evidence, without namespace manifests. Status queries evaluate earlier-format
+text eligibility once per activity rather than repeating its correlated proof
+in each projected field.
+Both source views correlate that assessment to the activity's primary key.
+The deferred-owner lookup uses revision and state: a pending activity cannot
+also be its own deferred owner. This avoids the repeated table-scan plan seen
+on mixed retained history without changing assessment or recovery authority.
 
 The eleven native tools, their REST routes, envelopes, cursors and CLI verbs are
 specified in [integrations](integrations.md). Mutations require a preview-bound
@@ -452,9 +602,25 @@ citation validation remains fenced. The native view cache retains at most 8 GiB
 of segment file lengths, with pressure, retirement and shutdown eviction; mapped
 length is not a RAM measurement. Model-free background preparation owns its own
 lease. It verifies every segment member before excluding IDs whose complete
-context-zero disclosure window cannot be constructed. SQL materialises bounded
-windows once; only metadata and an availability flag leave SQL. The flag grants
-no disclosure permission. Fresh publication checks, credential/proof checks and
+context-zero disclosure window cannot be constructed. Canonical indexing and
+corpus rebuild preparation persist that decision once per chunk, including false
+results, bound to canonical revision/hash/length, chunk revision/hash/boundaries
+and the exact disclosure-window rule version. Restart preparation reads these
+metadata bindings and flags without copying canonical windows to tempdb.
+Missing or stale decisions report warming. With a registered writer they request
+bounded, resumable backfill; read-only staging neither registers that worker nor
+writes revisit state from retrieval.
+Deleting sources are excluded at capture and commit and never require flags to
+prepare a surviving projection. Backfill commits at most 128 chunks per unit,
+retains at most four bounded canonical bodies within 16 MiB, and uses bounded
+windows for larger documents. Progress and revisit hints live in SQL.
+Range discovery and exact ID validation use distinct SQL shapes; the commit
+recheck reads only its bounded ID set while holding the publication fence.
+Replacing canonical text or chunks invalidates proofs and the artifact cache stamp in
+the same publication-fenced transaction; new chunks receive new decisions.
+Preparation captures flags/stamps consistently, includes the rule version in
+cache identity and checks captured artifact versions at each ANN key selection.
+The flag grants no disclosure permission. Fresh publication checks, credential/proof checks and
 final citation reads remain mandatory. A request allows at most 250 ms for incremental preparation on its original
 captured generation, then reports explicit warming degradation; it never loads
 the full projection inline. Exact duplicate search inputs are grouped before
@@ -628,8 +794,8 @@ those leases are released. DirectML uses sequential execution with memory patter
 disabled. Guard checks, the cached CPU reference regression and GPU numeric
 parity passed. An earlier 50-passage trace took 9.954 seconds, including 6.650
 seconds of model loading; it is historical diagnostic evidence, not the final
-p95. The deployed process-held verified-file cache retains protected,
-hash-verified model-file handles to avoid repeated hashing. It does not retain
+p95. The process-held local-file cache retains protected,
+metadata-checked model-file handles. It does not retain
 native GPU sessions between requests. The corrected GPU-first/CPU-fallback
 runtime passed the full-search staging latency gate described above.
 
@@ -764,7 +930,14 @@ transaction-owned execution. Successful native group payloads are fetched in
 pages of at most 128 chunks, then hashed in each request's original input order.
 Confirmation binding retains SQL request ordering. These I/O changes retain the
 complete source, sibling-result, ownership, cleanup and publication proofs on
-every required gate; they introduce no cross-call cache or schema change.
+every required gate. Ordinary partial embedding recovery now reuses persisted
+validation markers in the existing GPU operation receipt table. Markers bind the
+exact source/draft/runtime, ordered inputs and vector/request/task/batch/dispatch
+rowversions and stored digests. An unchanged group skips vector-body reads; a miss
+validates payload checksum, shape, norm and result digest before atomically saving
+its marker. Ownership, cleanup, unresolved-result and sibling guards run every
+time. Earlier-format/CPU work, final publication and external confirmation proofs retain
+their full checks. No schema migration or process-local cache is required.
 
 Text normalisation preserves well-formed Unicode noncharacters. Windows FormKC
 can reject these valid UTF-8 values; the shared normaliser retains them unchanged
@@ -1116,9 +1289,12 @@ index or schema migration is required.
 
 One process-wide coordinator publishes immutable samples for the trusted local
 operator scope. Scoped presentation retains source filters and attention state.
-It coalesces simultaneous reads, bounds SQL attempts to two seconds, separates
-caller cancellation from shared work, and refreshes every ten seconds while
-subscribers exist. Data events invalidate the displayed sample and preserve
+It coalesces simultaneous reads and gives an Overview refresh five seconds for
+scope setup, all SQL attempts and their retries, and snapshot preparation.
+The SQL reader enforces the same budget when called directly. Caller
+cancellation only stops that caller's wait. The coordinator waits for
+cancellation cleanup before releasing its in-flight slot and refreshes every
+ten seconds while subscribers exist. Data events invalidate the displayed sample and preserve
 events received during a read for one follow-up; connection hints reuse a fresh
 sample to avoid duplicate hydration reads. Manual refresh joins existing work.
 Prerendering streams the loading shell and reuses a warm sample immediately.
@@ -1130,8 +1306,11 @@ rowversion fence and deletion publication/operation locks. Intervening versioned
 writes or pending transactions reject that sample. Immutable evidence and graph
 deletion rely on their existing atomic versioned companion writes; this mode is
 not snapshot isolation for arbitrary direct SQL. The shared cache does not make
-its rejected samples usable. Both modes retain the two-second deadline, including
-coordination and execution-strategy retry delays.
+its rejected samples usable. Both modes use the same Overview budget.
+Per-root text size limits are read as scalars inside the Overview's consistency
+boundary. The bulk current-activity query applies the exact eligibility proof,
+and the projection applies the captured limit to each matching file. This keeps the root configuration histogram out of the bulk activity plan.
+File drilldowns retain their independent two-second deadline.
 
 Attention detail remains independently read-only and paged in batches of 25,
 with its own loaded time, source scope and existing conservative fence.

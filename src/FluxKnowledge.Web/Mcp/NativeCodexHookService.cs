@@ -49,7 +49,8 @@ public sealed class NativeCodexHookService(
     ICodexHookAuditWriter? auditWriter = null,
     IStatusEventPublisher? statusPublisher = null,
     TimeProvider? timeProvider = null,
-    ICodexPromptContextService? promptContext = null)
+    ICodexPromptContextService? promptContext = null,
+    IKnowledgeStore? knowledgeStore = null)
 {
     private const int MaximumSummaryCharacters = 8_000;
     private const string ActorSurface = "codex-hook";
@@ -172,6 +173,7 @@ public sealed class NativeCodexHookService(
         string? sessionId = null;
         string? turnId = null;
         string? summary = null;
+        string? cwd = null;
         try
         {
             sessionId = RequiredText(payload, "session_id", 256);
@@ -184,12 +186,17 @@ public sealed class NativeCodexHookService(
                 return new NativeCodexHookResponse(true);
             }
             phase = "mutation_build";
+            Guid? workspaceRootId = null;
+            if (payload.TryGetProperty("cwd", out var cwdValue) && cwdValue.ValueKind == JsonValueKind.String)
+                cwd = cwdValue.GetString();
+            if (knowledgeStore is not null && cwd is not null)
+                workspaceRootId = await knowledgeStore.ResolveCodexWorkspaceAsync(cwd, cancellationToken).ConfigureAwait(false);
             var mutation = new KnowledgeMutation(
                 "note_create",
                 null,
                 CaptureTitle(sessionId, turnId),
                 summary,
-                null, null, null, null, null, null);
+                null, null, null, null, null, null, CodexWorkspaceRootId: workspaceRootId);
             phase = "preview";
             var preview = await _facade.PreviewAsync("knowledge", mutation, ActorSurface, cancellationToken).ConfigureAwait(false);
             phase = "commit";
@@ -213,7 +220,7 @@ public sealed class NativeCodexHookService(
                 "Native Codex Stop persistence failed at {Phase} ({Classification}).",
                 phase,
                 FailureClassification(exception));
-            throw new NativeCodexHookFailureException(phase, [sessionId, turnId, summary], exception);
+            throw new NativeCodexHookFailureException(phase, [sessionId, turnId, summary, cwd], exception);
         }
     }
 

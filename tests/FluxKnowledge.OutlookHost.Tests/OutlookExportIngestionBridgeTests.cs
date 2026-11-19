@@ -1,3 +1,4 @@
+using System.Text.Json.Nodes;
 using FluxKnowledge.Application.Contracts;
 using FluxKnowledge.Application.Operations;
 using FluxKnowledge.Domain.Outlook;
@@ -39,6 +40,81 @@ public sealed class OutlookExportIngestionBridgeTests
         Assert.Equal(1, ingestion.Requests[1].FencingToken);
         Assert.Equal(2, ingestion.Requests[2].FencingToken);
         Assert.Equal(second.Work.Claim.CatchUpId, ingestion.Requests[2].CatchUpId);
+    }
+
+    [Fact]
+    public async Task Promoted_ready_export_retains_private_metadata_through_rebind()
+    {
+        using var spool = new TemporaryDirectory();
+        var ingestion = new FakeReadyIngestionService { RejectedFencingToken = 1 };
+        var bridge = new OutlookExportIngestionBridge(
+            ingestion,
+            PersistedOutlookSpoolRootPolicy.CreateForIsolatedTests(spool.Path));
+        var item = Item();
+        var first = Work(spool.Path, Guid.NewGuid(), 1);
+        var second = Work(spool.Path, Guid.NewGuid(), 2);
+        byte[] attachmentContent = [0x00, 0x01, 0xff];
+        var payload = Payload() with
+        {
+            Attachments = [new OutlookAttachmentPayload("../private name.pdf", "application/pdf", attachmentContent)],
+            Subject = "Captured subject",
+            Sender = "Example sender"
+        };
+
+        await Assert.ThrowsAsync<OutlookReadyExportLeaseException>(async () =>
+            await bridge.ExportAndIngestAsync(first.Work, first.Folder, item, payload, CancellationToken.None));
+        Assert.True(await bridge.ExportAndIngestAsync(
+            second.Work, second.Folder, item, Payload(), CancellationToken.None));
+
+        var layout = new OutlookSpoolLayout(spool.Path);
+        var exportId = Assert.Single(ingestion.ExportIds.Distinct());
+        var ready = layout.GetReadyExportDirectory(exportId);
+        var manifest = await layout.ReadReadyManifestAsync(exportId, CancellationToken.None);
+        Assert.Equal("Captured subject", manifest.Subject);
+        Assert.Equal("Example sender", manifest.Sender);
+        Assert.Equal(CursorUtc, manifest.ReceivedAtUtc);
+        Assert.Equal(TimeSpan.Zero, manifest.ReceivedAtUtc?.Offset);
+        Assert.Equal(CursorUtc.AddMinutes(1), manifest.Recovery.CursorUtc);
+        Assert.Equal(2, manifest.Recovery.FencingToken);
+
+        var attachment = Assert.Single(manifest.Attachments);
+        Assert.Equal("../private name.pdf", attachment.OriginalFileName);
+        Assert.Equal(Path.Combine("attachments", "0000.bin"), attachment.RelativePath);
+        Assert.Equal(attachmentContent, await File.ReadAllBytesAsync(Path.Combine(ready, attachment.RelativePath)));
+        Assert.False(File.Exists(Path.Combine(ready, "private name.pdf")));
+    }
+
+    [Fact]
+    public async Task Ready_manifest_reads_legacy_exports_with_no_metadata_fields()
+    {
+        using var spool = new TemporaryDirectory();
+        var ingestion = new FakeReadyIngestionService();
+        var bridge = new OutlookExportIngestionBridge(
+            ingestion,
+            PersistedOutlookSpoolRootPolicy.CreateForIsolatedTests(spool.Path));
+        var item = Item();
+        var work = Work(spool.Path, Guid.NewGuid(), 1);
+        var payload = Payload() with
+        {
+            Attachments = [new OutlookAttachmentPayload("example.txt", "text/plain", "example"u8.ToArray())]
+        };
+        Assert.True(await bridge.ExportAndIngestAsync(work.Work, work.Folder, item, payload, CancellationToken.None));
+
+        var exportId = Assert.Single(ingestion.ExportIds);
+        var layout = new OutlookSpoolLayout(spool.Path);
+        var manifestPath = Path.Combine(layout.GetReadyExportDirectory(exportId), "manifest.json");
+        var legacy = JsonNode.Parse(await File.ReadAllTextAsync(manifestPath))!.AsObject();
+        Assert.False(legacy.ContainsKey("subject"));
+        Assert.False(legacy.ContainsKey("sender"));
+        Assert.True(legacy.Remove("receivedAtUtc"));
+        Assert.True(legacy["attachments"]![0]!.AsObject().Remove("originalFileName"));
+        await File.WriteAllTextAsync(manifestPath, legacy.ToJsonString());
+
+        var manifest = await layout.ReadReadyManifestAsync(exportId, CancellationToken.None);
+        Assert.Null(manifest.Subject);
+        Assert.Null(manifest.Sender);
+        Assert.Null(manifest.ReceivedAtUtc);
+        Assert.Null(Assert.Single(manifest.Attachments).OriginalFileName);
     }
 
     [Fact]

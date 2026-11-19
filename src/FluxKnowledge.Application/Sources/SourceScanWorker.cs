@@ -56,9 +56,9 @@ public sealed class SourceScanWorker(
                 try
                 {
                     var metadata = new SourceArtifactMetadata(file.ContentSha256, "application/octet-stream", file.ByteLength);
-                    var receipt = await (capture is null || sourceRoot.DiscoveryMode == SourceDiscoveryMode.GitTracked
-                        ? artifactStore.PutFileAsync(file, metadata, cancellationToken)
-                        : ((ICapturedSourceArtifactStore)artifactStore).PutCapturedFileAsync(capture, metadata, cancellationToken)).ConfigureAwait(false);
+                    var receipt = await (capture is not null && artifactStore is ICapturedSourceArtifactStore capturedStore
+                        ? capturedStore.PutCapturedFileAsync(capture, metadata, cancellationToken)
+                        : artifactStore.PutFileAsync(file, metadata, cancellationToken)).ConfigureAwait(false);
                     publicationLease = receipt.PublicationLease;
                     revisionId = await scanStore.ConvergeRevisionAndArtifactAsync(sourceRoot, file, receipt, cancellationToken).ConfigureAwait(false);
                 }
@@ -201,7 +201,7 @@ public sealed class SourceScanWorker(
         SourceRootConfiguration root, SourceScanRequest request, bool incremental, [EnumeratorCancellation] CancellationToken cancellationToken)
     {
         if (request.Lease is { } ownership && enumerator is ICapturingSourceFileEnumerator capturing &&
-            (root.DiscoveryMode == SourceDiscoveryMode.Filesystem && artifactStore is ICapturedSourceArtifactStore ||
+            (artifactStore is ICapturedSourceArtifactStore ||
              root.DiscoveryMode == SourceDiscoveryMode.GitTracked && incremental))
         {
             await foreach (var capture in capturing.EnumerateCapturedAsync(root, new(request.Id, ownership), cancellationToken).ConfigureAwait(false))

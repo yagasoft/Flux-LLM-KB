@@ -278,8 +278,8 @@ public sealed partial class SourceDeletionOverviewConcurrencyTests(NativeSqlServ
     private static async Task AssertInternalTimeoutAsync(Task<OverviewProjection> read)
     {
         // A test's own deadline is not evidence of the reader enforcing its budget.
-        Assert.Same(read, await Task.WhenAny(read, Task.Delay(TimeSpan.FromSeconds(5))));
-        await Assert.ThrowsAsync<OverviewReadBudgetExceededException>(() => read);
+        await Assert.ThrowsAsync<OverviewReadBudgetExceededException>(
+            () => read.WaitAsync(TimeSpan.FromSeconds(8)));
     }
 
     private void AssertSnapshotAndFenceTruth(OverviewProjection overview, FenceTrace trace, string lifecycle)

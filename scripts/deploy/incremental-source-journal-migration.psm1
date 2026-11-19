@@ -1,5 +1,7 @@
 Set-StrictMode -Version Latest
 Import-Module (Join-Path $PSScriptRoot 'incremental-vector-publication-metadata-migration.psm1') -ErrorAction Stop
+Import-Module (Join-Path $PSScriptRoot 'incremental-source-deletion-pending-queue-index.psm1') -ErrorAction Stop
+Import-Module (Join-Path $PSScriptRoot 'incremental-passage-window-eligibility-migration.psm1') -ErrorAction Stop
 
 function Get-SourceJournalMigrationContract {
     [pscustomobject]@{
@@ -104,9 +106,14 @@ function Get-SourceJournalDatabaseState {
                 if(!$schema){throw 'journal-schema-observation-missing'}
                 $null=$schema|ConvertFrom-Json
                 $vectorIndexSha256=Get-VectorPublicationMetadataIndexSha256 -Connection $connection -Transaction $transaction
+                $windowSchemaSha256=Get-PassageWindowEligibilitySchemaSha256 -Connection $connection -Transaction $transaction
+                $queueIndexSha256=Get-SourceDeletionPendingQueueIndexSha256 -Connection $connection -Transaction $transaction
+                $outlookSchemaSha256=if($history.Count -ge 80){ Get-OutlookWatchedSourceSchemaSha256 -Connection $connection -Transaction $transaction }
+                $codexWorkspaceSchemaKind=if($history.Count -ge 81){ Get-CodexWorkspaceNotesSchemaKind -Connection $connection -Transaction $transaction }
                 $transaction.Commit()
                 [pscustomobject]@{Identity=$identity;History=$history.ToArray();CanAlter=$canAlter;SchemaSha256=(Get-SourceJournalValueHash $schema);
-                    VectorPublicationIndexSha256=$vectorIndexSha256}
+                    VectorPublicationIndexSha256=$vectorIndexSha256;WindowEligibilitySchemaSha256=$windowSchemaSha256;QueueIndexSha256=$queueIndexSha256;
+                    OutlookSchemaSha256=$outlookSchemaSha256;CodexWorkspaceSchemaKind=$codexWorkspaceSchemaKind}
             }finally{$command.Dispose()}
         }finally{$transaction.Dispose()}
     }finally{$connection.Dispose()}
@@ -116,6 +123,39 @@ function Assert-SourceJournalSchema {
     param([Parameter(Mandatory)]$DatabaseState,[switch]$AllowBaseline)
     $contract=Get-SourceJournalMigrationContract;$history=@($DatabaseState.History)
     $metadata=Get-VectorPublicationMetadataMigrationContract
+    $window=Get-PassageWindowEligibilityMigrationContract
+    $outlook=Get-PassageWindowEligibilityMigrationContract -Outlook
+    $codex=Get-PassageWindowEligibilityMigrationContract -CodexWorkspace
+    $codexObservation=$DatabaseState.PSObject.Properties['CodexWorkspaceSchemaKind']
+    if($history.Count -eq 82 -and $history[-1] -ceq $codex.Target){
+        $prefix=@($history[0..80])
+        if(!$codexObservation -or $codexObservation.Value -cne 'New' -or
+            (Get-SourceJournalValueHash ($prefix -join "`n")) -cne $codex.PriorHistorySha256){
+            throw 'journal-schema-codex-workspace-successor-invalid'
+        }
+        $history=$prefix
+    }elseif($history.Count -eq 81 -and $codexObservation -and $codexObservation.Value -cne 'Old'){
+        throw 'journal-schema-unrecorded-codex-workspace-notes'
+    }
+    if($history.Count -eq 81 -and $history[-1] -ceq $outlook.Target){
+        $prefix=@($history[0..79])
+        $observation=$DatabaseState.PSObject.Properties['OutlookSchemaSha256']
+        if(!$observation -or $observation.Value -cne $outlook.OutlookNewSchemaSha256 -or
+            (Get-SourceJournalValueHash ($prefix -join "`n")) -cne $outlook.PriorHistorySha256){
+            throw 'journal-schema-outlook-successor-invalid'
+        }
+        $history=$prefix
+    }elseif($history.Count -eq 80 -and $history[-1] -ceq $window.Target){
+        $observation=$DatabaseState.PSObject.Properties['OutlookSchemaSha256']
+        if($observation -and $observation.Value -cne $outlook.OutlookOldSchemaSha256){throw 'journal-schema-unrecorded-outlook-schema'}
+    }
+    $windowObservation=$DatabaseState.PSObject.Properties['WindowEligibilitySchemaSha256']
+    $queueObservation=$DatabaseState.PSObject.Properties['QueueIndexSha256']
+    if($history.Count -eq ($contract.BaselineHistoryCount+$contract.Migrations.Count+2) -and $history[-1] -ceq $window.Target){
+        if(!$windowObservation -or $windowObservation.Value -cne $window.NewSchemaSha256 -or
+            !$queueObservation -or $queueObservation.Value -cne $window.QueueIndexSha256){throw 'journal-schema-window-successor-invalid'}
+        $history=@($history[0..($history.Count-2)])
+    }elseif($windowObservation -and $windowObservation.Value -cne $window.OldSchemaSha256){throw 'journal-schema-unrecorded-window-schema'}
     $indexObservation=$DatabaseState.PSObject.Properties['VectorPublicationIndexSha256']
     if($history.Count -eq ($contract.BaselineHistoryCount+$contract.Migrations.Count+1) -and $history[-1] -ceq $metadata.Target){
         if(-not $indexObservation -or $indexObservation.Value -cne $metadata.IndexSha256){throw 'journal-schema-metadata-successor-index-invalid'}
@@ -155,6 +195,10 @@ function New-SourceJournalMigrationState {
         if($index.Value -isnot [string] -or $index.Value -cnotmatch '^[A-F0-9]{64}$'){throw 'journal-schema-index-observation-invalid'}
         $state.OriginalVectorPublicationIndexSha256=$index.Value
     }
+    foreach($field in @('WindowEligibilitySchemaSha256','QueueIndexSha256','OutlookSchemaSha256','CodexWorkspaceSchemaKind')){
+        $observed=$DatabaseState.PSObject.Properties[$field]
+        if($observed -and $null -ne $observed.Value){$state['Original'+$field]=$observed.Value}
+    }
     $state
 }
 
@@ -176,6 +220,9 @@ function Invoke-SourceJournalMigrationAttempt {
         ExpectedHistory=$State.ExpectedHistory;ExpectedSchemaSha256=$State.ExpectedSchemaSha256;Attempted=$true}
     if($State.ContainsKey('OriginalVectorPublicationIndexSha256')){
         $receipt.OriginalVectorPublicationIndexSha256=$State.OriginalVectorPublicationIndexSha256
+    }
+    foreach($field in @('OriginalWindowEligibilitySchemaSha256','OriginalQueueIndexSha256','OriginalOutlookSchemaSha256','OriginalCodexWorkspaceSchemaKind')){
+        if($State.ContainsKey($field)){$receipt[$field]=$State[$field]}
     }
     $bytes=[Text.UTF8Encoding]::new($false).GetBytes(($receipt|ConvertTo-Json -Depth 12))
     $file=[IO.FileStream]::new($State.IntentPath,[IO.FileMode]::CreateNew,[IO.FileAccess]::Write,[IO.FileShare]::Read)
@@ -311,6 +358,15 @@ function Get-SourceJournalHeldMigrationIntent {
         $index=$intent.OriginalVectorPublicationIndexSha256
         if($index -isnot [string] -or $index -cnotmatch '^[A-F0-9]{64}$'){throw 'journal-schema-held-intent-index-observation-invalid'}
         $original|Add-Member -NotePropertyName VectorPublicationIndexSha256 -NotePropertyValue $index
+    }
+    foreach($field in @('WindowEligibilitySchemaSha256','QueueIndexSha256','OutlookSchemaSha256','CodexWorkspaceSchemaKind')){
+        $key='Original'+$field
+        if($intent.Contains($key)){
+            $value=$intent[$key]
+            $pattern=if($field -ceq 'CodexWorkspaceSchemaKind'){'^(Old|New)$'}else{'^[A-F0-9]{64}$'}
+            if($value -isnot [string] -or $value -cnotmatch $pattern){throw 'journal-schema-held-intent-successor-observation-invalid'}
+            $original|Add-Member -NotePropertyName $field -NotePropertyValue $value
+        }
     }
     # Legacy receipts without index evidence remain valid only for the states
     # already accepted by the schema contract. A metadata successor requires it.

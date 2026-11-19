@@ -47,6 +47,22 @@ function Assert-HybridMigrationHistory {
     }
 }
 
+function Assert-HybridGpuDrainPreflight {
+    param([Parameter(Mandatory)][string]$ConnectionString)
+    $normalised=$ConnectionString -replace '(?i)Trust Server Certificate=','TrustServerCertificate=' -replace '(?i)Connect Retry Count=','ConnectRetryCount='
+    $builder=[Data.SqlClient.SqlConnectionStringBuilder]::new($normalised)
+    $builder['Pooling']=$false;$builder['ConnectRetryCount']=0;$builder['Connect Timeout']=5
+    $builder['Application Name']='FluxKnowledge.HybridUpdaterPreflight'
+    $connection=[Data.SqlClient.SqlConnection]::new($builder.ConnectionString)
+    try {
+        $connection.Open();$command=$connection.CreateCommand();$command.CommandTimeout=5
+        try {
+            $command.CommandText="SELECT CONVERT(bit,CASE WHEN NOT EXISTS(SELECT 1 FROM GpuCapacitySlots WHERE SlotKey COLLATE Latin1_General_100_BIN2=N'paddleocr-vl-local-gpu-0') OR EXISTS(SELECT 1 FROM GpuCapacitySlots WHERE State=2) THEN 1 ELSE 0 END);"
+            if([bool]$command.ExecuteScalar()){throw 'hybrid-gpu-drain-timeout-or-uncertain-capacity'}
+        } finally {$command.Dispose()}
+    } finally {$connection.Dispose()}
+}
+
 function Invoke-WithHybridGpuDrain {
     param([Parameter(Mandatory)][string]$ConnectionString, [ValidateRange(1, 1800)][int]$TimeoutSeconds,
         [Parameter(Mandatory)][scriptblock]$StopApplication)
@@ -70,20 +86,27 @@ SELECT @@SPID;
             $command.CommandText = @'
 IF ISNULL(APPLOCK_MODE(N'public', N'FluxKnowledge.GpuScheduler.Admission', N'Session'), N'NoLock') <> N'Exclusive'
     THROW 51000, 'gpu-maintenance-admission-fence-lost', 1;
-SELECT CONVERT(bit, CASE WHEN
+SELECT CASE WHEN
+    NOT EXISTS (SELECT 1 FROM GpuCapacitySlots WHERE SlotKey COLLATE Latin1_General_100_BIN2 = N'paddleocr-vl-local-gpu-0')
+    OR EXISTS (SELECT 1 FROM GpuCapacitySlots WHERE State = 2) THEN 2
+    WHEN
     EXISTS (SELECT 1 FROM GpuCapacitySlots WHERE SlotKey COLLATE Latin1_General_100_BIN2 = N'paddleocr-vl-local-gpu-0')
     AND NOT EXISTS (SELECT 1 FROM GpuCapacitySlots WHERE State <> 0 OR ActiveBatchId IS NOT NULL)
     AND NOT EXISTS (SELECT 1 FROM GpuMiniTasks WHERE State = 1)
-    THEN 1 ELSE 0 END);
+    THEN 1 ELSE 0 END;
 '@
             $timer = [Diagnostics.Stopwatch]::StartNew()
-            while (-not [bool]$command.ExecuteScalar()) {
+            while ($true) {
+                $state=[int]$command.ExecuteScalar()
+                if($state -eq 2){throw 'hybrid-gpu-drain-timeout-or-uncertain-capacity'}
+                if($state -eq 1){break}
+                if($state -ne 0){throw 'hybrid-gpu-drain-state-invalid'}
                 if ($timer.Elapsed.TotalSeconds -ge $TimeoutSeconds) { throw 'hybrid-gpu-drain-timeout-or-uncertain-capacity' }
                 Start-Sleep -Milliseconds 250
             }
             & $StopApplication $sessionId
             # A killed/disconnected session cannot certify the stop or silently reconnect.
-            if (-not [bool]$command.ExecuteScalar()) { throw 'hybrid-gpu-drain-proof-lost' }
+            if ([int]$command.ExecuteScalar() -ne 1) { throw 'hybrid-gpu-drain-proof-lost' }
         }
         finally { $command.Dispose() }
     }
@@ -360,7 +383,7 @@ function Assert-HybridPatchPacket {
 }
 
 Export-ModuleMember -Function Invoke-HybridPassageRebuildFlow, Get-HybridPassageMigrationContract,
-    Assert-HybridMigrationHistory, Invoke-WithHybridGpuDrain, Invoke-HybridRebuildOperator, Write-HybridRebuildJson,
+    Assert-HybridMigrationHistory, Assert-HybridGpuDrainPreflight, Invoke-WithHybridGpuDrain, Invoke-HybridRebuildOperator, Write-HybridRebuildJson,
     Set-HybridDeploymentHold, Assert-HybridDeploymentHoldOwner, Get-HybridPayloadFingerprint,
     Get-HybridReplacementBinding, Get-HybridReplacementSqlReceipt, Assert-HybridReplacementPacket,
     Assert-HybridReplacementReceipt, Move-HybridReplacementHold, Get-HybridPatchBinding, Assert-HybridPatchPacket

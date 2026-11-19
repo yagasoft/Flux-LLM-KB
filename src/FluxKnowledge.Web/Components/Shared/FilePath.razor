@@ -9,7 +9,7 @@
     {
         <p class="status-freshness">Containing archive: <code>@PipelineFilePresentation.ShortenPath(ArchivePath!)</code><br />Original member path unavailable. Member identity:</p>
     }
-    <code class="file-path-short">@PipelineFilePresentation.ShortenPath(FullPath)</code>
+    <code class="file-path-preview">@(ShowFullPath && !OpaqueMember ? FullPath : PipelineFilePresentation.ShortenPath(FullPath))</code>
     <details><summary>@(OpaqueMember ? "Member identity and copy" : "Full path and copy")</summary>
         @if (ArchivePath is not null)
         {
@@ -26,6 +26,7 @@
 @code {
     [Parameter, EditorRequired] public string FullPath { get; set; } = "";
     [Parameter] public string? ArchivePath { get; set; }
+    [Parameter] public bool ShowFullPath { get; set; }
     private IJSObjectReference? _module;
     private string? _copyStatus;
     private bool OpaqueMember => ArchivePath is not null && FullPath.StartsWith("retained-archive-member:", StringComparison.Ordinal);

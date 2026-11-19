@@ -6,6 +6,7 @@ using FluxKnowledge.Application.Ports;
 using FluxKnowledge.Application.Pipeline;
 using FluxKnowledge.Application.Sources;
 using Microsoft.Extensions.DependencyInjection;
+using Microsoft.Extensions.Logging;
 
 namespace FluxKnowledge.Infrastructure.Usearch;
 
@@ -16,6 +17,7 @@ public sealed class DerivedIndexRecoveryCoordinator : IDerivedIndexRecoveryStatu
     private readonly DerivedIndexFileSystem? _fileSystem;
     private readonly IStatusEventPublisher? _statusPublisher;
     private readonly IDeploymentValidationHold? _deploymentHold;
+    private readonly ILogger<DerivedIndexRecoveryCoordinator>? _logger;
     private readonly TimeProvider _timeProvider;
     private readonly DerivedIndexRecoveryOptions _options;
     private readonly Func<string, FileAttributes> _getActivePathAttributes;
@@ -27,10 +29,11 @@ public sealed class DerivedIndexRecoveryCoordinator : IDerivedIndexRecoveryStatu
     public DerivedIndexRecoveryCoordinator(IServiceScopeFactory scopeFactory,
         UsearchIndexConfiguration configuration, TimeProvider timeProvider, IStatusEventPublisher? statusPublisher = null,
         DerivedIndexRecoveryOptions? options = null, Func<string, FileAttributes>? getActivePathAttributes = null,
-        IDeploymentValidationHold? deploymentHold = null)
+        IDeploymentValidationHold? deploymentHold = null, ILogger<DerivedIndexRecoveryCoordinator>? logger = null)
     {
         _scopeFactory = scopeFactory; _configurationFailure = configuration.Failure; _timeProvider = timeProvider; _statusPublisher = statusPublisher;
         _deploymentHold = deploymentHold;
+        _logger = logger;
         _options = options ?? DerivedIndexRecoveryOptions.Default;
         _getActivePathAttributes = getActivePathAttributes ?? File.GetAttributes;
     }
@@ -38,10 +41,11 @@ public sealed class DerivedIndexRecoveryCoordinator : IDerivedIndexRecoveryStatu
     public DerivedIndexRecoveryCoordinator(IServiceScopeFactory scopeFactory,
         DerivedIndexFileSystem fileSystem, TimeProvider timeProvider, IStatusEventPublisher? statusPublisher = null,
         DerivedIndexRecoveryOptions? options = null, Func<string, FileAttributes>? getActivePathAttributes = null,
-        IDeploymentValidationHold? deploymentHold = null)
+        IDeploymentValidationHold? deploymentHold = null, ILogger<DerivedIndexRecoveryCoordinator>? logger = null)
     {
         _scopeFactory = scopeFactory; _timeProvider = timeProvider; _statusPublisher = statusPublisher;
         _deploymentHold = deploymentHold;
+        _logger = logger;
         _options = options ?? DerivedIndexRecoveryOptions.Default;
         _fileSystem = fileSystem;
         _getActivePathAttributes = getActivePathAttributes ?? File.GetAttributes;
@@ -431,6 +435,9 @@ public sealed class DerivedIndexRecoveryCoordinator : IDerivedIndexRecoveryStatu
             _ => DerivedIndexRecoveryFailureCategory.TransientIo
         };
         var decision = DerivedIndexRecoveryPolicy.Decide(category, ++_attempts);
+        _logger?.LogError(exception,
+            "Derived index recovery failed in process {ProcessId}, attempt {Attempt}, active generation {ActiveGenerationId}. Failure category {FailureCategory}.",
+            Environment.ProcessId, _attempts, activeGenerationId, category);
         var now = _timeProvider.GetUtcNow();
         DateTimeOffset? nextRetry = decision.Delay is { } delay ? now + delay : null;
         if (recoveryStore is not null)
@@ -470,8 +477,7 @@ public sealed class DerivedIndexRecoveryCoordinator : IDerivedIndexRecoveryStatu
         if (sql.IsValidatedEmptyCatalogue || sql.ActiveGenerationId is null || sql.Generation is null || sql.Generation.Id != sql.ActiveGenerationId ||
             sql.Membership.IsDefaultOrEmpty || sql.Generation.VectorCount != sql.Membership.Length ||
             sql.Membership.Any(vector => vector.Dimensions != sql.Generation.Dimensions || vector.Values.Length != vector.Dimensions * sizeof(float) ||
-                !string.Equals(vector.ModelFingerprint, sql.Generation.ModelFingerprint, StringComparison.Ordinal) ||
-                !string.Equals(vector.PayloadChecksum, Convert.ToHexStringLower(SHA256.HashData(vector.Values)), StringComparison.Ordinal)) ||
+                !string.Equals(vector.ModelFingerprint, sql.Generation.ModelFingerprint, StringComparison.Ordinal)) ||
             !string.Equals(sql.Generation.MetadataChecksum, UsearchGenerationValidator.ComputeChecksum(sql.Generation.ModelFingerprint, sql.Generation.Dimensions, sql.Membership), StringComparison.Ordinal))
         {
             throw new SqlMembershipValidationException();

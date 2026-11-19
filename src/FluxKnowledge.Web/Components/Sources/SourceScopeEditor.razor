@@ -1,0 +1,102 @@
+@using System.Data.Common
+@using FluxKnowledge.Application.Contracts
+@using Microsoft.EntityFrameworkCore
+@using Microsoft.JSInterop
+@inject IJSRuntime JS
+
+@if (_editingScope is not { } scope)
+{
+    <button type="button" @onclick="OpenEditor">Edit source</button>
+}
+else
+{
+    <form class="source-form" aria-label="Edit source rules" @ref="_form" @onsubmit="SaveAsync" @onsubmit:preventDefault>
+        <input type="hidden" name="rootId" value="@RootId" />
+        <input type="hidden" name="expectedConfigurationRevision" value="@scope.ConfigurationRevision" />
+        <p>Enter one root-relative rule per line. A blank include list includes all files. Exclusions take precedence.</p>
+        <label for="source-include-rules">Include rules</label>
+        <textarea id="source-include-rules" name="includePatterns" disabled="@_saving">@string.Join("\n", scope.IncludePatterns)</textarea>
+        <label for="source-exclude-rules">Exclude rules</label>
+        <textarea id="source-exclude-rules" name="excludePatterns" disabled="@_saving">@string.Join("\n", scope.ExcludePatterns)</textarea>
+        @if (IsPaused)
+        {
+            <p>Reconciliation will run after you resume this source.</p>
+        }
+        <div>
+            <button type="submit" disabled="@_saving">Save and reconcile</button>
+            <button type="button" @onclick="CloseEditor" disabled="@_saving">Cancel</button>
+        </div>
+    </form>
+}
+@if (_message is { } message)
+{
+    <p role="status" aria-live="polite">@message</p>
+}
+
+@code {
+    [Parameter, EditorRequired] public Guid RootId { get; set; }
+    [Parameter, EditorRequired] public SourceScopeProjection Scope { get; set; } = null!;
+    [Parameter] public bool IsPaused { get; set; }
+    [Parameter] public EventCallback OnSaved { get; set; }
+
+    private ElementReference _form;
+    private SourceScopeProjection? _editingScope;
+    private string? _message;
+    private bool _saving;
+
+    private void OpenEditor()
+    {
+        _editingScope = Scope;
+        _message = null;
+    }
+
+    private void CloseEditor()
+    {
+        _editingScope = null;
+        _message = null;
+    }
+
+    private async Task SaveAsync()
+    {
+        if (_saving || _editingScope is not { } scope) return;
+        _saving = true;
+        _message = null;
+        try
+        {
+            var result = await JS.InvokeAsync<string>("fluxKnowledge.sources.saveRules", _form);
+            if (result == "saved")
+            {
+                CloseEditor();
+                _message = IsPaused ? "Rules saved. Reconciliation will run after you resume this source."
+                    : "Rules saved. Reconciliation will update the file list.";
+                await OnSaved.InvokeAsync();
+                return;
+            }
+
+            _message = result switch
+            {
+                "unchanged" => "The rules are unchanged.",
+                "operation-fenced" when Scope.ConfigurationRevision != scope.ConfigurationRevision
+                    => "This source changed while you were editing. Reopen the editor to load the latest rules.",
+                "operation-fenced" => "The source changed during the save. Try again. If the issue persists, refresh the page and reopen the editor.",
+                "confirmation-expired" => "The save confirmation expired. Try again.",
+                "deployment-validation-held" => "Source changes are temporarily unavailable. Try again after the update finishes.",
+                "source-deleting" or "target-not-found" => "This source is no longer available for editing.",
+                "unconfirmed" or "operation-failed" or "temporary-unavailable" => "The save could not be confirmed. Try again to check whether it completed.",
+                _ => $"The rules could not be saved ({result})."
+            };
+        }
+        catch (JSException)
+        {
+            _message = "The save could not be confirmed. Try again to check whether it completed.";
+        }
+        catch (Exception error) when (error is DbException or DbUpdateException or TimeoutException)
+        {
+            _message = "Rules saved. Refresh the page to check reconciliation progress.";
+        }
+        finally
+        {
+            _saving = false;
+        }
+    }
+}

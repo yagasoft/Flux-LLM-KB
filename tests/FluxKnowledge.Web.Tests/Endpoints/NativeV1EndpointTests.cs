@@ -21,6 +21,17 @@ namespace FluxKnowledge.Web.Tests.Endpoints;
 public sealed class NativeV1EndpointTests
 {
     [Fact]
+    public async Task Knowledge_search_preserves_the_requested_workspace_through_HTTP()
+    {
+        await using var host = await StartAsync();
+        const string cwd = @"C:\example workspace\docs";
+        using var response = await host.Client.PostAsJsonAsync("/api/v1/knowledge/search", new { query = "needle", limit = 10, cwd });
+        Assert.True((await ReadAsync(response)).GetProperty("ok").GetBoolean());
+        var request = Assert.IsType<NativeKnowledgeQuery>(host.Facade.LastQueryRequest);
+        Assert.Equal(cwd, request.Cwd);
+    }
+
+    [Fact]
     public async Task Corpus_literal_mode_preserves_raw_query_through_the_HTTP_mapper()
     {
         const string query = " e\u0301 ";

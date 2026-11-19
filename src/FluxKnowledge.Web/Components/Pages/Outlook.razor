@@ -11,10 +11,10 @@
 
 <section aria-labelledby="outlook-heading">
     <h1 id="outlook-heading">Outlook capture</h1>
-    <p>Configure read-only classic Outlook capture for this computer. Saving or enabling a profile creates SQL control-plane work only; it never starts Outlook.</p>
+    <p>The local Outlook host verifies folders and captures mail from classic Outlook.</p>
     <p role="status" aria-live="polite">@_status</p>
 
-    <p><button type="button" @onclick="NewProfile">Add profile</button></p>
+    <p><button type="button" disabled="@_saving" @onclick="NewProfile">Add profile</button></p>
 
     @if (PageState.Projection.Profiles.Count == 0)
     {
@@ -27,7 +27,7 @@
             <article class="status-card" aria-labelledby="@($"outlook-profile-{profile.ProfileId:N}")">
                 <h2 id="@($"outlook-profile-{profile.ProfileId:N}")">@profile.DisplayName</h2>
                 <dl class="status-grid">
-                    <div><dt>Capture state</dt><dd>@profile.State</dd></div>
+                    <div><dt>Capture state</dt><dd>@CaptureState(profile)</dd></div>
                     <div><dt>Incremental basis</dt><dd>@FormatBasis(profile.IncrementalBasis)</dd></div>
                     <div><dt>Schedule</dt><dd>Every @profile.Cadence.TotalMinutes.ToString("0") minutes</dd></div>
                     <div><dt>Overlap</dt><dd>@profile.MaximumOverlap.TotalMinutes.ToString("0") minutes</dd></div>
@@ -35,7 +35,16 @@
                     <div><dt>Created</dt><dd>@profile.CreatedAtUtc.LocalDateTime</dd></div>
                     <div><dt>Updated</dt><dd>@profile.UpdatedAtUtc.LocalDateTime</dd></div>
                     <div><dt>Last successful catch-up</dt><dd>@(profile.LastSuccessfulCatchUpAtUtc?.LocalDateTime.ToString() ?? "Not completed")</dd></div>
+                    @if (profile.WatchedSourceRootId is { } watchedSourceRootId)
+                    {
+                        <div><dt>Last successful export</dt><dd>@(profile.LastSuccessfulExportAtUtc?.LocalDateTime.ToString() ?? "Not yet published")</dd></div>
+                        <div><dt>Watched source</dt><dd><a href="@($"/sources/{watchedSourceRootId:D}")">Open source and indexing progress</a></dd></div>
+                    }
                 </dl>
+                @if (profile.Verification?.Failure is { } failure)
+                {
+                    <p role="alert">@VerificationFailure(failure) Edit the profile to try again.</p>
+                }
                 @foreach (var warning in profile.Warnings)
                 {
                     <p role="alert">@warning</p>
@@ -64,10 +73,10 @@
                     </div>
                 }
                 <p>
-                    <button type="button" @onclick="() => EditProfile(profile)">Edit</button>
+                    <button type="button" disabled="@_saving" @onclick="() => EditProfile(profile)">Edit</button>
                     <button type="button" @onclick="() => PauseAsync(profile.ProfileId)">Pause</button>
                     <button type="button" @onclick="() => RemoveAsync(profile.ProfileId)">Remove</button>
-                    <button type="button" @onclick="() => CatchUpAsync(profile.ProfileId, false)">Catch up</button>
+                    <button type="button" disabled="@(profile.State == nameof(OutlookCaptureState.Disabled))" @onclick="() => CatchUpAsync(profile.ProfileId, false)">Catch up</button>
                     @if (profile.IncrementalBasis == OutlookIncrementalBasis.ReceivedTime)
                     {
                         <button type="button" @onclick="() => CatchUpAsync(profile.ProfileId, true)">Reconcile moved messages</button>
@@ -85,11 +94,10 @@
             {
                 <p>Select a server-configured spool when saving. Private paths are never returned through UI projections or the interactive circuit.</p>
             }
-            <EditForm Model="_formModel" OnSubmit="SaveAsync" FormName="outlook-profile">
-                <AntiforgeryToken />
-                <label>Profile name <input @bind-value="_displayName" @bind-value:event="oninput" @bind-value:after="DraftChanged" /></label>
+            <EditForm Model="_formModel" OnSubmit="VerifyAndEnableAsync" FormName="outlook-profile">
+                <label>Profile name <input @bind-value="_displayName" @bind-value:event="oninput" /></label>
                 <label>Configured spool
-                    <select @bind="_spoolConfigurationKey" @bind:after="DraftChanged">
+                    <select @bind="_spoolConfigurationKey">
                         <option value="">Select a configured spool</option>
                         @foreach (var spool in PageState.SpoolChoices)
                         {
@@ -98,7 +106,7 @@
                     </select>
                 </label>
                 <label>Incremental basis
-                    <select @bind="_basis" @bind:after="DraftChanged">
+                    <select @bind="_basis">
                         <option value="@OutlookIncrementalBasis.LastModificationTime">Last modification time</option>
                         <option value="@OutlookIncrementalBasis.ReceivedTime">Received time</option>
                     </select>
@@ -107,22 +115,13 @@
                 {
                     <p role="alert">Received-time capture may miss older moved messages; use manual reconciliation when needed.</p>
                 }
-                <label>Cadence (minutes) <input type="number" min="5" max="1440" @bind="_cadenceMinutes" @bind:after="DraftChanged" /></label>
-                <label>Overlap (minutes) <input type="number" min="0" max="240" @bind="_overlapMinutes" @bind:after="DraftChanged" /></label>
-                <label>Exact Outlook folder path <input @key="_targetFolderPathInputGeneration" @ref="_targetFolderPathInput" autocomplete="off" /></label>
-                <label><input type="checkbox" @bind="_enable" @bind:after="DraftChanged" /> Enable for a later Outlook host claim</label>
-                @if (_editingProfileId is not null)
-                {
-                    <p>
-                        <button type="button" @onclick="BrowseAsync">Browse folders in Outlook</button>
-                        <button type="button" @onclick="RefreshBrowseAsync">Refresh browse result</button>
-                    </p>
-                    @if (PageState.BrowseFolders.Count > 0)
-                    {
-                        <p>Selected by the Outlook host: @string.Join(", ", PageState.BrowseFolders.Select(folder => folder.DisplayName))</p>
-                    }
-                }
-                <p><button type="submit">Save profile</button></p>
+                <label>Cadence (minutes) <input type="number" min="5" max="1440" @bind="_cadenceMinutes" /></label>
+                <label>Overlap (minutes) <input type="number" min="0" max="240" @bind="_overlapMinutes" /></label>
+                <label>Exact Outlook folder path <input required maxlength="512" placeholder="Mailbox/Inbox/Folder" @key="_targetFolderPathInputGeneration" @ref="_targetFolderPathInput" autocomplete="off" /></label>
+                <p>
+                    <button type="submit" disabled="@_saving">Verify and enable</button>
+                    <button type="button" @onclick="SaveDisabledAsync" disabled="@_saving">Save disabled</button>
+                </p>
             </EditForm>
         </section>
     }
@@ -142,17 +141,20 @@
     private int _overlapMinutes = 2;
     private ElementReference _targetFolderPathInput;
     private long _targetFolderPathInputGeneration;
-    private bool _enable;
+    private bool _saving;
+    private bool _watchingVerification;
     private string _status = "Loading Outlook capture status from SQL…";
 
     protected override async Task OnInitializedAsync()
     {
         await PageState.ReloadAsync(_stopping.Token);
         _status = "Outlook capture status loaded from SQL.";
+        WatchPendingVerification();
     }
 
     private void NewProfile()
     {
+        if (_saving) return;
         _showForm = true;
         _editingProfileId = null;
         _configurationRevision = 1;
@@ -161,13 +163,12 @@
         _basis = OutlookIncrementalBasis.LastModificationTime;
         _cadenceMinutes = 15;
         _overlapMinutes = 2;
-        _enable = false;
         _targetFolderPathInputGeneration++;
-        PageState.InvalidateBrowse();
     }
 
     private void EditProfile(OutlookProfileStatusProjection profile)
     {
+        if (_saving) return;
         _showForm = true;
         _editingProfileId = profile.ProfileId;
         _configurationRevision = profile.ConfigurationRevision;
@@ -176,49 +177,109 @@
         _basis = profile.IncrementalBasis;
         _cadenceMinutes = checked((int)profile.Cadence.TotalMinutes);
         _overlapMinutes = checked((int)profile.MaximumOverlap.TotalMinutes);
-        _enable = profile.State != OutlookCaptureState.Disabled.ToString();
         _targetFolderPathInputGeneration++;
-        PageState.InvalidateBrowse();
     }
 
-    private void DraftChanged()
-    {
-        PageState.InvalidateBrowse();
-        _status = "Configuration changed. Browse again before enabling and saving this profile.";
-    }
+    private Task VerifyAndEnableAsync(EditContext _) => SubmitProfileAsync(verify: true);
 
-    private async Task SaveAsync(EditContext _)
+    private Task SaveDisabledAsync() => SubmitProfileAsync(verify: false);
+
+    private async Task SubmitProfileAsync(bool verify)
     {
-        var targetFolderPath = await ReadAndClearTargetFolderPathAsync();
-        await RunMutationAsync(async () =>
+        if (_saving) return;
+        _saving = true;
+        var draft = BuildDraft();
+        try
         {
-            await PageState.SaveAsync(BuildDraft(targetFolderPath), _stopping.Token);
-            _status = _editingProfileId is null
-                ? "Profile saved disabled. Edit it to browse folders before enabling."
-                : "Profile configuration committed to SQL.";
-            _showForm = false;
-        });
+            await RunMutationAsync(async () =>
+            {
+                if (verify)
+                {
+                    var targetPath = await ReadAndClearTargetFolderPathAsync();
+                    if (string.IsNullOrWhiteSpace(targetPath))
+                    {
+                        _status = "Enter the exact Outlook folder path, including the mailbox name.";
+                        return;
+                    }
+                    await PageState.VerifyAndEnableAsync(draft with { TargetFolderPath = targetPath }, _stopping.Token);
+                    _showForm = false;
+                    _status = "Verification requested. The profile enables automatically once the Outlook host verifies the folder.";
+                    try
+                    {
+                        await PageState.ReloadAsync(_stopping.Token);
+                    }
+                    catch (Exception) when (!_stopping.IsCancellationRequested)
+                    {
+                        _status = "Verification was requested. Reload the page to check its status.";
+                    }
+                }
+                else
+                {
+                    await PageState.SaveAsync(draft, _stopping.Token);
+                    _status = "Profile saved disabled.";
+                }
+                _showForm = false;
+                WatchPendingVerification();
+            });
+        }
+        finally
+        {
+            _saving = false;
+        }
     }
 
-    private async Task BrowseAsync()
+    private void WatchPendingVerification()
     {
-        var targetFolderPath = await ReadAndClearTargetFolderPathAsync();
-        await RunMutationAsync(async () =>
+        if (!_watchingVerification && HasPendingVerification())
         {
-            await PageState.RequestBrowseAsync(BuildDraft(targetFolderPath), _stopping.Token);
-            _status = "Folder browse requested. Run the local Outlook host, then refresh the result.";
-        });
+            _ = RefreshPendingVerificationAsync(_stopping.Token);
+        }
     }
 
-    private async Task RefreshBrowseAsync()
+    private bool HasPendingVerification() =>
+        PageState.Projection.Profiles.Any(profile => profile.Verification?.IsPending == true);
+
+    private async Task RefreshPendingVerificationAsync(CancellationToken cancellationToken)
     {
-        var targetFolderPath = await ReadAndClearTargetFolderPathAsync();
-        await RunMutationAsync(async () =>
+        _watchingVerification = true;
+        using var timer = new PeriodicTimer(TimeSpan.FromSeconds(10));
+        try
         {
-        var folders = await PageState.RefreshBrowseResultAsync(BuildDraft(targetFolderPath), _stopping.Token);
-        _status = folders.Count == 0 ? "The Outlook host has not completed this browse request." : "Current folder selection loaded from SQL.";
-        });
+            while (HasPendingVerification() && await timer.WaitForNextTickAsync(cancellationToken))
+            {
+                if (_saving) continue;
+                await PageState.ReloadAsync(cancellationToken);
+                if (!HasPendingVerification()) _status = "Outlook folder verification finished. See the profile status below.";
+                StateHasChanged();
+            }
+        }
+        catch (OperationCanceledException) when (cancellationToken.IsCancellationRequested) { }
+        catch (Exception) when (!cancellationToken.IsCancellationRequested)
+        {
+            _status = "Outlook status could not be refreshed. Reload this page to check verification.";
+            StateHasChanged();
+        }
+        finally
+        {
+            _watchingVerification = false;
+        }
     }
+
+    private static string CaptureState(OutlookProfileStatusProjection profile) => profile.Verification switch
+    {
+        { IsPending: true } => "Waiting for Outlook",
+        { Failure: not null } => "Verification failed",
+        _ when profile.State == nameof(OutlookCaptureState.AwaitingHost) => "Enabled",
+        _ => profile.State
+    };
+
+    private static string VerificationFailure(OutlookBrowseFailureCode failure) => failure switch
+    {
+        OutlookBrowseFailureCode.Expired => "The Outlook host did not verify the folder within 24 hours.",
+        OutlookBrowseFailureCode.AccessDenied => "Classic Outlook denied access to the folder.",
+        OutlookBrowseFailureCode.HostUnavailable => "The Outlook host could not access classic Outlook.",
+        _ => "The Outlook host could not verify the folder. Check the mailbox and folder names."
+    };
 
     private async Task PauseAsync(Guid profileId) => await RunMutationAsync(async () =>
     {
@@ -256,15 +317,14 @@
         }
     }
 
-    private OutlookProfileDraft BuildDraft(string targetFolderPath = "") => new(
+    private OutlookProfileDraft BuildDraft() => new(
         _editingProfileId is { } id ? new OutlookCaptureProfileId(id) : null,
         _displayName,
         _spoolConfigurationKey,
         _basis,
         new OutlookCaptureSchedule(TimeSpan.FromMinutes(_cadenceMinutes), TimeSpan.FromMinutes(_overlapMinutes)),
-        _enable,
-        _configurationRevision,
-        targetFolderPath);
+        false,
+        _configurationRevision);
 
     private ValueTask<string> ReadAndClearTargetFolderPathAsync() =>
         JavaScriptRuntime.InvokeAsync<string>("fluxKnowledge.outlook.readAndClearTargetPath", _targetFolderPathInput);

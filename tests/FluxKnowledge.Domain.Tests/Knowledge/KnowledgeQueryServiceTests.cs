@@ -59,6 +59,10 @@ public sealed class KnowledgeQueryServiceTests
     {
         public ValueTask<KnowledgeTarget?> FindTargetAsync(KnowledgeMutation mutation, CancellationToken cancellationToken) => ValueTask.FromResult<KnowledgeTarget?>(null);
         public ValueTask<IReadOnlyList<KnowledgeSearchResult>> SearchAsync(string query, int limit, CancellationToken cancellationToken) => ValueTask.FromResult<IReadOnlyList<KnowledgeSearchResult>>([new(Guid.NewGuid(), "note", "Atlas", "native", "knowledge")]);
+        public ValueTask<IReadOnlyList<KnowledgeSearchResult>> SearchCodexWorkspaceAsync(
+            string query, string cwd, int limit, CancellationToken cancellationToken) => throw new NotSupportedException();
+        public ValueTask<Guid?> ResolveCodexWorkspaceAsync(string cwd, CancellationToken cancellationToken) =>
+            throw new NotSupportedException();
         public ValueTask<IReadOnlyList<KnowledgeGraphResult>> TraverseAsync(string node, int maxDepth, int maxResults, CancellationToken cancellationToken) => ValueTask.FromResult<IReadOnlyList<KnowledgeGraphResult>>([]);
     }
 
@@ -103,6 +107,10 @@ public sealed class KnowledgeQueryServiceTests
         public ValueTask<IReadOnlyList<KnowledgeSearchResult>> SearchAsync(string query, int limit, CancellationToken ct) =>
             ValueTask.FromResult<IReadOnlyList<KnowledgeSearchResult>>(Enumerable.Range(0, limit).Select(i =>
                 new KnowledgeSearchResult(Guid.NewGuid(), "note", "Atlas", "Public note " + i, "knowledge")).ToArray());
+        public ValueTask<IReadOnlyList<KnowledgeSearchResult>> SearchCodexWorkspaceAsync(
+            string query, string cwd, int limit, CancellationToken cancellationToken) => throw new NotSupportedException();
+        public ValueTask<Guid?> ResolveCodexWorkspaceAsync(string cwd, CancellationToken cancellationToken) =>
+            throw new NotSupportedException();
         public ValueTask<IReadOnlyList<KnowledgeGraphResult>> TraverseAsync(string node, int depth, int max, CancellationToken ct) => ValueTask.FromResult<IReadOnlyList<KnowledgeGraphResult>>([]);
     }
 }

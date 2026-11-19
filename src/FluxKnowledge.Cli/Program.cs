@@ -8,6 +8,7 @@ internal static class CliProgram
     {
         return args.FirstOrDefault() switch
         {
+            "outlook-watched-source" => await OutlookWatchedSourceCommand.ExecuteAsync(args.Skip(1).ToArray(), Console.Out, Console.Error),
             "source-access" => await SourceAccessCommand.ExecuteAsync(args.Skip(1).ToArray(), Console.Out, Console.Error),
             "corpus-rebuild" => await CorpusRebuildCommand.ExecuteFromEnvironmentAsync(args.Skip(1).ToArray(), Console.Out, Console.Error),
             "index-retention" => await IndexRetentionCommand.ExecuteFromEnvironmentAsync(args.Skip(1).ToArray(), Console.Out, Console.Error),
@@ -44,7 +45,7 @@ internal static class CliProgram
 
     private static int WriteUsage()
     {
-        Console.Error.WriteLine("Usage: FluxKnowledge.Cli <knowledge|code|corpus|operations|codex|csharp-code|validate-sql|models|documents|corpus-rebuild|index-retention|index-projection|index-recovery|source-access>");
+        Console.Error.WriteLine("Usage: FluxKnowledge.Cli <knowledge|code|corpus|operations|codex|csharp-code|validate-sql|models|documents|corpus-rebuild|index-retention|index-projection|index-recovery|source-access|outlook-watched-source>");
         return 2;
     }
 }

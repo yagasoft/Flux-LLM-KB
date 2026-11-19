@@ -14,6 +14,20 @@ public sealed class OutlookPageStateTests
     private static readonly DateTimeOffset Now = new(2026, 8, 11, 12, 0, 0, TimeSpan.Zero);
 
     [Fact]
+    public async Task Concurrent_projection_reloads_do_not_allow_an_older_read_to_replace_the_newer_status()
+    {
+        var reader = new DelayedProjectionReader();
+        var state = CreateState(new RecordingStore(), projectionReader: reader);
+
+        var older = state.ReloadAsync(CancellationToken.None).AsTask();
+        var newer = state.ReloadAsync(CancellationToken.None).AsTask();
+        reader.ReleaseOlderRead();
+
+        await Task.WhenAll(older, newer);
+        Assert.Same(reader.Latest, state.Projection);
+    }
+
+    [Fact]
     public async Task Page_rejects_save_when_the_folder_browse_result_is_stale()
     {
         var store = new RecordingStore
@@ -335,10 +349,11 @@ public sealed class OutlookPageStateTests
     private static OutlookPageState CreateState(
         RecordingStore store,
         IOutlookOperatorPolicy? policy = null,
-        IOutlookSpoolValidator? spoolValidator = null) =>
+        IOutlookSpoolValidator? spoolValidator = null,
+        IOutlookProjectionReader? projectionReader = null) =>
         new(
             store,
-            new EmptyProjectionReader(),
+            projectionReader ?? new EmptyProjectionReader(),
             spoolValidator ?? new RecordingSpoolValidator(),
             policy ?? new AllowingPolicy(),
             new FixedTimeProvider(Now));
@@ -379,6 +394,20 @@ public sealed class OutlookPageStateTests
             ValidationCount++;
             return ValueTask.FromResult(new OutlookSpoolValidation(new string('a', 64), true, true, true, true, privateSpoolRoot));
         }
+    }
+
+    private sealed class DelayedProjectionReader : IOutlookProjectionReader
+    {
+        private readonly TaskCompletionSource<OutlookPageProjection> _older = new(TaskCreationOptions.RunContinuationsAsynchronously);
+        private int _reads;
+        public OutlookPageProjection Latest { get; } = new([]);
+
+        public ValueTask<OutlookPageProjection> ReadAsync(CancellationToken cancellationToken) =>
+            Interlocked.Increment(ref _reads) == 1
+                ? new(_older.Task.WaitAsync(cancellationToken))
+                : ValueTask.FromResult(Latest);
+
+        public void ReleaseOlderRead() => _older.SetResult(OutlookPageProjection.Empty);
     }
 
     private sealed class EmptyProjectionReader : IOutlookProjectionReader

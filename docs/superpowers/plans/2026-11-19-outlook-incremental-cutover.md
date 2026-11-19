@@ -1,0 +1,9 @@
+# Outlook incremental cutover
+
+- [x] Qualify the precise schema 80 to 81 transition in disposable SQL. Pin the history, database incarnation, migration SQL and Outlook table metadata. The fixture proves atomic rollback, acknowledgement loss and refusal of partial schema or a foreign database.
+- [x] Connect the typed migration to the existing incremental stop, helper update, validation hold and activation path. Preserve existing 79 to 80 support, require exact schema 81 journal admission and recognise the new typed recovery receipts. Both modes pass the helper and activation tests. An actual schema 81 SQL fixture also proves held source-journal intent reconstruction. Independent implementation review approved both changes.
+- [x] Qualify schema 81 and the dedicated-source binding, representative attachments and route suspension in isolated fixtures. Correct the cutover guide to keep the schema 81 runtime on publication rollback.
+- [x] Review the exact production PlanOnly output, payloads and rollback. The first Apply stopped before DDL because separate staging helpers were still running. Typed recovery restored the original schema 80 service and companion setting. A separately reviewed candidate added a writer census before stopping production and applied schema 81 successfully. The independently reviewed native audit retired one exited deployment writer and sealed the 36-packet inventory.
+- [x] Register and bind the dedicated MoE destination with reviewed identities and directory permissions. All 44 retained mail bundles exported without retries and all 44 messages were discovered. Initial reconciliation caught arrivals during the first watcher registration interval. Live scoped citation readback and image attachment OCR publication passed, with recorded legacy revisions suppressed. Remaining attachment indexing continues normally.
+
+The user authorised this deployment and cutover separately from the deferred shared full closeout.

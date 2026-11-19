@@ -26,10 +26,53 @@ using Xunit;
 namespace FluxKnowledge.Integration.Tests.Sources;
 
 /// <summary>Source deletion is scoped to one root; a second root is the control for every purge assertion.</summary>
-public sealed partial class SourceDeletionIntegrationTests(NativeSqlServerFixture fixture)
+public sealed partial class SourceDeletionIntegrationTests(NativeSqlServerFixture fixture, Xunit.Abstractions.ITestOutputHelper output)
     : IClassFixture<NativeSqlServerFixture>, IAsyncLifetime
 {
     private readonly NativeSqlServerFixture _fixture = fixture;
+
+    [NativeSqlServerFact]
+    public async Task An_already_queued_or_leased_watched_source_deletion_cannot_clean_up_files()
+    {
+        var now = DateTimeOffset.UtcNow;
+        var watched = await SeedRootAsync("watched-cleanup", SourceRootState.Deleting, now);
+        var capture = await SeedRootAsync("private-capture", SourceRootState.Paused, now);
+        var operationId = await AddDeletionAsync(watched, now);
+        await using var db = CreateContext();
+        var operation = await db.SourceDeletionOperations.SingleAsync(row => row.Id == operationId);
+        operation.Phase = "cleanup-files";
+        db.SourceDeletionCleanupItems.Add(new() { Id = Guid.NewGuid(), SourceDeletionOperationId = operationId,
+            StorageKind = 2, RelativePath = Guid.NewGuid().ToString("N"), State = 0, CreatedAtUtc = now, UpdatedAtUtc = now });
+        await db.SaveChangesAsync();
+        var store = new SqlSourceDeletionStore(SqlTestData.CreateFactory(_fixture), TimeProvider.System);
+        var claim = Assert.IsType<SourceDeletionWorkItem>(await store.ClaimNextAsync(default));
+        Assert.Single(await store.ReadPendingCleanupAsync(claim, default));
+
+        var profile = new OutlookCaptureProfileEntity { Id = Guid.NewGuid(), SourceRootId = capture.RootId,
+            WatchedSourceRootId = watched.RootId, DisplayName = "Bound capture", SpoolRoot = @"C:\outlook-spool",
+            ConfigurationRevision = 1, CreatedAtUtc = now, UpdatedAtUtc = now };
+        db.OutlookCaptureProfiles.Add(profile);
+        await db.SaveChangesAsync();
+        try
+        {
+            Assert.Empty(await store.ReadPendingCleanupAsync(claim, default));
+            Assert.Equal("outlook-source-delete-unsupported", (await store.PurgeAsync(claim, null, default)).ReasonCode);
+            await db.Entry(operation).ReloadAsync();
+            operation.State = 0;
+            operation.Phase = "cleanup-files";
+            await db.SaveChangesAsync();
+            Assert.Null(await store.ClaimNextAsync(default));
+            await db.Entry(operation).ReloadAsync();
+            Assert.Equal("outlook-source-delete-unsupported", operation.ReasonCode);
+            Assert.True(await db.SourceRootConfigurations.AnyAsync(row => row.Id == watched.RootId));
+            Assert.True(await db.SourceDeletionCleanupItems.AnyAsync(row => row.SourceDeletionOperationId == operationId && row.State == 0));
+        }
+        finally
+        {
+            db.OutlookCaptureProfiles.Remove(profile);
+            await db.SaveChangesAsync();
+        }
+    }
 
     [NativeSqlServerFact]
     public async Task A_lost_claim_acknowledgement_recovers_the_same_operation_without_claiming_another()
@@ -79,7 +122,7 @@ public sealed partial class SourceDeletionIntegrationTests(NativeSqlServerFixtur
         var now = DateTimeOffset.UtcNow;
         var source = await SeedRootAsync("fan-out", SourceRootState.Deleting, now);
         var operationId = await AddDeletionAsync(source, now);
-        var generations = Enumerable.Range(0, 2501).Select(_ => new IndexGenerationEntity
+        var generations = Enumerable.Range(0, 32001).Select(_ => new IndexGenerationEntity
         {
             Id = Guid.NewGuid(), ModelFingerprint = "source-deletion-test:1", Dimensions = 1,
             IndexPath = "historical-fan-out", MetadataChecksum = new string('a', 64), VectorCount = 1,
@@ -108,26 +151,26 @@ public sealed partial class SourceDeletionIntegrationTests(NativeSqlServerFixtur
         Assert.True((await lostBatchAcknowledgement.PurgeAsync(firstBatch, null, default)).ContinueImmediately);
         await using (var check = CreateContext())
         {
-            Assert.Equal(1501, await check.IndexGenerationVectors.CountAsync(row => row.VectorId == vector.VectorId));
-            Assert.Equal(2501, await check.SourceDeletionCleanupItems.CountAsync(row => row.SourceDeletionOperationId == operationId));
+            Assert.Equal(16001, await check.IndexGenerationVectors.CountAsync(row => row.VectorId == vector.VectorId));
+            Assert.Equal(32001, await check.SourceDeletionCleanupItems.CountAsync(row => row.SourceDeletionOperationId == operationId));
             var progress = await check.SourceDeletionOperations.SingleAsync();
-            Assert.Equal(1000, progress.MembershipRowsDeleted);
+            Assert.Equal(16000, progress.MembershipRowsDeleted);
             Assert.Null(progress.MembershipVectorCursor);
             Assert.Equal(firstBatch.LeaseId, progress.LastCommittedLeaseId);
         }
         Assert.True((await store.PurgeAsync(firstBatch, null, default)).ContinueImmediately);
         await using (var check = CreateContext())
         {
-            Assert.Equal(1501, await check.IndexGenerationVectors.CountAsync(row => row.VectorId == vector.VectorId));
-            Assert.Equal(1000, await check.SourceDeletionOperations.Select(row => row.MembershipRowsDeleted).SingleAsync());
+            Assert.Equal(16001, await check.IndexGenerationVectors.CountAsync(row => row.VectorId == vector.VectorId));
+            Assert.Equal(16000, await check.SourceDeletionOperations.Select(row => row.MembershipRowsDeleted).SingleAsync());
         }
         var resumed = new SqlSourceDeletionStore(SqlTestData.CreateFactory(_fixture), TimeProvider.System);
         var secondBatch = Assert.IsType<SourceDeletionWorkItem>(await resumed.ClaimNextAsync(default));
         await resumed.PurgeAsync(secondBatch, null, default);
         await using (var check = CreateContext())
         {
-            Assert.Equal(501, await check.IndexGenerationVectors.CountAsync(row => row.VectorId == vector.VectorId));
-            Assert.Equal(2000, await check.SourceDeletionOperations.Select(row => row.MembershipRowsDeleted).SingleAsync());
+            Assert.Equal(1, await check.IndexGenerationVectors.CountAsync(row => row.VectorId == vector.VectorId));
+            Assert.Equal(32000, await check.SourceDeletionOperations.Select(row => row.MembershipRowsDeleted).SingleAsync());
             Assert.Null(await check.SourceDeletionOperations.Select(row => row.MembershipVectorCursor).SingleAsync());
         }
         var finalBatch = Assert.IsType<SourceDeletionWorkItem>(await resumed.ClaimNextAsync(default));
@@ -135,7 +178,7 @@ public sealed partial class SourceDeletionIntegrationTests(NativeSqlServerFixtur
         await using var finalCheck = CreateContext();
         Assert.False(await finalCheck.IndexGenerationVectors.AnyAsync(row => row.VectorId == vector.VectorId));
         Assert.True(await finalCheck.Vectors.AnyAsync(row => row.VectorId == vector.VectorId));
-        Assert.Equal(2501, await finalCheck.SourceDeletionOperations.Select(row => row.MembershipRowsDeleted).SingleAsync());
+        Assert.Equal(32001, await finalCheck.SourceDeletionOperations.Select(row => row.MembershipRowsDeleted).SingleAsync());
         Assert.Equal(vector.VectorId, await finalCheck.SourceDeletionOperations.Select(row => row.MembershipVectorCursor).SingleAsync());
     }
 
@@ -259,6 +302,7 @@ public sealed partial class SourceDeletionIntegrationTests(NativeSqlServerFixtur
         {
             await context.SourceDeletionCleanupItems.ExecuteDeleteAsync();
             await context.SourceDeletionOperations.ExecuteDeleteAsync();
+            await SqlSourceDeletionPendingQueueIndex.EnsureAsync(context, default);
         }
 
         await SqlTestData.ClearPhase3SourceDataAsync(_fixture);
@@ -565,7 +609,7 @@ public sealed partial class SourceDeletionIntegrationTests(NativeSqlServerFixtur
             fileStore: new SuccessfulFileStore(),
             queryCleanupGate: new SqlDerivedIndexRecoveryStore(SqlTestData.CreateFactory(_fixture), TimeProvider.System));
 
-        Assert.True(await coordinator.RunOneAsync(CancellationToken.None));
+        Assert.True(await RunDeletionUntilStoppedAsync(coordinator));
 
         await using var verification = CreateContext();
         Assert.Null(await verification.SourceRootConfigurations.SingleOrDefaultAsync(value => value.Id == deleting.RootId));
@@ -1232,7 +1276,7 @@ public sealed partial class SourceDeletionIntegrationTests(NativeSqlServerFixtur
             new SuccessfulFileStore(),
             queryCleanupGate: new SqlDerivedIndexRecoveryStore(SqlTestData.CreateFactory(_fixture), TimeProvider.System));
 
-        Assert.True(await coordinator.RunOneAsync(CancellationToken.None));
+        Assert.True(await RunDeletionUntilStoppedAsync(coordinator));
 
         await using var verification = CreateContext();
         Assert.Null(await verification.SourceRootConfigurations.SingleOrDefaultAsync(row => row.Id == deleting.RootId));

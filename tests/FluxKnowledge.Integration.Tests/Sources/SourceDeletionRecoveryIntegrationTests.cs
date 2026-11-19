@@ -54,7 +54,8 @@ public sealed partial class SourceDeletionIntegrationTests
         }
         store = new SqlSourceDeletionStore(factory,TimeProvider.System);
         var recovered = Assert.IsType<SourceDeletionWorkItem>(await store.ClaimNextAsync(default));
-        Assert.Equal("cleanup-files",(await store.PurgeAsync(recovered,null,default)).Phase);
+        Assert.Equal("purge-records",(await store.PurgeAsync(recovered,null,default)).Phase);
+        await AdvanceSqlToFilesAsync(store,operationId);
         var files = Assert.IsType<SourceDeletionWorkItem>(await store.ClaimNextAsync(default));
         var target = Assert.Single(await store.ReadPendingCleanupAsync(files,default));
         await using (var graphCommitted = CreateContext())
@@ -452,9 +453,9 @@ public sealed partial class SourceDeletionIntegrationTests
         Assert.Equal(0, await check.SourceDeletionCleanupItems.Select(row => row.State).SingleAsync());
     }
 
-    private static async Task AdvanceSqlToFilesAsync(SqlSourceDeletionStore store, Guid operationId, bool stopAtCutover = false)
+    private static async Task AdvanceSqlToFilesAsync(SqlSourceDeletionStore store, Guid operationId, bool stopAtCutover = false,int maxPasses=32)
     {
-        for (var pass = 0; pass < 32; pass++)
+        for (var pass = 0; pass < maxPasses; pass++)
         {
             var work = Assert.IsType<SourceDeletionWorkItem>(await store.ClaimNextAsync(default));
             Assert.Equal(operationId, work.OperationId);
@@ -540,9 +541,9 @@ public sealed partial class SourceDeletionIntegrationTests
         public ValueTask<SourceDeletionWorkItem?> ClaimNextAsync(CancellationToken ct) => inner.ClaimNextAsync(ct);
         public ValueTask<SourceDeletionRunResult> PurgeAsync(SourceDeletionWorkItem work,
             IndexGenerationCandidateSnapshot? candidate, CancellationToken ct) => inner.PurgeAsync(work, candidate, ct);
-        public async ValueTask<IReadOnlyList<SourceDeletionFileTarget>> ReadPendingCleanupAsync(SourceDeletionWorkItem work, CancellationToken ct)
+        public async ValueTask<IReadOnlyList<SourceDeletionFileTarget>> ReadPendingCleanupAsync(SourceDeletionWorkItem work, CancellationToken ct, int maxTargets = 1)
         {
-            var pending = await inner.ReadPendingCleanupAsync(work, ct);
+            var pending = await inner.ReadPendingCleanupAsync(work, ct, maxTargets);
             if (!_takenOver && pending.Count != 0)
             {
                 _takenOver = true;
@@ -554,6 +555,8 @@ public sealed partial class SourceDeletionIntegrationTests
             }
             return pending;
         }
+        public ValueTask<bool> RecordCleanupResultsAsync(SourceDeletionWorkItem work, IReadOnlyList<SourceDeletionFileOutcome> outcomes, CancellationToken ct) =>
+            inner.RecordCleanupResultsAsync(work, outcomes, ct);
         public ValueTask RecordCleanupResultAsync(SourceDeletionWorkItem work, Guid id, SourceDeletionFileResult result, CancellationToken ct) =>
             inner.RecordCleanupResultAsync(work, id, result, ct);
         public ValueTask FailAsync(SourceDeletionWorkItem work, string reason, CancellationToken ct) => inner.FailAsync(work, reason, ct);

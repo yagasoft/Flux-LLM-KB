@@ -14,7 +14,7 @@ public interface INativeV1Facade
     ValueTask<NativeActionReceipt> CommitAsync(string family, object command, string confirmationId, string idempotencyKey, string surface, CancellationToken cancellationToken);
 }
 
-public sealed record NativeKnowledgeQuery(string Query, int Limit);
+public sealed record NativeKnowledgeQuery(string Query, int Limit, string? Cwd = null);
 public sealed record NativeGraphQuery(string Node, int MaxDepth, int MaxResults);
 
 /// <summary>Single transport-neutral discriminator gate for the native v1 Application surface.</summary>
@@ -82,7 +82,9 @@ public sealed class NativeV1Facade(
     {
         if (request.Limit is < 1 or > 100) throw new NativeOperationException("invalid-query");
         var canonicalQuery = NativeV1ContractLimits.CanonicalizeKnowledgeQuery(request.Query);
-        return await knowledgeQueries.SearchAsync(canonicalQuery, request.Limit, cancellationToken).ConfigureAwait(false);
+        return request.Cwd is { } cwd
+            ? await knowledgeQueries.SearchCodexWorkspaceAsync(canonicalQuery, cwd, request.Limit, cancellationToken).ConfigureAwait(false)
+            : await knowledgeQueries.SearchAsync(canonicalQuery, request.Limit, cancellationToken).ConfigureAwait(false);
     }
 
     private async ValueTask<object> GraphAsync(NativeGraphQuery request, CancellationToken cancellationToken)

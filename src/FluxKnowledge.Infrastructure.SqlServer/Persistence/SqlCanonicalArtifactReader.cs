@@ -38,7 +38,7 @@ internal static class SqlCanonicalArtifactReader
             // transaction; all confirmation and publication proofs stay intact.
             command.CommandText = """
                 SELECT [Id], [PipelineRecordId], [SourceRevision], [Stage], [ContentHash], [ContentType],
-                    [CreatedAtUtc], [DocumentMetadataJson], [SearchText]
+                    [CreatedAtUtc], [WindowEligibilityVersion], [DocumentMetadataJson], [SearchText]
                 FROM [Artifacts]
                 WHERE [PipelineRecordId] = @recordId AND [SourceRevision] = @revision AND [Stage] = @stage
                 """;
@@ -51,16 +51,16 @@ internal static class SqlCanonicalArtifactReader
             {
                 Id = reader.GetGuid(0), PipelineRecordId = reader.GetGuid(1), SourceRevision = reader.GetInt64(2),
                 Stage = reader.GetInt32(3), ContentHash = reader.GetString(4), ContentType = reader.GetString(5),
-                CreatedAtUtc = reader.GetFieldValue<DateTimeOffset>(6)
+                CreatedAtUtc = reader.GetFieldValue<DateTimeOffset>(6), WindowEligibilityVersion = reader.GetGuid(7)
             };
-            if (!await reader.IsDBNullAsync(7, ct).ConfigureAwait(false))
+            if (!await reader.IsDBNullAsync(8, ct).ConfigureAwait(false))
             {
-                using var metadata = reader.GetTextReader(7);
+                using var metadata = reader.GetTextReader(8);
                 result.DocumentMetadataJson = await metadata.ReadToEndAsync(ct).ConfigureAwait(false);
             }
-            if (await reader.IsDBNullAsync(8, ct).ConfigureAwait(false))
+            if (await reader.IsDBNullAsync(9, ct).ConfigureAwait(false))
                 throw new SqlNullValueException("Canonical artifact text is null.");
-            using (var text = reader.GetTextReader(8))
+            using (var text = reader.GetTextReader(9))
                 result.SearchText = await text.ReadToEndAsync(ct).ConfigureAwait(false);
             if (await reader.ReadAsync(ct).ConfigureAwait(false))
                 throw new InvalidOperationException("Sequence contains more than one element.");

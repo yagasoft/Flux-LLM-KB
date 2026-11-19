@@ -14,7 +14,7 @@ public sealed class SourceScanWorkerTests
     [InlineData(false, false)]
     [InlineData(true, false)]
     [InlineData(true, true)]
-    public async Task Git_incremental_bookkeeping_keeps_its_capture_without_filesystem_retention_authority(bool registered, bool incremental)
+    public async Task Git_incremental_bookkeeping_preserves_legacy_store_fallback_and_capture_disposal(bool registered, bool incremental)
     {
         var root = SourceRootConfiguration.Create(@"I:\SyntheticGitFixture", "git", true, false, 1024,
             discoveryMode: SourceDiscoveryMode.GitTracked);
@@ -50,7 +50,36 @@ public sealed class SourceScanWorkerTests
             Assert.Null(enumeration.Capture);
         }
         Assert.Equal(1, artifacts.LegacyCalls);
-        Assert.Equal(0, artifacts.CapturedCalls);
+    }
+
+    [Theory]
+    [InlineData(false)]
+    [InlineData(true)]
+    public async Task Owned_Git_scan_uses_captured_retention_and_disposes_the_capture(bool incremental)
+    {
+        var root = SourceRootConfiguration.Create(@"I:\SyntheticGitFixture", "git", true, false, 1024,
+            discoveryMode: SourceDiscoveryMode.GitTracked);
+        var now = DateTimeOffset.UtcNow;
+        var request = SourceScanRequest.Restore(SourceScanRequestId.New(), root.Id, "test", now,
+            SourceScanRequestState.Released, now, new(Guid.NewGuid(), "git-capture", 1));
+        var file = new SourceDiscoveredFile(Path.Combine(root.CanonicalPath, "one.txt"), "one.txt", "test:git",
+            "one"u8.ToArray(), true, new string('a', 64), 3, now,
+            new(SourceClassification.AcceptedUtf8Text, "one", null), new("repository", "inventory", 1, 0));
+        var enumeration = new GitCaptureEnumerator(file);
+        var artifacts = new GitCapturedArtifactStore(capture =>
+        {
+            Assert.Same(enumeration.Capture, capture);
+            Assert.False(Assert.IsType<TestGitCapture>(capture).Disposed);
+        });
+        var coordinator = new FailingCaptureCoordinator(capture => Assert.Same(enumeration.Capture, capture));
+        var worker = new SourceScanWorker(enumeration, new RecordingScanStore(), artifacts, new RecordingActivityStore(),
+            incrementalCoordinator: incremental ? coordinator : null);
+        if (incremental)
+            await Assert.ThrowsAsync<SourceSnapshotChangedException>(() => worker.ScanAsync(root, request, default).AsTask());
+        else
+            Assert.Equal(1, (await worker.ScanAsync(root, request, default)).DiscoveredCount);
+        Assert.Equal(1, artifacts.CapturedCalls);
+        Assert.True(Assert.IsType<TestGitCapture>(enumeration.Capture).Disposed);
     }
 
     [Fact]
@@ -487,16 +516,29 @@ public sealed class SourceScanWorkerTests
         { ct.ThrowIfCancellationRequested(); yield return file; await Task.CompletedTask; }
     }
 
-    private sealed class GitLegacyArtifactStore(Action onPut) : ICapturedSourceArtifactStore
+    private sealed class GitLegacyArtifactStore(Action onPut) : ISourceArtifactStore
     {
         internal int LegacyCalls { get; private set; }
-        internal int CapturedCalls { get; private set; }
         public ValueTask<SourceArtifactReceipt> PutFileAsync(SourceDiscoveredFile snapshot, SourceArtifactMetadata metadata, CancellationToken ct)
         { onPut(); LegacyCalls++; return PutAsync(snapshot.ClassificationBuffer, metadata, ct); }
         public ValueTask<SourceArtifactReceipt> PutAsync(ReadOnlyMemory<byte> content, SourceArtifactMetadata metadata, CancellationToken ct) =>
             ValueTask.FromResult(new SourceArtifactReceipt(SourceArtifactId.New(), metadata.ContentSha256, "sha256/aa/fixture.bin", metadata.ByteLength, false));
+    }
+
+    private sealed class GitCapturedArtifactStore(Action<ISourceFileCapture> onPut) : ICapturedSourceArtifactStore
+    {
+        internal int CapturedCalls { get; private set; }
+        public ValueTask<SourceArtifactReceipt> PutFileAsync(SourceDiscoveredFile snapshot, SourceArtifactMetadata metadata, CancellationToken ct) =>
+            throw new InvalidOperationException("An owned Git capture must be retained directly.");
+        public ValueTask<SourceArtifactReceipt> PutAsync(ReadOnlyMemory<byte> content, SourceArtifactMetadata metadata, CancellationToken ct) =>
+            throw new InvalidOperationException("An owned Git capture must be retained directly.");
         public ValueTask<SourceArtifactReceipt> PutCapturedFileAsync(ISourceFileCapture capture, SourceArtifactMetadata metadata, CancellationToken ct)
-        { CapturedCalls++; throw new InvalidOperationException("Git retention must retain its existing contract."); }
+        {
+            onPut(capture);
+            CapturedCalls++;
+            return ValueTask.FromResult(new SourceArtifactReceipt(SourceArtifactId.New(), metadata.ContentSha256,
+                "sha256/aa/fixture.bin", metadata.ByteLength, false));
+        }
     }
 
     private sealed class ReturningEnumerator(params SourceDiscoveredFile[] files) : ISourceFileEnumerator

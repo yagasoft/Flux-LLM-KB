@@ -11,5 +11,6 @@ public sealed class ArtifactEntity
     public string SearchText { get; set; } = string.Empty;
     public string? DocumentMetadataJson { get; set; }
     public DateTimeOffset CreatedAtUtc { get; set; }
+    public Guid WindowEligibilityVersion { get; set; } = Guid.NewGuid();
     public PipelineRecordEntity PipelineRecord { get; set; } = null!;
 }

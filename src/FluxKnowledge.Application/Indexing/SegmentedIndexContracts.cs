@@ -1,12 +1,15 @@
 namespace FluxKnowledge.Application.Indexing;
 
-/// <summary>Identity and sealed file proof for one immutable, bounded ANN segment.</summary>
+/// <summary>Identity and local shape of one rebuildable, bounded ANN segment.</summary>
 public sealed record IndexSegmentDescriptor(
     string Id, string ModelFingerprint, int Dimensions, string DirectoryPath,
     string MembershipChecksum, string FileChecksum, long FileLength, long VectorCount,
     string NativeFormat, int FormatVersion = 2,
     [property: System.Text.Json.Serialization.JsonIgnore] Guid PhysicalIncarnation = default)
 {
+    // Preserve the stored descriptor shape without calculating file integrity hashes.
+    public const string UncheckedFileChecksum = "0000000000000000000000000000000000000000000000000000000000000000";
+
     public static string ComputeMembershipChecksum(string modelFingerprint, int dimensions,
         IEnumerable<(long VectorId, string PayloadChecksum)> members) =>
         Convert.ToHexStringLower(System.Security.Cryptography.SHA256.HashData(System.Text.Encoding.UTF8.GetBytes(

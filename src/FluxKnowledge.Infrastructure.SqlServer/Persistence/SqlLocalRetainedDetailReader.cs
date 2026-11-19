@@ -1,4 +1,3 @@
-using System.Security.Cryptography;
 using System.Text;
 using FluxKnowledge.Application.Ports;
 using FluxKnowledge.Application.Sources;
@@ -132,22 +131,10 @@ public sealed class SqlLocalRetainedDetailReader(
         long artifactByteLength)
     {
         if (retained.ByteLength != artifactByteLength || retained.Bytes.LongLength != artifactByteLength ||
-            !string.Equals(retained.ContentSha256, artifactHash, StringComparison.Ordinal) ||
-            !string.Equals(ComputeRetainedByteHash(retained.Bytes), artifactHash, StringComparison.Ordinal))
+            !string.Equals(retained.ContentSha256, artifactHash, StringComparison.Ordinal))
         {
             throw new InvalidDataException("The retained detail binding is invalid.");
         }
-    }
-
-    private static string ComputeRetainedByteHash(byte[] bytes)
-    {
-        using var hash = IncrementalHash.CreateHash(HashAlgorithmName.SHA256);
-        for (var offset = 0; offset < bytes.Length; offset += 81920)
-        {
-            hash.AppendData(bytes.AsSpan(offset, Math.Min(81920, bytes.Length - offset)));
-        }
-
-        return Convert.ToHexStringLower(hash.GetHashAndReset());
     }
 
     private LocalRetainedAttemptProjection CreateAttemptProjection(Persistence.Entities.SourceProcessorAttemptEntity attempt)

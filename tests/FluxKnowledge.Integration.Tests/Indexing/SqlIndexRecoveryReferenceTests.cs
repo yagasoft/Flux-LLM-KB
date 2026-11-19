@@ -28,6 +28,27 @@ public sealed class SqlIndexRecoveryReferenceTests(NativeSqlServerFixture fixtur
         Directory.CreateDirectory(Recovery); Directory.CreateDirectory(Index);
     }
 
+    [NativeSqlServerTheory]
+    [InlineData(1)]
+    [InlineData(2)]
+    public async Task Older_native_or_legacy_staging_seals_require_a_fresh_native_audit(int previousVersion)
+    {
+        await InitialiseAsync();
+        await Store().AuditAsync(Recovery, Index, default);
+        await using var db = await SqlTestData.CreateFactory(fixture).CreateDbContextAsync();
+        await db.IndexRecoveryAudit.ExecuteUpdateAsync(set => set.SetProperty(value => value.ClassifierVersion, previousVersion));
+        await using (var transaction = await db.Database.BeginTransactionAsync(IsolationLevel.Serializable))
+        {
+            var failure = await Assert.ThrowsAsync<InvalidOperationException>(() => SqlIndexRecoveryReferences.RequireCurrentAsync(db, Recovery, Index, default));
+            Assert.Equal("segment-retirement-legacy-live-proof-required", failure.Message);
+            await transaction.RollbackAsync();
+        }
+        await Store().AuditAsync(Recovery, Index, default);
+        await using var current = await db.Database.BeginTransactionAsync(IsolationLevel.Serializable);
+        await SqlIndexRecoveryReferences.RequireCurrentAsync(db, Recovery, Index, default);
+        await current.CommitAsync();
+    }
+
     [NativeSqlServerFact]
     public async Task A_successful_seal_hands_off_its_lock_before_the_original_connection_is_disposed()
     {

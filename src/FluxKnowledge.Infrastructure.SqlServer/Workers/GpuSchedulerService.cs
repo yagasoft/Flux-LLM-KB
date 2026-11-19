@@ -2,6 +2,7 @@ using FluxKnowledge.Application.Gpu;
 using FluxKnowledge.Application.Ports;
 using FluxKnowledge.Application.Sources;
 using FluxKnowledge.Domain.Gpu;
+using FluxKnowledge.Infrastructure.SqlServer.Persistence;
 using Microsoft.Extensions.DependencyInjection;
 using Microsoft.Extensions.Hosting;
 using Microsoft.Extensions.Logging;
@@ -200,6 +201,10 @@ public sealed class GpuSchedulerService(
                 catch (OperationCanceledException) when (stoppingToken.IsCancellationRequested)
                 {
                     throw;
+                }
+                catch (SqlGpuAdmissionDeferredException)
+                {
+                    _logger.LogDebug("GPU admission is fenced; the pending operation and durable wake were retained.");
                 }
                 catch (Exception exception)
                 {

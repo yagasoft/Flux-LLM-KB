@@ -283,7 +283,9 @@ public sealed class SegmentRetirementTests(NativeSqlServerFixture fixture) : ICl
         var budget = new IndexProjectionMaintenanceBudget();
         Assert.Equal(new IndexProjectionMaintenanceResult(0, 0, 0), await Operations(TimeProvider.System).RunOnceAsync(budget, CancellationToken.None));
         var operations = Operations(new FutureClock());
-        var small = await operations.RunOnceAsync(budget with { MaximumBytes = 1 }, CancellationToken.None);
+        var readingOperations = new SqlSegmentRetirementOperations(environment.Factory, new FailedProjectionFileStore(),
+            environment.IndexRoot, recovery, new FutureClock(), new WindowsInteractiveGpuOwnerProbe());
+        var small = await readingOperations.RunOnceAsync(budget with { MaximumBytes = 1 }, CancellationToken.None);
         Assert.Equal("segment-retirement-byte-budget", small.ReasonCode);
         Assert.Equal(0, small.ReclaimedBytes);
         Assert.True(Directory.Exists(old.IndexPath));

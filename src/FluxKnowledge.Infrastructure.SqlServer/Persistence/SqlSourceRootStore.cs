@@ -81,10 +81,13 @@ public sealed class SqlSourceRootStore(
                 .ConfigureAwait(false);
         }
 
+        await SqlPublishedPassageSelection.AcquireFenceAsync(context, cancellationToken).ConfigureAwait(false);
         await LockCanonicalRootAsync(context, canonicalPath, cancellationToken).ConfigureAwait(false);
         var existing = await context.SourceRootConfigurations
             .SingleOrDefaultAsync(root => root.CanonicalPath == canonicalPath, cancellationToken)
             .ConfigureAwait(false);
+        await SqlOutlookSourceReservations.RequireAvailableAsync(context, canonicalPath, existing,
+            enable: false, cancellationToken).ConfigureAwait(false);
         if (existing is not null)
         {
             if (!configuration.Matches(existing) ||

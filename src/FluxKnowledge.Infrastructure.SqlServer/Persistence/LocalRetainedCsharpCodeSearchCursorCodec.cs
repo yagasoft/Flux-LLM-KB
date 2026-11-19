@@ -20,8 +20,8 @@ internal sealed record LocalRetainedCsharpCodeSearchCursorPosition(
 public sealed class LocalRetainedCsharpCodeSearchCursorCodec
 {
     private const string ProtectorPurpose = "FluxKnowledge.LocalRetainedCsharpCodeSearchCursor/v1";
-    private const int CurrentVersion = 1;
-    private const int MaximumTokenCharacters = 1024;
+    private const int CurrentVersion = 2;
+    private const int MaximumTokenCharacters = 65536;
     private static readonly JsonSerializerOptions SerializerOptions = new(JsonSerializerDefaults.Web);
     private readonly IDataProtector? _protector;
 
@@ -61,7 +61,7 @@ public sealed class LocalRetainedCsharpCodeSearchCursorCodec
 
         var payload = new CursorPayload(
             CurrentVersion,
-            FingerprintQuery(canonicalQuery),
+            canonicalQuery,
             branchId,
             (int)factKind,
             ordinal,
@@ -119,12 +119,20 @@ public sealed class LocalRetainedCsharpCodeSearchCursorCodec
 
             var payloadBytes = _protector.Unprotect(Base64UrlDecode(cursor.Token));
             var payload = JsonSerializer.Deserialize<CursorPayload>(payloadBytes, SerializerOptions);
+            if (payload?.Version == 1)
+            {
+                var legacy = JsonSerializer.Deserialize<LegacyCursorPayload>(payloadBytes, SerializerOptions);
+                if (legacy is null || !string.Equals(legacy.QueryFingerprint,
+                    Convert.ToHexStringLower(SHA256.HashData(Encoding.UTF8.GetBytes(canonicalQuery))), StringComparison.Ordinal))
+                    throw new LocalRetainedCsharpCodeSearchCursorException();
+                payload = new(CurrentVersion, canonicalQuery, legacy.BranchId, legacy.FactKind, legacy.Ordinal, legacy.FactFingerprint);
+            }
             if (payload is null || payload.Version != CurrentVersion || payload.BranchId == Guid.Empty ||
-                payload.Ordinal < 0 || !IsSha256(payload.QueryFingerprint) ||
+                payload.Ordinal < 0 ||
                 !IsSha256(payload.FactFingerprint) ||
                 payload.FactKind is not (int)LocalRetainedCsharpCodeSearchFactKind.Symbol and
                     not (int)LocalRetainedCsharpCodeSearchFactKind.Reference ||
-                !string.Equals(payload.QueryFingerprint, FingerprintQuery(canonicalQuery), StringComparison.Ordinal))
+                !string.Equals(payload.Query, canonicalQuery, StringComparison.Ordinal))
             {
                 throw new LocalRetainedCsharpCodeSearchCursorException();
             }
@@ -174,9 +182,6 @@ public sealed class LocalRetainedCsharpCodeSearchCursorCodec
         };
     }
 
-    private static string FingerprintQuery(string canonicalQuery) =>
-        Convert.ToHexStringLower(SHA256.HashData(Encoding.UTF8.GetBytes(canonicalQuery)));
-
     private static bool IsSha256(string? value) =>
         value is { Length: 64 } && value.All(Uri.IsHexDigit);
 
@@ -211,9 +216,14 @@ public sealed class LocalRetainedCsharpCodeSearchCursorCodec
 
     private sealed record CursorPayload(
         int Version,
-        string QueryFingerprint,
+        string Query,
         Guid BranchId,
         int FactKind,
         int Ordinal,
         string FactFingerprint);
+
+    // Only previously-issued v1 tokens need the old query digest; v2 creation
+    // and validation use the protected canonical query directly.
+    private sealed record LegacyCursorPayload(int Version, string QueryFingerprint, Guid BranchId,
+        int FactKind, int Ordinal, string FactFingerprint);
 }

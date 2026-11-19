@@ -1,3 +1,4 @@
+using System.Text.Json.Serialization;
 using FluxKnowledge.Application.Contracts;
 using FluxKnowledge.Domain.Outlook;
 using FluxKnowledge.Integrations.Files;
@@ -11,6 +12,15 @@ public sealed record OutlookExportManifest(
     IReadOnlyList<OutlookExportSidecar> Attachments,
     OutlookReadyExportRecovery Recovery)
 {
+    [JsonIgnore(Condition = JsonIgnoreCondition.WhenWritingNull)]
+    public string? Subject { get; init; }
+
+    [JsonIgnore(Condition = JsonIgnoreCondition.WhenWritingNull)]
+    public string? Sender { get; init; }
+
+    [JsonIgnore(Condition = JsonIgnoreCondition.WhenWritingNull)]
+    public DateTimeOffset? ReceivedAtUtc { get; init; }
+
     public static OutlookExportManifest Create(
         Guid exportId,
         string bodyRelativePath,
@@ -78,6 +88,10 @@ public sealed record OutlookExportSidecar(
     string ContentSha256,
     long ByteLength)
 {
+    /// <summary>Attachment display metadata. Only <see cref="RelativePath"/> identifies a spool file.</summary>
+    [JsonIgnore(Condition = JsonIgnoreCondition.WhenWritingNull)]
+    public string? OriginalFileName { get; init; }
+
     public static OutlookExportSidecar Create(string relativePath, string contentType) =>
         new(relativePath, contentType, new string('0', 64), 0);
 
@@ -117,11 +131,11 @@ public sealed record OutlookExportSidecar(
         {
             throw new OutlookReadyExportValidationException("ready-sidecar-invalid", exception);
         }
-        return new OutlookExportSidecar(
-            sidecar.RelativePath,
-            sidecar.ContentType,
-            verified.ContentSha256,
-            verified.ByteLength);
+        return sidecar with
+        {
+            ContentSha256 = verified.ContentSha256,
+            ByteLength = verified.ByteLength
+        };
     }
 
     internal static void ValidateRelativePath(string value)

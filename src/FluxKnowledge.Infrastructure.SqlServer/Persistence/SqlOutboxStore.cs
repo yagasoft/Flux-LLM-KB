@@ -105,7 +105,7 @@ public sealed class SqlOutboxStore(
                   AND [input].[Classification] = @inputClassification AND [input].[Extension] = '.vsdx'
                   AND [input].[OriginKind] = 2 AND [input].[SuppressedAtUtc] IS NULL
                   AND [owner].[Id] = @ownerRevisionId AND [owner].[ContentSha256] = @inputHash
-                  AND [owner].[ParentSourceRevisionId] IS NULL AND [owner].[SuppressedAtUtc] IS NULL
+                  AND [owner].[OriginKind] = 0 AND [owner].[SuppressedAtUtc] IS NULL
                   AND [owner].[SourceRootId] = [input].[SourceRootId]
                   AND [branch].[Id] = @branchId AND [branch].[SourceRevisionId] = @ownerRevisionId
                   AND [branch].[InputSha256] = @inputHash AND [branch].[ProcessorFingerprint] = @processorFingerprint

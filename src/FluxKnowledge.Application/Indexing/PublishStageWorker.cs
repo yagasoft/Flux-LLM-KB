@@ -14,7 +14,8 @@ public sealed class PublishStageWorker(
     IIndexGenerationPublisher publisher,
     StageTransitionService transitions,
     TimeProvider timeProvider,
-    ILogger<PublishStageWorker>? logger = null) : IStageWorker
+    ILogger<PublishStageWorker>? logger = null,
+    IRetainedProcessorFailureClassifier? failureClassifier = null) : IStageWorker
 {
     public string Operation => PipelineOperations.Publish;
 
@@ -83,6 +84,22 @@ public sealed class PublishStageWorker(
                     }
                 }
                 // Valid vectors and immutable placements are reusable; only membership changed.
+            }
+            catch (Exception exception) when (failureClassifier?.TryClassify(exception, out _) == true)
+            {
+                // Build has returned and its native handles have unwound. A lost
+                // activation acknowledgement must never revoke committed output;
+                // the store checks the exact owner and leaves activated state intact.
+                if (candidate is not null)
+                {
+                    try { await publisher.AbandonAsync(candidate, cancellationToken); }
+                    catch (Exception cleanup) when (!cancellationToken.IsCancellationRequested)
+                    {
+                        exception.Data["candidate-abandonment-failure"] = cleanup.GetType().Name;
+                        PublicationDiagnostics.Failure(logger, workItem.Job.JobId.Value, "candidate-abandonment", cleanup);
+                    }
+                }
+                throw;
             }
         }
         await transitions.RetryAsync(new StageRetryRequest(workItem.DispatchMessage, workItem.Job,

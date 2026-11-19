@@ -35,6 +35,7 @@ internal sealed record NativeFileMutation(bool Changed, string? Reason, NativeFi
 }
 
 internal sealed record NativeLiteralFile(byte[] Content, NativeFileIdentity Identity);
+internal sealed record NativeLiteralFileMetadata(long ByteLength, NativeFileIdentity Identity);
 internal sealed record NativeLiteralChild(string Name, NativeFileIdentity Identity, bool IsDirectory);
 
 internal sealed class VerifiedNativeDirectory : IDisposable
@@ -767,6 +768,21 @@ internal sealed partial class HandleRelativeNativeFileSystem
         }
 
         return NativeFileMutation.Completed(destinationIdentity);
+    }
+
+    internal NativeLiteralFileMetadata? ReadLiteralFileMetadata(VerifiedNativeDirectory parent,
+        string literalChild, CancellationToken cancellationToken = default)
+    {
+        cancellationToken.ThrowIfCancellationRequested();
+        EnsureVerifiedParent(parent);
+        EnsureLiteralChild(literalChild);
+        if (!NativeMethods.TryOpenRelative(parent.Handle, literalChild, NativeMethods.FileReadAccess,
+            NativeMethods.ShareAll, NativeMethods.FileOpen, NativeMethods.FileOpenOptions, out var handle)) return null;
+        using (handle)
+        {
+            EnsureSafeFile(handle!);
+            return new NativeLiteralFileMetadata(RandomAccess.GetLength(handle!), NativeMethods.GetIdentity(handle!));
+        }
     }
 
     internal async ValueTask<NativeLiteralFile?> ReadLiteralFileAsync(

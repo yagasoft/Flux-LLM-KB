@@ -57,6 +57,7 @@ function New-SourceJournalHelperUpdate {
         [Parameter(Mandatory)][string]$ReleaseId,[Parameter(Mandatory)][string]$CandidatePath,
         [Parameter(Mandatory)][string]$ExpectedCandidateSha256,[Parameter(Mandatory)][hashtable]$TaskObservation,
         [Parameter(Mandatory)][string]$PipeName,[Parameter(Mandatory)][string[]]$ApprovedVolumes,
+        [switch]$PreserveJournalPolicy,
         [ValidatePattern('^([A-Fa-f0-9]{64})?$')][string]$ExpectedJournalPolicySha256='')
     $root=[IO.Path]::TrimEndingDirectorySeparator([IO.Path]::GetFullPath($InstallRoot));$drive=[IO.Path]::GetPathRoot($root)
     if(![IO.Path]::IsPathFullyQualified($InstallRoot) -or [IO.Path]::GetDirectoryName($root) -ine $drive -or
@@ -104,6 +105,14 @@ function New-SourceJournalHelperUpdate {
         }
         $after=[Text.UTF8Encoding]::new($false).GetBytes(([ordered]@{Version=1;PipeName=$PipeName;
             ApprovedVolumes=@($ApprovedVolumes|ForEach-Object {$_.ToUpperInvariant()});RepairEnabled=[bool]$repairEnabled}|ConvertTo-Json -Depth 4))
+        if($PreserveJournalPolicy){
+            if($null -eq $before -or $existing.PipeName -cne $PipeName -or
+                (@($existing.ApprovedVolumes|ForEach-Object {$_.ToUpperInvariant()}|Sort-Object) -join '|') -cne
+                (@($ApprovedVolumes|ForEach-Object {$_.ToUpperInvariant()}|Sort-Object) -join '|')){
+                throw 'journal-helper-payload-only-existing-policy-required'
+            }
+            $after=$before
+        }
         $security=[Security.AccessControl.RawSecurityDescriptor]::new('O:BAG:BAD:P(A;OICI;FA;;;SY)(A;OICI;FA;;;BA)')
         $descriptor=[byte[]]::new($security.BinaryLength);$security.GetBinaryForm($descriptor,0)
         $updates=Join-Path $root 'updates'
@@ -130,7 +139,8 @@ function New-SourceJournalHelperUpdate {
                         AfterHash=(Get-SourceJournalHelperHash $after);Attempted=$false;RollbackVerified=$true};
                     PayloadRoot=$payload;CandidateRoot=$staged;PreviousRoot=(Join-Path $release 'previous');FailedRoot=(Join-Path $release 'failed');
                     RootLease=$held;CheckpointPath=(Join-Path $release 'state.json');Phase='Prepared';Attempted=$false;
-                    OldPayloadMoved=$false;CandidatePlaced=$false;Completed=$false;RollbackVerified=$false}
+                    OldPayloadMoved=$false;CandidatePlaced=$false;Completed=$false;RollbackVerified=$false;
+                    PreserveJournalPolicy=[bool]$PreserveJournalPolicy}
                 Write-SourceJournalHelperCheckpoint $state 'Prepared'
                 $held=$null
                 return $state
@@ -197,11 +207,13 @@ function Invoke-SourceJournalHelperUpdate {
         $State.OldPayloadMoved=$true
         Move-Item -LiteralPath $State.CandidateRoot -Destination $State.PayloadRoot -ErrorAction Stop
         $State.CandidatePlaced=$true
-        if($null -ne $State.Policy.Before){Set-SourceAccessConfigurationChange -Change $State.Policy}
-        else{
-            $file=[IO.FileStream]::new($State.Policy.Path,[IO.FileMode]::CreateNew,[IO.FileAccess]::Write,[IO.FileShare]::Read)
-            $State.Policy.Attempted=$true;$State.Policy.RollbackVerified=$false
-            try{$file.Write($State.Policy.After);$file.Flush($true)}finally{$file.Dispose()}
+        if(!$State.ContainsKey('PreserveJournalPolicy') -or !$State.PreserveJournalPolicy){
+            if($null -ne $State.Policy.Before){Set-SourceAccessConfigurationChange -Change $State.Policy}
+            else{
+                $file=[IO.FileStream]::new($State.Policy.Path,[IO.FileMode]::CreateNew,[IO.FileAccess]::Write,[IO.FileShare]::Read)
+                $State.Policy.Attempted=$true;$State.Policy.RollbackVerified=$false
+                try{$file.Write($State.Policy.After);$file.Flush($true)}finally{$file.Dispose()}
+            }
         }
         Assert-SourceAccessConfigurationChange -Change $State.Policy
         Assert-SourceJournalHelperBindings $State $Ports
@@ -219,6 +231,7 @@ function Invoke-SourceJournalHelperUpdate {
         try{
             Stop-SourceJournalHelperForUpdate $State $Ports
             Assert-SourceJournalHelperBindings $State $Ports
+            if($Ports.ContainsKey('AssertRollbackAllowed')){&$Ports.AssertRollbackAllowed}
             if($State.CandidatePlaced){Move-Item -LiteralPath $State.PayloadRoot -Destination $State.FailedRoot -ErrorAction Stop}
             if($State.OldPayloadMoved){Move-Item -LiteralPath $State.PreviousRoot -Destination $State.PayloadRoot -ErrorAction Stop}
             Restore-SourceJournalHelperPolicy $State
@@ -281,4 +294,4 @@ function Test-SourceJournalHeldHelperRecovery {
 }
 
 function Close-SourceJournalHelperUpdate([hashtable]$State){if($State -and $State.RootLease){$State.RootLease.Dispose();$State.RootLease=$null}}
-Export-ModuleMember -Function Get-SourceJournalHelperPayloadManifest,New-SourceJournalHelperUpdate,Invoke-SourceJournalHelperUpdate,Close-SourceJournalHelperUpdate,Test-SourceJournalHeldHelperRecovery
+Export-ModuleMember -Function Get-SourceJournalHelperPayloadManifest,New-SourceJournalHelperUpdate,Invoke-SourceJournalHelperUpdate,Close-SourceJournalHelperUpdate,Test-SourceJournalHeldHelperRecovery,Read-SourceJournalHelperFile,Assert-SourceJournalHelperBindings

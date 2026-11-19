@@ -156,13 +156,15 @@ internal sealed class SqlOutlookHostControlPlane(
     {
         await using var context = await contextFactory.CreateDbContextAsync(cancellationToken).ConfigureAwait(false);
         var now = _clock.GetUtcNow();
+        var autoEnableBrowses = SqlOutlookCaptureStore.AutoEnableBrowses(context);
         return await ClaimNextPendingBrowseAsync(
             async token =>
             {
-                // Select expired pending work as well: ClaimBrowseAsync is the SQL-authoritative
-                // terminalisation path and clears its private target before considering the next row.
+                // The store clears expired paths and fences replacements for interrupted leases.
                 return await context.OutlookBrowseRequests.AsNoTracking()
-                    .Where(row => row.State == 0)
+                    .Where(row => row.State == 0 ||
+                        (row.State == 1 && row.LeaseExpiresAtUtc <= now &&
+                            autoEnableBrowses.Any(browse => browse.Id == row.Id)))
                     .OrderBy(row => row.ExpiresAtUtc)
                     .ThenBy(row => row.Id)
                     .Select(row => (Guid?)row.Id)

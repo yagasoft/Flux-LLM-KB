@@ -193,8 +193,10 @@ internal sealed partial class StagingRootedIndexFixture
         }
         public ValueTask<SourceDeletionRunResult> PurgeAsync(SourceDeletionWorkItem work,IndexGenerationCandidateSnapshot? survivor,CancellationToken ct)
         {Check(work);return native.PurgeAsync(work,survivor,ct);}
-        public ValueTask<IReadOnlyList<SourceDeletionFileTarget>> ReadPendingCleanupAsync(SourceDeletionWorkItem work,CancellationToken ct)
-        {Check(work);return native.ReadPendingCleanupAsync(work,ct);}
+        public ValueTask<IReadOnlyList<SourceDeletionFileTarget>> ReadPendingCleanupAsync(SourceDeletionWorkItem work,CancellationToken ct,int maxTargets=1)
+        {Check(work);return native.ReadPendingCleanupAsync(work,ct,maxTargets);}
+        public ValueTask<bool> RecordCleanupResultsAsync(SourceDeletionWorkItem work,IReadOnlyList<SourceDeletionFileOutcome> outcomes,CancellationToken ct)
+        {Check(work);return native.RecordCleanupResultsAsync(work,outcomes,ct);}
         public ValueTask RecordCleanupResultAsync(SourceDeletionWorkItem work,Guid item,SourceDeletionFileResult result,CancellationToken ct)
         {Check(work);return native.RecordCleanupResultAsync(work,item,result,ct);}
         public ValueTask FailAsync(SourceDeletionWorkItem work,string reason,CancellationToken ct){Check(work);return native.FailAsync(work,reason,ct);}

@@ -306,7 +306,12 @@ public sealed partial class SqlDocumentOcrStore
             if (rows.Request.ExecutionPhase == (int)DocumentOcrExecutionPhase.Settled)
                 return new(DocumentOcrLifecycleDisposition.AlreadyApplied, "document-ocr-settled");
             if (!HasCleanupProof(rows.Request, lease.Handle, lease.MiniTaskId)) return Refused(DocumentOcrLifecycleDisposition.CleanupUnproven);
-            if (!OwnsSlot(rows) || requireWithdrawnSource && await SourceIsEnabledAsync(context, rows.Request, ct).ConfigureAwait(false))
+            if (!OwnsSlot(rows)) return Refused(DocumentOcrLifecycleDisposition.StaleOwner);
+            var durableSource = await HasDurableSourceBindingAsync(context, rows.Request, ct).ConfigureAwait(false);
+            // A process-local admission miss or unconfirmed removal is not
+            // durable withdrawal, nor grounds for the fallback no-result release.
+            if (requireWithdrawnSource && durableSource || !requireWithdrawnSource && durableSource &&
+                !await SourceIsEnabledAsync(context, rows.Request, ct).ConfigureAwait(false))
                 return Refused(DocumentOcrLifecycleDisposition.StaleOwner);
             if (rows.Request.ResultJson is not null || rows.Request.ResultDigest is not null ||
                 rows.Request.State >= (int)DocumentOcrRequestState.ResultStored)
@@ -378,7 +383,7 @@ public sealed partial class SqlDocumentOcrStore
             r.SupervisorProcessStartedAtUtc!.Value, r.ExecutionMachineFingerprint!)), r.ExecutionClaimedAtUtc!.Value, r.ExecutionDeadlineAtUtc!.Value);
     private static DocumentOcrLifecycleResult Refused(DocumentOcrLifecycleDisposition disposition) => new(disposition, $"document-ocr-{disposition.ToString().ToLowerInvariant()}");
     private static string Fingerprint(string input) => Convert.ToHexString(SHA256.HashData(Encoding.UTF8.GetBytes(input)));
-    private static Guid PhaseOperation(GpuExecutorBatchHandle h, Guid executionId, string phase) =>
+    internal static Guid PhaseOperation(GpuExecutorBatchHandle h, Guid executionId, string phase) =>
         new(SHA256.HashData(Encoding.UTF8.GetBytes($"ocr-lifecycle-v1|{h.DispatchId:N}|{h.BatchId:N}|{h.AdmissionGeneration}|{executionId:N}|{phase}")).AsSpan(0, 16));
     private static bool ValidStoredResult(DocumentOcrRequestEntity request, byte[] expected)
     {

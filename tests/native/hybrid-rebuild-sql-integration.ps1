@@ -34,6 +34,7 @@ function Invoke-FixtureSessionControl {
 }
 if ($Mode -eq 'drain') {
     $evidence = @{ Called=$false; Killed=$false }
+    Assert-HybridGpuDrainPreflight -ConnectionString $connectionString
     Invoke-WithHybridGpuDrain -ConnectionString $connectionString -TimeoutSeconds 2 -StopApplication {
         $evidence.Called = $true
         $lockResult = Invoke-TestSql @'
@@ -58,11 +59,19 @@ SELECT @result;
     foreach ($mutation in @('UPDATE GpuCapacitySlots SET State=2', 'DELETE FROM GpuCapacitySlots')) {
         [void](Invoke-TestSql $mutation)
         $evidence.Called = $false
+        $timer=[Diagnostics.Stopwatch]::StartNew()
+        $preflightRefused=$false
+        try{Assert-HybridGpuDrainPreflight -ConnectionString $connectionString}catch{
+            if($_.Exception.Message -cne 'hybrid-gpu-drain-timeout-or-uncertain-capacity'){throw}
+            $preflightRefused=$true
+        }
+        if(!$preflightRefused){throw 'Definite unsafe capacity passed the read-only preflight.'}
         try {
-            Invoke-WithHybridGpuDrain -ConnectionString $connectionString -TimeoutSeconds 1 -StopApplication { $evidence.Called=$true }
+            Invoke-WithHybridGpuDrain -ConnectionString $connectionString -TimeoutSeconds 10 -StopApplication { $evidence.Called=$true }
             throw 'Unsafe capacity reached stop.'
         }
         catch { if ($_.Exception.Message -cne 'hybrid-gpu-drain-timeout-or-uncertain-capacity' -or $evidence.Called) { throw } }
+        if($timer.Elapsed.TotalSeconds -ge 1){throw 'Definite uncertain or missing capacity consumed the active-work drain window.'}
     }
     Write-Output 'PowerShell GPU drain verified against disposable SQL: held admission, session loss, uncertain and missing capacity.'
 }
