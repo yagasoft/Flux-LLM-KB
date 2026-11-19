@@ -11,6 +11,10 @@ internal static class RecoveryUpdateMetadata
     private const string CodexWorkspace = "codex-workspace-notes-migration";
     private const string CodexWorkspaceTarget = "20261118225053_BindCodexNotesToWorkspace";
     private const string CodexWorkspaceSql = "E04F8B2FD6478D9A05D08C3C0966AD5C9BADCC70D1D859582C36032E27C8FCCC";
+    private const string Media = "media-transcription-gpu-migration";
+    private const string MediaTarget = "20261119125051_AddMediaTranscriptionGpuRequests";
+    private const string MediaSql = "D37933C7B951F81A6A39E92F4D0814725AB1AA0DE166F5BE795BE7141FE0B46B";
+    private const string MediaHoldForwardIntent = "media-transcription-hold-forward-intent.json";
     private const string Queue = "source-deletion-pending-queue-index";
     private const string WindowTarget = "20261117210606_PersistPassageWindowEligibility";
     private const string OutlookTarget = "20261118224032_BindOutlookWatchedSources";
@@ -27,16 +31,21 @@ internal static class RecoveryUpdateMetadata
             [Window + "-intent.json"] = (Intent, ""), [Queue + "-intent.json"] = (Intent, ""),
             [Outlook + "-intent.json"] = (Intent, ""),
             [CodexWorkspace + "-intent.json"] = (Intent, ""),
+            [Media + "-intent.json"] = (Intent, ""),
             [Window + "-outcome.json"] = (Outcome, "Error"), [Queue + "-outcome.json"] = (Outcome, "Error"),
             [Outlook + "-outcome.json"] = (Outcome, "Error"),
             [CodexWorkspace + "-outcome.json"] = (Outcome, "Error"),
+            [Media + "-outcome.json"] = (Outcome, "Error"),
             [Queue + "-release-binding.json"] = (Binding, ""),
             [Window + "-release-binding.json"] = (Binding + " HelperTask HelperCheckpointPath HelperRootReadPlanSha256 HelperJournalPolicySha256 HelperRepairPolicySha256", ""),
             [Outlook + "-release-binding.json"] = (Binding + " HelperTask HelperCheckpointPath HelperRootReadPlanSha256 HelperJournalPolicySha256 HelperRepairPolicySha256", ""),
             [CodexWorkspace + "-release-binding.json"] = (Binding + " HelperTask HelperCheckpointPath HelperRootReadPlanSha256 HelperJournalPolicySha256 HelperRepairPolicySha256", ""),
+            [Media + "-release-binding.json"] = (Binding + " HelperTask HelperCheckpointPath HelperRootReadPlanSha256 HelperJournalPolicySha256 HelperRepairPolicySha256" +
+                " MediaOptionsSha256 MediaConfigurationAfterSha256 MediaConfigurationBackup", ""),
             [Window + "-failure-reconciliation.json"] = ("ReleaseId Identity SettledState Error Attempted PredecessorStarted HoldRetained", "ScriptStackTrace ErrorTarget"),
             [Outlook + "-failure-reconciliation.json"] = ("ReleaseId Identity SettledState Error Attempted PredecessorStarted HoldRetained", "ScriptStackTrace ErrorTarget"),
             [CodexWorkspace + "-failure-reconciliation.json"] = ("ReleaseId Identity SettledState Error Attempted PredecessorStarted HoldRetained", "ScriptStackTrace ErrorTarget"),
+            [Media + "-failure-reconciliation.json"] = ("ReleaseId Identity SettledState Error Attempted PredecessorStarted HoldRetained", "ScriptStackTrace ErrorTarget"),
             [Queue + "-failure-reconciliation.json"] = ("ReleaseId Identity SettledState Error Attempted PredecessorStarted HoldRetained", ""),
             ["pre-ddl-abort-intent.json"] = ("ReleaseId BindingSha256 RecordedUtc", ""),
             ["pre-ddl-abort-completed.json"] = ("ReleaseId OriginalSchema CompletedUtc", ""),
@@ -44,19 +53,23 @@ internal static class RecoveryUpdateMetadata
             ["codex-workspace-pre-ddl-abort-intent.json"] = ("ReleaseId BindingSha256 RecordedUtc", ""),
             ["outlook-pre-ddl-abort-completed.json"] = ("ReleaseId OriginalSchema CompletedUtc", ""),
             ["codex-workspace-pre-ddl-abort-completed.json"] = ("ReleaseId OriginalSchema CompletedUtc", ""),
+            ["media-transcription-pre-ddl-abort-intent.json"] = ("ReleaseId BindingSha256 RecordedUtc", ""),
+            ["media-transcription-pre-ddl-abort-completed.json"] = ("ReleaseId OriginalSchema CompletedUtc", ""),
+            [MediaHoldForwardIntent] = ("PriorReleaseId PriorBindingSha256 ReleaseId ReleaseBindingSha256 RecordedUtc", ""),
             ["stopped-release-hold-transfer.json"] = ("Version Purpose ReleaseId PriorReleaseId BindingSha256 HoldTransferred HoldTransferIntentUtc", "")
         };
 
     internal static bool Supports(string name) => Shapes.ContainsKey(name) ||
-        name is "passage-window-eligibility-up.sql" or "source-deletion-pending-queue-index.sql" or "outlook-watched-source-up.sql" or "codex-workspace-notes-up.sql";
+        name is "passage-window-eligibility-up.sql" or "source-deletion-pending-queue-index.sql" or "outlook-watched-source-up.sql" or "codex-workspace-notes-up.sql" or "media-transcription-gpu-up.sql";
 
     internal static bool IsTypedManifest(JsonElement value) => value.TryGetProperty("passage_window_eligibility", out _) ||
         value.TryGetProperty("source_deletion_pending_queue", out _) || value.TryGetProperty("outlook_watched_source", out _) ||
-        value.TryGetProperty("codex_workspace_notes", out _);
+        value.TryGetProperty("codex_workspace_notes", out _) || value.TryGetProperty("media_transcription_gpu", out _);
 
     internal static bool ValidateManifest(JsonElement value, string packet)
     {
-        var (field, family) = value.TryGetProperty("codex_workspace_notes", out _) ? ("codex_workspace_notes", CodexWorkspace) :
+        var (field, family) = value.TryGetProperty("media_transcription_gpu", out _) ? ("media_transcription_gpu", Media) :
+            value.TryGetProperty("codex_workspace_notes", out _) ? ("codex_workspace_notes", CodexWorkspace) :
             value.TryGetProperty("outlook_watched_source", out _) ? ("outlook_watched_source", Outlook) :
             value.TryGetProperty("passage_window_eligibility", out _) ? ("passage_window_eligibility", Window) :
             ("source_deletion_pending_queue", Queue);
@@ -74,6 +87,12 @@ internal static class RecoveryUpdateMetadata
     {
         if (!Shapes.TryGetValue(name, out var shape) || !Closed(value, shape.Required, shape.Optional)) return false;
         var release = Path.GetFileName(packet);
+        if (name == MediaHoldForwardIntent)
+            return Text(value.GetProperty("PriorReleaseId")) == release &&
+                Text(value.GetProperty("ReleaseId")) is { } successor && successor != release &&
+                Regex.IsMatch(successor, @"^\d{8}T\d{6}Z-[0-9a-f]{12}$", RegexOptions.CultureInvariant) &&
+                Hash(value.GetProperty("PriorBindingSha256")) && Hash(value.GetProperty("ReleaseBindingSha256")) &&
+                Date(value.GetProperty("RecordedUtc"));
         foreach (var property in value.EnumerateObject())
         {
             var item = property.Value;
@@ -83,6 +102,7 @@ internal static class RecoveryUpdateMetadata
                 "OriginalSchema" => item.ValueKind == JsonValueKind.Number && item.TryGetInt32(out var schema) &&
                     schema == (name switch
                     {
+                        "media-transcription-pre-ddl-abort-completed.json" => 82,
                         "codex-workspace-pre-ddl-abort-completed.json" => 81,
                         "outlook-pre-ddl-abort-completed.json" => 80,
                         _ => 79
@@ -97,6 +117,9 @@ internal static class RecoveryUpdateMetadata
                     item.EnumerateArray().All(entry => Text(entry) is { } text && Regex.IsMatch(text, @"^\d{14}_[A-Za-z0-9_]+$", RegexOptions.CultureInvariant)),
                 "CompletedUtc" or "RecordedUtc" or "HoldTransferIntentUtc" => Date(item),
                 "HelperCheckpointPath" => Absolute(item),
+                "MediaConfigurationBackup" => Absolute(item) && Text(item) is { } backup &&
+                    Path.GetFileName(backup) == $"appsettings.Production.json.{release}.previous" &&
+                    string.Equals(Path.GetFileName(Path.GetDirectoryName(backup)), "Config", StringComparison.OrdinalIgnoreCase),
                 "IntentPath" => SamePath(item, Path.Combine(packet, name)),
                 "OutcomePath" => SamePath(item, Path.Combine(packet, name.Replace("-intent.json", "-outcome.json", StringComparison.Ordinal))),
                 "InitialKind" => Text(item) is "Old" or "New",
@@ -107,7 +130,7 @@ internal static class RecoveryUpdateMetadata
             };
             if (!valid) return false;
         }
-        foreach (var family in new[] { Window, Outlook, CodexWorkspace, Queue })
+        foreach (var family in new[] { Window, Outlook, CodexWorkspace, Media, Queue })
         {
             if (!name.StartsWith(family + "-", StringComparison.Ordinal)) continue;
             if (value.TryGetProperty("Target", out _) && !TargetAndSql(value, family, optionalSql: true)) return false;
@@ -125,6 +148,7 @@ internal static class RecoveryUpdateMetadata
             Window => (WindowTarget, WindowSql),
             Outlook => (OutlookTarget, OutlookSql),
             CodexWorkspace => (CodexWorkspaceTarget, CodexWorkspaceSql),
+            Media => (MediaTarget, MediaSql),
             Queue => (QueueTarget, QueueSql),
             _ => throw new ArgumentOutOfRangeException(nameof(family))
         };

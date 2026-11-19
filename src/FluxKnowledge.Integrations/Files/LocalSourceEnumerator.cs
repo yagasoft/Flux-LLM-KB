@@ -289,7 +289,8 @@ public sealed partial class LocalSourceEnumerator : IAuthoritativeSourceFileEnum
     public static bool MatchesPolicy(string relativePath, IReadOnlyList<string> includes, IReadOnlyList<string> excludes)
     {
         var normalised = relativePath.Replace(Path.DirectorySeparatorChar, '/');
-        return (includes.Count == 0 || includes.Any(pattern => GlobMatches(normalised, pattern))) &&
+        return !WindowsTranscriptSidecarWriter.IsStagingFile(Path.GetFileName(relativePath)) &&
+            (includes.Count == 0 || includes.Any(pattern => GlobMatches(normalised, pattern))) &&
             !excludes.Any(pattern => GlobMatches(normalised, pattern));
     }
 
@@ -315,8 +316,10 @@ public sealed partial class LocalSourceEnumerator : IAuthoritativeSourceFileEnum
             budget.ReserveRead(length); // Reject before the first content read, not after hashing the file.
             var lastWrite = File.GetLastWriteTimeUtc(lease.Handle);
             var identity = _readIdentity(lease.Handle);
-            var effectiveTextLimit = Math.Min(root.MaximumFileBytes, SourceClassifier.MaximumAcceptedTextBytes);
-            using var retained = new MemoryStream(length <= effectiveTextLimit ? checked((int)length) : signatureLimit);
+            const long effectiveTextLimit = SourceClassifier.MaximumAcceptedTextBytes;
+            var hasFullBuffer = length <= effectiveTextLimit;
+            var bytes = new byte[checked((int)(hasFullBuffer ? length : Math.Min(length, signatureLimit)))];
+            var retainedLength = 0;
             stream = new FileStream(lease.Handle, FileAccess.Read, bufferSize, isAsync: true);
             var readBuffer = new byte[bufferSize];
             using var hash = IncrementalHash.CreateHash(HashAlgorithmName.SHA256);
@@ -328,15 +331,14 @@ public sealed partial class LocalSourceEnumerator : IAuthoritativeSourceFileEnum
                 SourceBytesRead?.Invoke(read);
                 hash.AppendData(readBuffer, 0, read);
                 total += read;
-                var remaining = (length <= effectiveTextLimit ? length : signatureLimit) - retained.Length;
-                if (remaining > 0) retained.Write(readBuffer, 0, (int)Math.Min(remaining, read));
+                var retain = Math.Min(bytes.Length - retainedLength, read);
+                readBuffer.AsSpan(0, retain).CopyTo(bytes.AsSpan(retainedLength));
+                retainedLength += retain;
             }
             cancellationToken.ThrowIfCancellationRequested();
             WindowsSourcePathAccess.EnsureContentAvailable(WindowsSourcePathAccess.ReadMetadata(lease.Handle));
             if (RandomAccess.GetLength(lease.Handle) != length || File.GetLastWriteTimeUtc(lease.Handle) != lastWrite)
                 throw new SourceSnapshotChangedException("The source changed during discovery.");
-            var bytes = retained.ToArray();
-            var hasFullBuffer = length <= effectiveTextLimit;
             var snapshot = new SourceDiscoveredFile(Path.GetFullPath(path), relativePath, identity, bytes, hasFullBuffer,
                 Convert.ToHexStringLower(hash.GetHashAndReset()), length, lastWrite,
                 SourceClassifier.Classify(path, bytes, length, hasFullBuffer, effectiveTextLimit, root.IndexSourceText),

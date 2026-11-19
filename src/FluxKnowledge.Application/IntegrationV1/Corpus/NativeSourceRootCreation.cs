@@ -18,9 +18,10 @@ public static class NativeSourceRootCreation
             _ => throw new NativeOperationException("invalid-discovery-mode")
         };
         var sourceText = Bool(payload, "indexSourceText", true);
+        _ = Long(payload, "maximumFileBytes", SourcePolicyDefaults.MaximumTextBytes);
         return new SourceRootCreateRequest(payload.GetProperty("path").GetString()!, payload.GetProperty("displayName").GetString()!,
             Bool(payload, "recursive", true), ReadRules(payload, "includePatterns") ?? [], ReadRules(payload, "excludePatterns") ?? [],
-            Bool(payload, "followLinks", false), Long(payload, "maximumFileBytes", SourcePolicyDefaults.MaximumTextBytes),
+            Bool(payload, "followLinks", false), SourcePolicyDefaults.MaximumTextBytes,
             sourceText ? ["text/plain", "text/x-source-code"] : [],
             TimeSpan.FromSeconds(Long(payload, "reconciliationSeconds", SourcePolicyDefaults.MetadataReconciliationSeconds)), actor, DiscoveryMode: mode);
     }

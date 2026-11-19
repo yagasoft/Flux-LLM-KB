@@ -133,5 +133,5 @@ public sealed class OverviewProjectionState(IProjectionReader reader, ILogger<Ov
     }
 
     public static bool AffectsOverview(string projection) => projection.ToLowerInvariant() is
-        "pipeline" or "sources" or "index-recovery" or "gpu-scheduler" or "reconnect";
+        "pipeline" or "source" or "sources" or "index-recovery" or "gpu-scheduler" or "file-attention" or "reconnect";
 }

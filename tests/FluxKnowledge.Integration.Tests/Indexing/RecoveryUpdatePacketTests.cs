@@ -16,7 +16,64 @@ public sealed class RecoveryUpdatePacketTests : IDisposable
     private const string QueueSql = "C247F3429F303F959583F0BC59683A1F208B29B86EA509DD4638CE3CED23707E";
     private const string OutlookSql = "3B090C12B0DD55CD7B0CFAAF8623435322AC01AD038D21337A49E99CBEDA1CBD";
     private const string CodexWorkspaceSql = "E04F8B2FD6478D9A05D08C3C0966AD5C9BADCC70D1D859582C36032E27C8FCCC";
+    private const string MediaSql = "D37933C7B951F81A6A39E92F4D0814725AB1AA0DE166F5BE795BE7141FE0B46B";
     private static string Hash => new('b', 64);
+
+    [Theory]
+    [InlineData(false)]
+    [InlineData(true)]
+    public void Transcription_packets_accept_only_the_reviewed_schema_and_complete_optional_configuration(bool failed)
+    {
+        WritePacket(true, failed, media: true);
+        if (failed)
+        {
+            Write("media-transcription-pre-ddl-abort-intent.json", new { ReleaseId = Release, BindingSha256 = Hash, RecordedUtc = DateTimeOffset.UtcNow });
+            Write("media-transcription-pre-ddl-abort-completed.json", new { ReleaseId = Release, OriginalSchema = 82, CompletedUtc = DateTimeOffset.UtcNow });
+        }
+        var audit = new RecoveryIndexReferenceAudit(Index);
+        const string binding = "media-transcription-gpu-migration-release-binding.json";
+        Assert.Throws<RecoveryIndexAuditException>(() => audit.Capture(Recovery));
+        Mutate(binding, value => value["MediaOptionsSha256"] = Hash);
+        Assert.Throws<RecoveryIndexAuditException>(() => audit.Capture(Recovery));
+        Mutate(binding, value =>
+        {
+            value["MediaConfigurationAfterSha256"] = new string('c', 64);
+            value["MediaConfigurationBackup"] = Path.Combine(_root, "Config", $"appsettings.Production.json.{Release}.previous");
+        });
+        Assert.Empty(audit.Capture(Recovery).Pins);
+        Mutate(binding, value => value["MediaConfigurationBackup"] = Path.Combine(_root, "Config", "another-release.previous"));
+        Assert.Throws<RecoveryIndexAuditException>(() => audit.Capture(Recovery));
+        Mutate(binding, value =>
+        {
+            value["MediaConfigurationBackup"] = Path.Combine(_root, "Config", $"appsettings.Production.json.{Release}.previous");
+            value["SqlSha256"] = CodexWorkspaceSql;
+        });
+        var refusal = Assert.Throws<RecoveryIndexAuditException>(() => audit.Capture(Recovery));
+        Assert.Equal(Path.GetRelativePath(Recovery, Path.Combine(Packet, binding)), refusal.RelativePath);
+    }
+
+    [Fact]
+    public void Media_hold_forward_receipt_requires_two_distinct_bound_releases()
+    {
+        WritePacket(true, true, media: true);
+        Mutate("media-transcription-gpu-migration-release-binding.json", value =>
+        {
+            value["MediaOptionsSha256"] = Hash;
+            value["MediaConfigurationAfterSha256"] = Hash;
+            value["MediaConfigurationBackup"] = Path.Combine(_root, "Config", $"appsettings.Production.json.{Release}.previous");
+        });
+        const string receipt = "media-transcription-hold-forward-intent.json";
+        Write(receipt, new
+        {
+            PriorReleaseId = Release, PriorBindingSha256 = Hash, ReleaseId = "20261118T000000Z-bbbbbbbbbbbb",
+            ReleaseBindingSha256 = Hash, RecordedUtc = DateTimeOffset.UtcNow
+        });
+        var audit = new RecoveryIndexReferenceAudit(Index);
+        Assert.Empty(audit.Capture(Recovery).Pins);
+        Mutate(receipt, value => value["ReleaseId"] = Release);
+        var failure = Assert.Throws<RecoveryIndexAuditException>(() => audit.Capture(Recovery));
+        Assert.Equal(Path.GetRelativePath(Recovery, Path.Combine(Packet, receipt)), failure.RelativePath);
+    }
 
     [Theory]
     [InlineData(false)]
@@ -149,7 +206,7 @@ public sealed class RecoveryUpdatePacketTests : IDisposable
         Assert.NotEqual(2, RecoveryIndexReferenceAudit.ClassifierVersion);
     }
 
-    private void WritePacket(bool window, bool failed, bool outlook = false, bool codexWorkspace = false)
+    private void WritePacket(bool window, bool failed, bool outlook = false, bool codexWorkspace = false, bool media = false)
     {
         Directory.CreateDirectory(Packet); Directory.CreateDirectory(Index);
         var family = codexWorkspace ? "codex-workspace-notes-migration" : outlook ? "outlook-watched-source-migration" : window ? "passage-window-eligibility-migration" : "source-deletion-pending-queue-index";
@@ -157,6 +214,14 @@ public sealed class RecoveryUpdatePacketTests : IDisposable
         var sql = codexWorkspace ? CodexWorkspaceSql : outlook ? OutlookSql : window ? WindowSql : QueueSql;
         var manifestField = codexWorkspace ? "codex_workspace_notes" : outlook ? "outlook_watched_source" : window ? "passage_window_eligibility" : "source_deletion_pending_queue";
         var up = codexWorkspace ? "codex-workspace-notes-up.sql" : outlook ? "outlook-watched-source-up.sql" : window ? "passage-window-eligibility-up.sql" : "source-deletion-pending-queue-index.sql";
+        if (media)
+        {
+            family = "media-transcription-gpu-migration";
+            target = "20261119125051_AddMediaTranscriptionGpuRequests";
+            sql = MediaSql;
+            manifestField = "media_transcription_gpu";
+            up = "media-transcription-gpu-up.sql";
+        }
         var payloads = new[] { "Web", "OutlookHost", "Cli" }.Select(role => new { Role = role, Root = Path.Combine(_root, role), Sha256 = Hash }).ToArray();
         var binding = new Dictionary<string, object?> {
             ["Version"] = 1, ["Purpose"] = family + "-release", ["ReleaseId"] = Release, ["Commit"] = new string('a', 40),
@@ -188,7 +253,7 @@ public sealed class RecoveryUpdatePacketTests : IDisposable
         {
             Write(family + "-failure-reconciliation.json", new { ReleaseId = Release, Identity = "synthetic|test|" + Guid.NewGuid(), SettledState = "Old",
                 Error = "synthetic failure", Attempted = false, PredecessorStarted = false, HoldRetained = true });
-            if (window && !outlook && !codexWorkspace)
+            if (window && !outlook && !codexWorkspace && !media)
             {
                 Write("pre-ddl-abort-intent.json", new { ReleaseId = Release, BindingSha256 = Hash, RecordedUtc = DateTimeOffset.UtcNow });
                 Write("pre-ddl-abort-completed.json", new { ReleaseId = Release, OriginalSchema = 79, CompletedUtc = DateTimeOffset.UtcNow });

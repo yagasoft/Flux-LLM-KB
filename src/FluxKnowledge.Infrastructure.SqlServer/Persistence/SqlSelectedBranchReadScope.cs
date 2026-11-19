@@ -140,7 +140,7 @@ public sealed class SqlSelectedBranchReadScope : IAsyncDisposable
                 PipelineRecordId uniqueidentifier NOT NULL, SourceRootId uniqueidentifier NULL,
                 LogicalSourceRevisionId uniqueidentifier NULL, SourceRevision bigint NOT NULL,
                 CurrentStage int NOT NULL, MatchesSelectedFileBranch bit NOT NULL,
-                Stage int NOT NULL, PublicState int NOT NULL, IsHistorical bit NOT NULL,
+                Stage int NOT NULL, PublicState int NOT NULL, IsHistorical bit NOT NULL, RemovalCleanupBlocker int NOT NULL,
                 SourceAdmitted bit NOT NULL, HasWorkerLease bit NOT NULL, HasActiveGpu bit NOT NULL,
                 HasReadyGpu bit NOT NULL, HasUncertainGpu bit NOT NULL, HasWaitingGpu bit NOT NULL,
                 HasPendingDispatch bit NOT NULL, IsDue bit NOT NULL,

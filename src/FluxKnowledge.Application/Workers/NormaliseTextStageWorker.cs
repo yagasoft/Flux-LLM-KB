@@ -1,7 +1,9 @@
 using System.Security.Cryptography;
 using System.Text;
+using System.Text.Json;
 using FluxKnowledge.Application.Text;
 using FluxKnowledge.Application.Documents;
+using FluxKnowledge.Application.Gpu;
 using FluxKnowledge.Application.Pipeline;
 using FluxKnowledge.Domain.Pipeline;
 
@@ -41,7 +43,21 @@ public sealed class NormaliseTextStageWorker(
 
         string normalised;
         string? normalisedMetadataJson;
-        if (source.InputDocumentMetadataJson is null)
+        if (source.InputIsNativeTranscript)
+        {
+            using var metadata = JsonDocument.Parse(source.InputDocumentMetadataJson ?? "{}");
+            if (metadata.RootElement.ValueKind != JsonValueKind.Object ||
+                !metadata.RootElement.TryGetProperty("schema", out var schema) ||
+                schema.ValueKind != JsonValueKind.String ||
+                schema.GetString() != MediaTranscriptionGpuContracts.MetadataSchema)
+                throw new InvalidOperationException("transcription-metadata-invalid");
+
+            // The extract artefact retains cues and language evidence. Canonical
+            // passages index the inline timestamps without OCR page metadata.
+            normalised = NormalisePlainText(source.InputText);
+            normalisedMetadataJson = null;
+        }
+        else if (source.InputDocumentMetadataJson is null)
         {
             normalised = NormalisePlainText(source.InputText);
             normalisedMetadataJson = null;

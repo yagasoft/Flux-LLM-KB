@@ -1,3 +1,4 @@
+using FluxKnowledge.Application.Gpu;
 using FluxKnowledge.Application.Pipeline;
 using FluxKnowledge.Application.Ports;
 using FluxKnowledge.Application.Sources;
@@ -33,6 +34,7 @@ public sealed class OutboxPumpService(
         var jobs = scope.ServiceProvider.GetRequiredService<IJobClaimStore>();
         var transitions = scope.ServiceProvider.GetRequiredService<StageTransitionService>();
         var processed = 0;
+        var readyOperations = registration.ReadyOperations;
 
         while (!cancellationToken.IsCancellationRequested)
         {
@@ -41,7 +43,7 @@ public sealed class OutboxPumpService(
                     _leaseOwner,
                     now,
                     LeaseDuration,
-                    registration.Operations,
+                    readyOperations,
                     cancellationToken)
                 .ConfigureAwait(false);
             if (dispatch is null)
@@ -111,7 +113,8 @@ public sealed class OutboxPumpService(
                 throw;
             }
             catch (Exception exception) when (job.Stage == dispatch.Stage && job.Operation == dispatch.Operation &&
-                (job.Stage == PipelineStage.Extract && job.Operation == PipelineOperations.ExtractDocument ||
+                (job.Stage == PipelineStage.Extract && (job.Operation == PipelineOperations.ExtractDocument ||
+                    job.Operation == MediaTranscriptionGpuContracts.Operation) ||
                  job.Stage == PipelineStage.Normalise && job.Operation == PipelineOperations.NormaliseText ||
                  job.Stage == PipelineStage.CanonicalIndex && job.Operation == PipelineOperations.CanonicalIndex ||
                  job.Stage == PipelineStage.Embed && job.Operation == PipelineOperations.Embed ||

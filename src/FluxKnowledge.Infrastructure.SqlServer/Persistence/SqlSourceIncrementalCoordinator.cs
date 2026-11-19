@@ -9,7 +9,7 @@ namespace FluxKnowledge.Infrastructure.SqlServer.Persistence;
 
 public sealed partial class SqlSourceIncrementalCoordinator(
     IDbContextFactory<FluxKnowledgeDbContext> factory, TimeProvider time, ISourceChangeJournalReader reader,
-    ISourceObservationReader observations, ISourceArtifactStore artifacts, SourceJournalOptions options) : ISourceIncrementalCoordinator
+    ISourceObservationReader observations, ISourceArtifactStore artifacts, SourceJournalOptions options, SqlSourceWorkRecoveryProgress? recoveryProgress = null) : ISourceIncrementalCoordinator
 {
     private readonly SqlSourceChangeJournalStore _journal = new(factory, time);
     private sealed record CachedObservation(int Version, SourceFileObservation Source, RetainedFileObservation Retained,

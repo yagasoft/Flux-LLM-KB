@@ -36,7 +36,6 @@ public sealed record GpuSchedulerOptions
 
     public TimeSpan UnresponsiveDiagnosticAge { get; }
     public GpuWorkloadPolicy? WorkloadPolicy { get; }
-    public const int MaxSearchBatchesBeforeOcr = 3;
 
     public void Validate()
     {

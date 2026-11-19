@@ -7,7 +7,7 @@ function Get-PassageWindowEligibilityHash([string]$Text) {
 }
 
 function Get-PassageWindowEligibilityMigrationContract {
-    param([switch]$Outlook,[switch]$CodexWorkspace)
+    param([switch]$Outlook,[switch]$CodexWorkspace,[switch]$MediaTranscription)
     $contract = @{
         Baseline='20261101195325_AddVectorPublicationMetadata'
         Target='20261117210606_PersistPassageWindowEligibility'
@@ -26,7 +26,7 @@ function Get-PassageWindowEligibilityMigrationContract {
         ManifestField='passage_window_eligibility'
         Description='additive migration 79 to 80; eligibility proofs and withdrawal cursor; no corpus backfill'
     }
-    if ($Outlook -or $CodexWorkspace) {
+    if ($Outlook -or $CodexWorkspace -or $MediaTranscription) {
         $contract.Baseline = $contract.Target
         $contract.Target = '20261118224032_BindOutlookWatchedSources'
         $contract.PriorHistoryCount = 80
@@ -39,7 +39,7 @@ function Get-PassageWindowEligibilityMigrationContract {
         $contract.ManifestField = 'outlook_watched_source'
         $contract.Description = 'additive migration 80 to 81; watched Outlook binding and bundle receipts; no export or backfill'
     }
-    if ($CodexWorkspace) {
+    if ($CodexWorkspace -or $MediaTranscription) {
         $contract.Baseline = $contract.Target
         $contract.Target = '20261118225053_BindCodexNotesToWorkspace'
         $contract.PriorHistoryCount = 81
@@ -49,6 +49,19 @@ function Get-PassageWindowEligibilityMigrationContract {
         $contract.ArtifactPrefix = 'codex-workspace-notes'
         $contract.ManifestField = 'codex_workspace_notes'
         $contract.Description = 'additive migration 81 to 82; nullable workspace binding and filtered index; no backfill'
+    }
+    if ($MediaTranscription) {
+        $contract.Baseline = $contract.Target
+        $contract.Target = '20261119125051_AddMediaTranscriptionGpuRequests'
+        $contract.PriorHistoryCount = 82
+        $contract.PriorHistorySha256 = 'CB7ABAE921C58E917F380094FA6829247248268DC18DE477B2748250194F9A35'
+        $contract.UpSha256 = 'D37933C7B951F81A6A39E92F4D0814725AB1AA0DE166F5BE795BE7141FE0B46B'
+        $contract.DownSha256 = 'AF94F983A26AF71A1DE61AACE435A8CB6DE1EEDE55F2925453042B3292AB4374'
+        $contract.MediaSchemaQuerySha256 = '43FC00EA22FD9A55D3215C14A8FEC97C9C62A9C0A0132148506D56114AE37793'
+        $contract.MediaSchemaSha256 = 'DBAEED568E77C9B38D318BF86660A82552C749486E9CC71F0E4E89675EE299D3'
+        $contract.ArtifactPrefix = 'media-transcription-gpu'
+        $contract.ManifestField = 'media_transcription_gpu'
+        $contract.Description = 'additive migration 82 to 83; shared GPU transcription request lifecycle'
     }
     [pscustomobject]$contract
 }
@@ -71,6 +84,18 @@ function Get-OutlookWatchedSourceSchemaSha256 {
         } finally { $reader.Dispose() }
         if (!$json.Length) { throw 'outlook-watched-source-schema-observation-missing' }
         Get-PassageWindowEligibilityHash $json.ToString()
+    } finally { $command.Dispose() }
+}
+
+function Get-MediaTranscriptionSchemaFingerprint {
+    param([Parameter(Mandatory)]$Connection,[Parameter(Mandatory)]$Transaction)
+    $command = $Connection.CreateCommand()
+    try {
+        $command.Transaction = $Transaction
+        $command.CommandTimeout = 10
+        $command.CommandText = Read-PassageWindowEligibilitySqlText (Join-Path $PSScriptRoot 'media-transcription-gpu-schema.sql') `
+            (Get-PassageWindowEligibilityMigrationContract -MediaTranscription).MediaSchemaQuerySha256 'media-transcription-gpu-schema-query-changed'
+        [string]$command.ExecuteScalar()
     } finally { $command.Dispose() }
 }
 
@@ -101,8 +126,8 @@ function Get-PassageWindowEligibilitySchemaSha256 {
 }
 
 function Get-PassageWindowEligibilityStateKind {
-    param([Parameter(Mandatory)]$DatabaseState,[Parameter(Mandatory)][string]$ExpectedDatabaseIdentity,[switch]$Outlook,[switch]$CodexWorkspace)
-    $contract=Get-PassageWindowEligibilityMigrationContract -Outlook:$Outlook -CodexWorkspace:$CodexWorkspace;$history=@($DatabaseState.History)
+    param([Parameter(Mandatory)]$DatabaseState,[Parameter(Mandatory)][string]$ExpectedDatabaseIdentity,[switch]$Outlook,[switch]$CodexWorkspace,[switch]$MediaTranscription)
+    $contract=Get-PassageWindowEligibilityMigrationContract -Outlook:$Outlook -CodexWorkspace:$CodexWorkspace -MediaTranscription:$MediaTranscription;$history=@($DatabaseState.History)
     if(-not $ExpectedDatabaseIdentity -or $DatabaseState.Identity -cne $ExpectedDatabaseIdentity -or
         $DatabaseState.ResolvesDbo -cne $true -or
         $DatabaseState.SchemaSha256 -cne $contract.JournalSchemaSha256 -or
@@ -110,6 +135,15 @@ function Get-PassageWindowEligibilityStateKind {
     if($history.Count -notin @($contract.PriorHistoryCount,($contract.PriorHistoryCount+1))){throw 'window-eligibility-history-not-exact'}
     $prefix=@($history[0..($contract.PriorHistoryCount-1)])
     if($prefix[-1] -cne $contract.Baseline -or (Get-PassageWindowEligibilityHash ($prefix -join "`n")) -cne $contract.PriorHistorySha256){throw 'window-eligibility-predecessor-history-changed'}
+    if ($MediaTranscription) {
+        if ($DatabaseState.FeatureSchemaSha256 -cne $contract.NewSchemaSha256 -or
+            $DatabaseState.OutlookSchemaSha256 -cne $contract.OutlookNewSchemaSha256 -or
+            $DatabaseState.CodexWorkspaceSchemaKind -cne 'New') { throw 'media-transcription-predecessor-schema-changed' }
+        if ($history.Count -eq 82 -and $DatabaseState.MediaSchemaFingerprint -ceq 'Old') { return 'Old' }
+        if ($history.Count -eq 83 -and $history[-1] -ceq $contract.Target -and
+            $DatabaseState.MediaSchemaFingerprint -ceq $contract.MediaSchemaSha256) { return 'New' }
+        throw 'media-transcription-partial-or-unreviewed-state-retain-hold'
+    }
     if ($CodexWorkspace) {
         if ($DatabaseState.FeatureSchemaSha256 -cne $contract.NewSchemaSha256 -or
             $DatabaseState.OutlookSchemaSha256 -cne $contract.OutlookNewSchemaSha256) {
@@ -147,7 +181,7 @@ function Read-PassageWindowEligibilitySqlText([string]$Path,[string]$ExpectedSha
 }
 
 function Read-PassageWindowEligibilityConnectionState {
-    param([Parameter(Mandatory)]$Connection,[Parameter(Mandatory)]$Transaction,[switch]$Outlook,[switch]$CodexWorkspace)
+    param([Parameter(Mandatory)]$Connection,[Parameter(Mandatory)]$Transaction,[switch]$Outlook,[switch]$CodexWorkspace,[switch]$MediaTranscription)
     $command=$Connection.CreateCommand()
     try {
         $command.Transaction=$Transaction;$command.CommandTimeout=10
@@ -155,12 +189,16 @@ function Read-PassageWindowEligibilityConnectionState {
         $identity=[string]$command.ExecuteScalar()
         $command.CommandText="SELECT CASE WHEN OBJECT_ID(N'Vectors')=OBJECT_ID(N'dbo.Vectors') AND OBJECT_ID(N'__EFMigrationsHistory')=OBJECT_ID(N'dbo.__EFMigrationsHistory') AND OBJECT_ID(N'dbo.Vectors') IS NOT NULL AND OBJECT_ID(N'dbo.__EFMigrationsHistory') IS NOT NULL AND OBJECT_ID(N'Artifacts')=OBJECT_ID(N'dbo.Artifacts') AND OBJECT_ID(N'TextChunks')=OBJECT_ID(N'dbo.TextChunks') AND OBJECT_ID(N'SourceDeletionOperations')=OBJECT_ID(N'dbo.SourceDeletionOperations') AND (OBJECT_ID(N'TextChunkWindowEligibilities') IS NULL OR OBJECT_ID(N'TextChunkWindowEligibilities')=OBJECT_ID(N'dbo.TextChunkWindowEligibilities')) AND (OBJECT_ID(N'TextChunkWindowBackfillStates') IS NULL OR OBJECT_ID(N'TextChunkWindowBackfillStates')=OBJECT_ID(N'dbo.TextChunkWindowBackfillStates')) THEN 1 ELSE 0 END;"
         $resolvesDbo=$command.ExecuteScalar() -eq 1
-        if (($Outlook -or $CodexWorkspace) -and $resolvesDbo) {
+        if (($Outlook -or $CodexWorkspace -or $MediaTranscription) -and $resolvesDbo) {
             $command.CommandText = "SELECT CASE WHEN OBJECT_ID(N'OutlookCaptureProfiles')=OBJECT_ID(N'dbo.OutlookCaptureProfiles') AND OBJECT_ID(N'OutlookCaptureExports')=OBJECT_ID(N'dbo.OutlookCaptureExports') AND OBJECT_ID(N'SourceRootConfigurations')=OBJECT_ID(N'dbo.SourceRootConfigurations') THEN 1 ELSE 0 END;"
             $resolvesDbo = $command.ExecuteScalar() -eq 1
         }
-        if ($CodexWorkspace -and $resolvesDbo) {
+        if (($CodexWorkspace -or $MediaTranscription) -and $resolvesDbo) {
             $command.CommandText = "SELECT CASE WHEN OBJECT_ID(N'KnowledgeItems',N'U')=OBJECT_ID(N'dbo.KnowledgeItems',N'U') THEN 1 ELSE 0 END;"
+            $resolvesDbo = $command.ExecuteScalar() -eq 1
+        }
+        if ($MediaTranscription -and $resolvesDbo) {
+            $command.CommandText = "SELECT CASE WHEN SCHEMA_NAME()=N'dbo' AND (OBJECT_ID(N'MediaTranscriptionGpuRequests') IS NULL OR OBJECT_ID(N'MediaTranscriptionGpuRequests')=OBJECT_ID(N'dbo.MediaTranscriptionGpuRequests')) THEN 1 ELSE 0 END;"
             $resolvesDbo = $command.ExecuteScalar() -eq 1
         }
         $command.CommandText="SELECT HAS_PERMS_BY_NAME(DB_NAME(),'DATABASE','ALTER');"
@@ -174,8 +212,9 @@ function Read-PassageWindowEligibilityConnectionState {
         if(-not $schema){throw 'window-eligibility-journal-schema-observation-missing'}
         [pscustomobject]@{Identity=$identity;History=$history.ToArray();CanAlter=$canAlter;ResolvesDbo=$resolvesDbo;
             SchemaSha256=(Get-PassageWindowEligibilityHash $schema);
-            CodexWorkspaceSchemaKind=$(if ($CodexWorkspace) { Get-CodexWorkspaceNotesSchemaKind $Connection $Transaction });
-            OutlookSchemaSha256=$(if ($Outlook -or $CodexWorkspace) { Get-OutlookWatchedSourceSchemaSha256 $Connection $Transaction });
+            MediaSchemaFingerprint=$(if ($MediaTranscription) { Get-MediaTranscriptionSchemaFingerprint $Connection $Transaction });
+            CodexWorkspaceSchemaKind=$(if ($CodexWorkspace -or $MediaTranscription) { Get-CodexWorkspaceNotesSchemaKind $Connection $Transaction });
+            OutlookSchemaSha256=$(if ($Outlook -or $CodexWorkspace -or $MediaTranscription) { Get-OutlookWatchedSourceSchemaSha256 $Connection $Transaction });
             FeatureSchemaSha256=(Get-PassageWindowEligibilitySchemaSha256 -Connection $Connection -Transaction $Transaction);
             MetadataIndexSha256=(Get-VectorPublicationMetadataIndexSha256 -Connection $Connection -Transaction $Transaction);
             QueueIndexSha256=(Get-SourceDeletionPendingQueueIndexSha256 -Connection $Connection -Transaction $Transaction)}
@@ -193,27 +232,27 @@ function New-PassageWindowEligibilityConnection([string]$ConnectionString) {
 }
 
 function Get-PassageWindowEligibilityDatabaseState {
-    param([Parameter(Mandatory)][string]$ConnectionString,[switch]$Outlook,[switch]$CodexWorkspace)
+    param([Parameter(Mandatory)][string]$ConnectionString,[switch]$Outlook,[switch]$CodexWorkspace,[switch]$MediaTranscription)
     $connection=New-PassageWindowEligibilityConnection $ConnectionString
     try {
         $connection.Open();$transaction=$connection.BeginTransaction([Data.IsolationLevel]::Serializable)
-        try {$state=Read-PassageWindowEligibilityConnectionState $connection $transaction -Outlook:$Outlook -CodexWorkspace:$CodexWorkspace;$transaction.Commit();$state}
+        try {$state=Read-PassageWindowEligibilityConnectionState $connection $transaction -Outlook:$Outlook -CodexWorkspace:$CodexWorkspace -MediaTranscription:$MediaTranscription;$transaction.Commit();$state}
         finally {$transaction.Dispose()}
     } finally {$connection.Dispose()}
 }
 
 function Invoke-PassageWindowEligibilityMigrationSql {
     param([Parameter(Mandatory)][string]$ConnectionString,[Parameter(Mandatory)][string]$SqlPath,
-        [Parameter(Mandatory)][string]$ExpectedDatabaseIdentity,[switch]$Outlook,[switch]$CodexWorkspace)
-    $contract=Get-PassageWindowEligibilityMigrationContract -Outlook:$Outlook -CodexWorkspace:$CodexWorkspace
+        [Parameter(Mandatory)][string]$ExpectedDatabaseIdentity,[switch]$Outlook,[switch]$CodexWorkspace,[switch]$MediaTranscription)
+    $contract=Get-PassageWindowEligibilityMigrationContract -Outlook:$Outlook -CodexWorkspace:$CodexWorkspace -MediaTranscription:$MediaTranscription
     $text=Read-PassageWindowEligibilitySqlText $SqlPath $contract.UpSha256 'window-eligibility-up-sql-changed'
     $connection=New-PassageWindowEligibilityConnection $ConnectionString
     try {
         $connection.Open()
         $transaction=$connection.BeginTransaction([Data.IsolationLevel]::Serializable)
         try {
-            $before=Read-PassageWindowEligibilityConnectionState $connection $transaction -Outlook:$Outlook -CodexWorkspace:$CodexWorkspace
-            $kind=Get-PassageWindowEligibilityStateKind $before $ExpectedDatabaseIdentity -Outlook:$Outlook -CodexWorkspace:$CodexWorkspace
+            $before=Read-PassageWindowEligibilityConnectionState $connection $transaction -Outlook:$Outlook -CodexWorkspace:$CodexWorkspace -MediaTranscription:$MediaTranscription
+            $kind=Get-PassageWindowEligibilityStateKind $before $ExpectedDatabaseIdentity -Outlook:$Outlook -CodexWorkspace:$CodexWorkspace -MediaTranscription:$MediaTranscription
             if(-not $before.ResolvesDbo){throw 'window-eligibility-unqualified-objects-do-not-resolve-to-dbo'}
             if($kind -ceq 'New'){$transaction.Commit();return}
             if(-not $before.CanAlter){throw 'window-eligibility-ddl-connection-alter-permission-required'}
@@ -225,7 +264,7 @@ function Invoke-PassageWindowEligibilityMigrationSql {
                 try{$command.Transaction=$transaction;$command.CommandTimeout=$remaining;$command.CommandText=$batch;$null=$command.ExecuteNonQuery()}
                 finally{$command.Dispose()}
             }
-            if((Get-PassageWindowEligibilityStateKind (Read-PassageWindowEligibilityConnectionState $connection $transaction -Outlook:$Outlook -CodexWorkspace:$CodexWorkspace) $ExpectedDatabaseIdentity -Outlook:$Outlook -CodexWorkspace:$CodexWorkspace) -cne 'New'){throw 'window-eligibility-transaction-successor-invalid'}
+            if((Get-PassageWindowEligibilityStateKind (Read-PassageWindowEligibilityConnectionState $connection $transaction -Outlook:$Outlook -CodexWorkspace:$CodexWorkspace -MediaTranscription:$MediaTranscription) $ExpectedDatabaseIdentity -Outlook:$Outlook -CodexWorkspace:$CodexWorkspace -MediaTranscription:$MediaTranscription) -cne 'New'){throw 'window-eligibility-transaction-successor-invalid'}
             $transaction.Commit()
         } catch {try{$transaction.Rollback()}catch{};throw}
         finally {$transaction.Dispose()}
@@ -241,9 +280,9 @@ function Write-PassageWindowEligibilityRecord([string]$Path,$Value) {
 function New-PassageWindowEligibilityMigrationState {
     param([Parameter(Mandatory)]$DatabaseState,[Parameter(Mandatory)][string]$ReceiptDirectory,
         [Parameter(Mandatory)][string]$ReleaseId,[Parameter(Mandatory)][string]$Commit,
-        [Parameter(Mandatory)][string]$SqlSha256,[switch]$Outlook,[switch]$CodexWorkspace)
-    $contract=Get-PassageWindowEligibilityMigrationContract -Outlook:$Outlook -CodexWorkspace:$CodexWorkspace
-    $kind=Get-PassageWindowEligibilityStateKind $DatabaseState $DatabaseState.Identity -Outlook:$Outlook -CodexWorkspace:$CodexWorkspace
+        [Parameter(Mandatory)][string]$SqlSha256,[switch]$Outlook,[switch]$CodexWorkspace,[switch]$MediaTranscription)
+    $contract=Get-PassageWindowEligibilityMigrationContract -Outlook:$Outlook -CodexWorkspace:$CodexWorkspace -MediaTranscription:$MediaTranscription
+    $kind=Get-PassageWindowEligibilityStateKind $DatabaseState $DatabaseState.Identity -Outlook:$Outlook -CodexWorkspace:$CodexWorkspace -MediaTranscription:$MediaTranscription
     if($SqlSha256 -cne $contract.UpSha256 -or $Commit -cnotmatch '^[a-f0-9]{40}$' -or $ReleaseId -cnotmatch '^[A-Za-z0-9-]{1,100}$'){throw 'window-eligibility-release-sql-binding-invalid'}
     if($kind -ceq 'Old' -and $DatabaseState.CanAlter -cne $true){throw 'window-eligibility-alter-permission-required'}
     if(-not [IO.Path]::IsPathFullyQualified($ReceiptDirectory) -or [IO.Path]::GetFullPath($ReceiptDirectory) -cne $ReceiptDirectory){throw 'window-eligibility-absolute-receipt-path-required'}
@@ -264,7 +303,7 @@ function New-PassageWindowEligibilityMigrationState {
 function Confirm-PassageWindowEligibilityMigrationOutcome {
     param([Parameter(Mandatory)][hashtable]$State,[Parameter(Mandatory)][scriptblock]$ReadState)
     $State.SettledState='Unknown'
-    $State.SettledState=Get-PassageWindowEligibilityStateKind (&$ReadState) $State.Identity -Outlook:($State.Purpose -ceq 'outlook-watched-source-migration') -CodexWorkspace:($State.Purpose -ceq 'codex-workspace-notes-migration')
+    $State.SettledState=Get-PassageWindowEligibilityStateKind (&$ReadState) $State.Identity -Outlook:($State.Purpose -ceq 'outlook-watched-source-migration') -CodexWorkspace:($State.Purpose -ceq 'codex-workspace-notes-migration') -MediaTranscription:($State.Purpose -ceq 'media-transcription-gpu-migration')
     $State.SettledState
 }
 
@@ -274,7 +313,7 @@ function Invoke-PassageWindowEligibilityMigrationAttempt {
     if($State.Attempted){throw 'window-eligibility-attempt-requires-reconciliation-not-replay'}
     &$AssertStopped
     $before=&$ReadState
-    if((Get-PassageWindowEligibilityStateKind $before $State.Identity -Outlook:($State.Purpose -ceq 'outlook-watched-source-migration') -CodexWorkspace:($State.Purpose -ceq 'codex-workspace-notes-migration')) -cne $State.InitialKind -or
+    if((Get-PassageWindowEligibilityStateKind $before $State.Identity -Outlook:($State.Purpose -ceq 'outlook-watched-source-migration') -CodexWorkspace:($State.Purpose -ceq 'codex-workspace-notes-migration') -MediaTranscription:($State.Purpose -ceq 'media-transcription-gpu-migration')) -cne $State.InitialKind -or
         (@($before.History) -join '|') -cne (@($State.OriginalHistory) -join '|')){throw 'window-eligibility-preflight-state-changed'}
     $State.Attempted=$true
     Write-PassageWindowEligibilityRecord $State.IntentPath $State
@@ -297,4 +336,4 @@ function Invoke-PassageWindowEligibilityMigrationAttempt {
 Export-ModuleMember -Function Get-PassageWindowEligibilityMigrationContract,Get-PassageWindowEligibilityHash,
     Get-PassageWindowEligibilitySchemaSha256,Get-PassageWindowEligibilityStateKind,Get-PassageWindowEligibilityDatabaseState,
     Invoke-PassageWindowEligibilityMigrationSql,New-PassageWindowEligibilityMigrationState,
-    Invoke-PassageWindowEligibilityMigrationAttempt,Confirm-PassageWindowEligibilityMigrationOutcome,Write-PassageWindowEligibilityRecord,Get-OutlookWatchedSourceSchemaSha256,Get-CodexWorkspaceNotesSchemaKind
+    Invoke-PassageWindowEligibilityMigrationAttempt,Confirm-PassageWindowEligibilityMigrationOutcome,Write-PassageWindowEligibilityRecord,Get-MediaTranscriptionSchemaFingerprint,Get-OutlookWatchedSourceSchemaSha256,Get-CodexWorkspaceNotesSchemaKind

@@ -27,7 +27,7 @@ public sealed partial class SqlDocumentOcrHandoffTests(NativeSqlServerFixture fi
     private readonly NativeSqlServerFixture _fixture = fixture;
 
     [NativeSqlServerFact]
-    public async Task Actual_document_OCR_gets_an_owed_turn_after_three_search_batches_and_active_pages_are_not_interrupted()
+    public async Task Interactive_search_stays_first_and_active_document_OCR_pages_are_not_interrupted()
     {
         var (factory, claim, revisionId, hash) = await CreateClaimedPdfAsync();
         var ocr = await CreateStore(factory).HandoffAsync(new DocumentOcrHandoffRequest(claim, revisionId, hash, [0]), CancellationToken.None);
@@ -69,7 +69,7 @@ public sealed partial class SqlDocumentOcrHandoffTests(NativeSqlServerFixture fi
             Assert.True((await store.ApplyBatchCallbackAsync(Guid.NewGuid(), new(handle, GpuBatchCallbackKind.Completed,
                 [new(taskId, GpuMiniTaskBoundaryDisposition.Completed)], true), CancellationToken.None)).Accepted);
         }
-        for (var i = 1; i <= 3; i++)
+        for (var i = 0; i < 5; i++)
         {
             var request = Request();
             await store.HandoffInteractiveAsync(request, CancellationToken.None);
@@ -78,25 +78,24 @@ public sealed partial class SqlDocumentOcrHandoffTests(NativeSqlServerFixture fi
             Assert.Equal(request.RequestId, admitted.Task);
             Assert.True((await store.RunAdmissionRoundAsync(operation, GpuSchedulerWakeReason.WorkReady, options,
                 (_, _) => throw new InvalidOperationException("Admission receipt replay called gate"), CancellationToken.None)).IsIdempotentReplay);
-            await using (var state = await factory.CreateDbContextAsync())
-                Assert.Equal(i, (await state.GpuSchedulerStates.SingleAsync()).SearchBatchesWhileOcrWaiting);
             await CompleteAsync(admitted.Handle, admitted.Task);
             store = new SqlGpuSchedulerStore(factory, timeProvider: new TurnTestTimeProvider(now), sourceAdmission: new global::FluxKnowledge.Integration.Tests.Support.FixtureSourceAdmission(factory));
         }
-        await store.HandoffInteractiveAsync(Request(), CancellationToken.None);
-        var owed = await AdmitAsync(Guid.NewGuid());
-        Assert.Equal(ocrId, owed.Task);
+        var admittedOcr = await AdmitAsync(Guid.NewGuid());
+        Assert.Equal(ocrId, admittedOcr.Task);
         await using (var state = await factory.CreateDbContextAsync())
-        {
             Assert.Equal((int)GpuPriorityLane.DocumentIndexing, (await state.GpuMiniTasks.SingleAsync(t => t.Id == ocrId)).PriorityLane);
-            Assert.Equal(0, (await state.GpuSchedulerStates.SingleAsync()).SearchBatchesWhileOcrWaiting);
-        }
+        var waitingSearch = Request();
+        await store.HandoffInteractiveAsync(waitingSearch, CancellationToken.None);
         var busy = await store.RunAdmissionRoundAsync(Guid.NewGuid(), GpuSchedulerWakeReason.WorkReady, options,
             (_, _) => ValueTask.FromResult(new GpuAdmissionDecision(GpuAdmissionDisposition.Busy, null, null, null)), CancellationToken.None);
         Assert.Equal(GpuAdmissionDisposition.Busy, busy.Disposition);
         await using (var state = await factory.CreateDbContextAsync())
             Assert.Equal((int)GpuMiniTaskExecutionState.Active, (await state.GpuMiniTasks.SingleAsync(t => t.Id == ocrId)).ExecutionState);
-        await CompleteAsync(owed.Handle, owed.Task);
+        await CompleteAsync(admittedOcr.Handle, admittedOcr.Task);
+        var admittedSearch = await AdmitAsync(Guid.NewGuid());
+        Assert.Equal(waitingSearch.RequestId, admittedSearch.Task);
+        await CompleteAsync(admittedSearch.Handle, admittedSearch.Task);
     }
 
     private sealed class TurnTestTimeProvider(DateTimeOffset now) : TimeProvider { public override DateTimeOffset GetUtcNow() => now; }

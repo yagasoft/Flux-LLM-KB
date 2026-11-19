@@ -30,6 +30,7 @@ public sealed class SqlRetainedTextRegistrationStore(
     private const string ExtractUtf8OutputContract = "pipeline:extract-utf8";
     private const long MaximumDocumentInputBytes = 128L * 1024 * 1024;
     private const long MaximumAcceptedUtf8TextBytes = SourcePolicyDefaults.MaximumTextBytes;
+    internal const long MaximumUnboundDerivedTextBytes = 32L * 1024 * 1024;
     private const long MaximumOoxmlTextBytes = 200L * 1024 * 1024;
     private readonly string? _retainedArtifactRoot = string.IsNullOrWhiteSpace(retainedArtifactRoot)
         ? null
@@ -120,7 +121,8 @@ public sealed class SqlRetainedTextRegistrationStore(
                   activity.DescriptorFingerprint == RetainedDefaultPolicy.TextFingerprint &&
                   context.SourceActivityRelations.Any(relation => relation.SuccessorActivityId == activity.Id &&
                       relation.RelationshipKind == RetainedDefaultPolicy.RelationshipKind && relation.ReasonCode == RetainedDefaultPolicy.Version)) && revision.ByteLength >= 0 &&
-                 (revision.ByteLength <= MaximumAcceptedUtf8TextBytes ||
+                 (revision.ByteLength <= MaximumUnboundDerivedTextBytes ||
+                  revision.OriginKind == 0 && revision.ByteLength <= MaximumAcceptedUtf8TextBytes ||
                   revision.ByteLength <= MaximumOoxmlTextBytes && revision.OriginKind == 2 &&
                   context.SourceProcessorBranchMembers.Any(member =>
                       member.ChildSourceRevisionId == revision.Id && member.ChildSourceActivityId == activity.Id &&
@@ -313,7 +315,9 @@ public sealed class SqlRetainedTextRegistrationStore(
             return false;
         var maximumInputBytes = isDocumentInput
             ? MaximumDocumentInputBytes
-            : isBoundOoxmlText ? MaximumOoxmlTextBytes : MaximumAcceptedUtf8TextBytes;
+            : isBoundOoxmlText ? MaximumOoxmlTextBytes
+            : sourceRevision?.OriginKind == 0 ? MaximumAcceptedUtf8TextBytes
+            : MaximumUnboundDerivedTextBytes;
         if (sourceRevision is null || sourceRoot is null ||
             (sourceRoot.State != (int)SourceRootState.Enabled &&
              !await context.OutlookCaptureProfiles.AnyAsync(profile => profile.SourceRootId == sourceRoot.Id, cancellationToken).ConfigureAwait(false)) ||
@@ -734,9 +738,7 @@ public sealed class SqlRetainedSourceReader(
 
     public async ValueTask<Utf8FileSource> ReadUtf8Async(SourceRevisionId sourceRevisionId, CancellationToken cancellationToken)
     {
-        var maximumTextBytes = await IsCompletedOoxmlTextChildAsync(sourceRevisionId, cancellationToken).ConfigureAwait(false)
-            ? MaximumOoxmlTextBytes
-            : MaximumAcceptedUtf8TextBytes;
+        var maximumTextBytes = await ReadTextLimitAsync(sourceRevisionId, cancellationToken).ConfigureAwait(false);
         var verified = await ReadVerifiedAsync(sourceRevisionId, maximumTextBytes, cancellationToken).ConfigureAwait(false);
         if (verified.ByteLength > maximumTextBytes)
         {
@@ -759,12 +761,15 @@ public sealed class SqlRetainedSourceReader(
         }
     }
 
-    private async ValueTask<bool> IsCompletedOoxmlTextChildAsync(
+    private async ValueTask<long> ReadTextLimitAsync(
         SourceRevisionId sourceRevisionId,
         CancellationToken cancellationToken)
     {
         await using var context = await contextFactory.CreateDbContextAsync(cancellationToken).ConfigureAwait(false);
-        return await context.SourceProcessorBranchMembers.AsNoTracking().AnyAsync(member =>
+        if (await context.SourceRevisions.AsNoTracking().AnyAsync(
+            revision => revision.Id == sourceRevisionId.Value && revision.OriginKind == 0, cancellationToken).ConfigureAwait(false))
+            return MaximumAcceptedUtf8TextBytes;
+        var isCompletedOoxmlChild = await context.SourceProcessorBranchMembers.AsNoTracking().AnyAsync(member =>
             member.ChildSourceRevisionId == sourceRevisionId.Value && member.ChildSourceActivityId != null &&
             member.Disposition == "completed" &&
             context.SourceRevisions.Any(child =>
@@ -798,6 +803,7 @@ public sealed class SqlRetainedSourceReader(
                             EF.Functions.Collate(branch.ProcessorFingerprint, SchemaConfiguration.SchedulerFenceCollation)) &&
                     context.SourceProcessorBranchMembers.Count(other => other.BranchId == branch.Id) == 1)),
             cancellationToken).ConfigureAwait(false);
+        return isCompletedOoxmlChild ? MaximumOoxmlTextBytes : SqlRetainedTextRegistrationStore.MaximumUnboundDerivedTextBytes;
     }
 
     private async ValueTask<VerifiedRetainedSource> ReadVerifiedAsync(SourceRevisionId sourceRevisionId, CancellationToken cancellationToken) =>

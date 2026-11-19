@@ -3,6 +3,7 @@ using System.Text;
 using System.Text.Json;
 using System.Text.Json.Nodes;
 using FluxKnowledge.Application.Contracts;
+using FluxKnowledge.Domain.Sources;
 using FluxKnowledge.Infrastructure.SqlServer.Persistence.Entities;
 
 namespace FluxKnowledge.Infrastructure.SqlServer.Persistence;
@@ -25,7 +26,7 @@ internal sealed record SourceRootControlConfiguration(
             request.DisplayName,
             request.Recursive,
             request.FollowLinks,
-            request.MaximumFileBytes,
+            SourcePolicyDefaults.MaximumTextBytes,
             CanonicalJson(request.IncludePatterns),
             CanonicalJson(request.ExcludePatterns),
             CanonicalJson(request.AllowedClassifications),
@@ -82,7 +83,6 @@ internal sealed record SourceRootControlConfiguration(
         string.Equals(AllowedClassificationsJson, entity.AllowedClassificationsJson, StringComparison.Ordinal) &&
         Recursive == entity.Recursive &&
         FollowLinks == entity.FollowLinks &&
-        MaximumFileBytes == entity.MaximumFileBytes &&
         ReconciliationCadenceSeconds == entity.ReconciliationCadenceSeconds && CrawlMode == entity.CrawlMode;
 
     public static string CanonicalJson(IReadOnlyList<string>? values) =>

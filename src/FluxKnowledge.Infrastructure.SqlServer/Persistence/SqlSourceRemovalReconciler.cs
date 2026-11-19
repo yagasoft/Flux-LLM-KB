@@ -14,7 +14,7 @@ namespace FluxKnowledge.Infrastructure.SqlServer.Persistence;
 
 public sealed class SqlSourceRemovalReconciler(IDbContextFactory<FluxKnowledgeDbContext> factory,
     TimeProvider clock, ISourceObservationReader observations, Guid? targetRootId = null,
-    IGpuSchedulerWakeSignal? schedulerWake = null) : ISourceRemovalReconciler
+    IGpuSchedulerWakeSignal? schedulerWake = null, SqlSourceWorkRecoveryProgress? recoveryProgress = null) : ISourceRemovalReconciler
 {
     private const int PageSize = 128;
     private readonly SemaphoreSlim _owner = new(1, 1);
@@ -204,11 +204,14 @@ public sealed class SqlSourceRemovalReconciler(IDbContextFactory<FluxKnowledgeDb
                 (current.ReasonFlags & SourcePendingReasons.RemovalPending) == 0) return;
             await SqlGpuSchedulerStore.AcquireMutationLockAsync(db, transaction.GetDbTransaction(), ct).ConfigureAwait(false);
             current.ReasonFlags &= ~SourcePendingReasons.RemovalPending;
-            if (current.ReasonFlags == 0) db.SourcePendingChanges.Remove(current);
+            var released = current.ReasonFlags == 0;
+            if (released) db.SourcePendingChanges.Remove(current);
             await SqlGpuSchedulerStore.RecordWakeAsync(db, GpuSchedulerWakeReason.Reconciliation, clock.GetUtcNow(), ct).ConfigureAwait(false);
             await db.SaveChangesAsync(ct).ConfigureAwait(false);
             authority.ValidateCurrent();
             await transaction.CommitAsync(ct).ConfigureAwait(false);
+            if (released && root.CrawlMode == (int)SourceDiscoveryMode.Filesystem)
+                recoveryProgress?.NotifyRediscovery(root.Id);
             schedulerWake?.Notify(GpuSchedulerWakeReason.Reconciliation);
         }).ConfigureAwait(false);
     }

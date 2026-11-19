@@ -76,6 +76,28 @@ public sealed partial class PipelineActivitySqlTests
         finally { await transaction.RollbackAsync(); }
     }
 
+    [NativeSqlServerFact]
+    public async Task Snapshot_attention_reads_committed_history_while_an_unrelated_write_is_held()
+    {
+        await EnableOwnedSnapshotAsync();
+        var now = DateTimeOffset.UtcNow;
+        var historyRoot = await AddActivityRootAsync(now);
+        await SeedActivityJobAsync(historyRoot, now, FluxKnowledge.Domain.Jobs.PublicJobState.Failed, null, suppressed: true);
+        var unrelated = await SeedGpuReadLockAsync(now);
+        await using var writer = new TestDbContextFactory(_fixture.ConnectionString).CreateDbContext();
+        await using var transaction = await writer.Database.BeginTransactionAsync();
+        await writer.GpuExecutorDispatches.Where(dispatch => dispatch.BatchId == unrelated.Batch)
+            .ExecuteUpdateAsync(set => set.SetProperty(dispatch => dispatch.OwnerKey, "UncommittedOwner"));
+        try
+        {
+            using var deadline = new CancellationTokenSource(TimeSpan.FromSeconds(10));
+            var result = await SnapshotReader().ReadPipelineAttentionAsync("historical-jobs", historyRoot, 0, deadline.Token);
+            Assert.Equal(1, result.TotalCount);
+            Assert.Single(result.Items);
+        }
+        finally { await transaction.RollbackAsync(); }
+    }
+
     private SqlProjectionReader SnapshotReader(params IInterceptor[] interceptors)
     {
         var factory = new TestDbContextFactory(_fixture.ConnectionString, interceptors);

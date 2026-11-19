@@ -3,6 +3,23 @@ param([string]$SourceRoot=(Split-Path -Parent (Split-Path -Parent $PSScriptRoot)
 $ErrorActionPreference='Stop'
 Set-StrictMode -Version Latest
 Import-Module (Join-Path $SourceRoot 'scripts/deploy/incremental-source-journal-helper.psm1') -Force
+if (!('SourceHelperRenameLockFixture' -as [type])) {
+ Add-Type -TypeDefinition @'
+using System;
+using System.Runtime.InteropServices;
+using Microsoft.Win32.SafeHandles;
+public static class SourceHelperRenameLockFixture {
+    [DllImport("kernel32", EntryPoint="CreateFileW", CharSet=CharSet.Unicode, SetLastError=true)]
+    static extern SafeFileHandle Open(string path, uint access, uint share, IntPtr security, uint creation, uint flags, IntPtr template);
+    public static SafeFileHandle DenyRename(string path) {
+        // FILE_LIST_DIRECTORY, FILE_SHARE_READ | FILE_SHARE_WRITE, OPEN_EXISTING, FILE_FLAG_BACKUP_SEMANTICS.
+        var handle=Open(path,1,3,IntPtr.Zero,3,0x02000000,IntPtr.Zero);
+        if (handle.IsInvalid) throw new System.ComponentModel.Win32Exception(Marshal.GetLastWin32Error());
+        return handle;
+    }
+}
+'@
+}
 function Assert-True([bool]$Value,[string]$Message){if(!$Value){throw $Message}}
 function Expect-Refusal([scriptblock]$Action){$refused=$false;try{&$Action}catch{$refused=$true};Assert-True $refused ('Expected refusal: '+$Action.ToString())}
 $security=[Security.AccessControl.RawSecurityDescriptor]::new('O:BAG:BAD:P(A;OICI;FA;;;SY)(A;OICI;FA;;;BA)')
@@ -11,9 +28,10 @@ $passed=0
 $failures=[Collections.Generic.List[object]]::new()
 foreach($scenario in @('success','repair-off','repair-default-off','disabled','probe-failure','start-failure','exit-unproved','candidate-drift','source-policy-drift','task-drift',
  'journal-policy-drift','allowlist-predecessor-drift','duplicate-repair','untrusted-policy','disabled-running','post-start-policy-drift','rollback-probe-failure','rollback-start-failure','task-security-drift',
- 'preserve-policy','preserve-policy-missing','preserve-rollback-refused')){
+ 'preserve-policy','preserve-policy-missing','preserve-rollback-refused',
+ 'rename-released','rename-persistent','rename-candidate-drift','rename-destination-drift','rename-destination-exists','rename-hold-lost')){
  $id=[guid]::NewGuid().ToString('N');$root='I:\FluxKnowledgeSourceAccess-Staging-'+$id
- $taskName='FluxKnowledge.SourceAccess-Staging-'+$id;$state=$null
+ $taskName='FluxKnowledge.SourceAccess-Staging-'+$id;$state=$null;$lockHandle=$null
  $created=[FluxSourceAccessInstallFile]::CreatePrivateDirectory($root,$descriptor);$created.Dispose()
  try{
   $live=Join-Path $root 'payload';$input=Join-Path $root 'input';$null=New-Item -ItemType Directory -Path $live,$input,(Join-Path $root 'journal')
@@ -93,6 +111,48 @@ foreach($scenario in @('success','repair-off','repair-default-off','disabled','p
    }
   }
   if($scenario -ceq 'preserve-rollback-refused'){$ports.AssertRollbackAllowed={throw 'schema is not the reviewed predecessor'}}
+  if ($scenario -clike 'rename-*') {
+    if ($scenario -ceq 'rename-destination-exists') {
+        $null=[IO.Directory]::CreateDirectory($state.PreviousRoot)
+    } else {
+        $lockHandle=[SourceHelperRenameLockFixture]::DenyRename($live)
+    }
+    $sim.RetryExitProofs=0
+    if ($scenario -eq 'rename-hold-lost') {
+        $ports.AssertApplicationStopped={if ($sim.RetryExitProofs -ge 1) { throw 'owned release hold lost' }}
+    }
+    $ports.AssertExited={
+        if ($sim.Stops -eq 1) {
+            $sim.RetryExitProofs++
+            if ($sim.RetryExitProofs -eq 2 -and $scenario -ne 'rename-persistent') {
+                $lockHandle.Dispose()
+                if ($scenario -eq 'rename-candidate-drift') { [IO.File]::AppendAllText((Join-Path $state.CandidateRoot 'FluxKnowledge.Cli.dll'),'changed') }
+                if ($scenario -eq 'rename-destination-drift') { $null=[IO.Directory]::CreateDirectory($state.PreviousRoot) }
+            }
+        }
+    }
+    if ($scenario -ceq 'rename-released') {
+        Invoke-SourceJournalHelperUpdate $state $ports
+        Assert-True ($state.Completed -and $state.OldPayloadMoved -and $state.CandidatePlaced -and $sim.RetryExitProofs -eq 2) 'Transient rename lock did not result in one proved transition.'
+        Assert-True ((Get-SourceJournalHelperPayloadManifest $state.PreviousRoot).Sha256 -ceq $state.OriginalPayloadSha256) 'Original directory not preserved after retry.'
+        Assert-True ((Get-SourceJournalHelperPayloadManifest $live).Sha256 -ceq $state.CandidatePayloadSha256) 'Incorrect replacement after retry.'
+    } else {
+        $failure=$null
+        try { Invoke-SourceJournalHelperUpdate $state $ports } catch { $failure=$_.Exception }
+        Assert-True ($null -ne $failure) 'Expected a refused predecessor rename.'
+        Assert-True (!$state.OldPayloadMoved -and !$state.CandidatePlaced -and !$state.Completed) 'Unproved rename reached the second swap.'
+        Assert-True ((Get-SourceJournalHelperPayloadManifest $live).Sha256 -ceq $state.OriginalPayloadSha256) 'Unexpected change to original after refused rename.'
+        if ($scenario -eq 'rename-persistent') {
+            Assert-True ($sim.RetryExitProofs -ge 2 -and $sim.RetryExitProofs -le 4 -and
+                $failure.Message -match 'win32=32 attempts=[1-4] elapsed_ms=\d+') 'Permanent lock lost its bounded native failure evidence.'
+        } elseif ($scenario -eq 'rename-hold-lost') {
+            Assert-True ($sim.RetryExitProofs -eq 1 -and !$sim.Task.Enabled -and !$sim.Task.Running -and $sim.Starts -eq 0) 'Lost hold reached rename or helper restart.'
+        } elseif ($scenario -eq 'rename-destination-exists') {
+            Assert-True ($sim.RetryExitProofs -eq 1) 'Non-sharing failure was retried.'
+        } else { Assert-True ($sim.RetryExitProofs -eq 2) 'Drift continued past the first retry proof.' }
+    }
+    $passed++;continue
+  }
   switch($scenario){
    'candidate-drift'{[IO.File]::AppendAllText((Join-Path $state.CandidateRoot 'FluxKnowledge.Cli.dll'),'changed')}
    'source-policy-drift'{[IO.File]::AppendAllText((Join-Path $root 'policy.json'),'changed')}
@@ -144,6 +204,7 @@ foreach($scenario in @('success','repair-off','repair-default-off','disabled','p
   Assert-True ([IO.File]::ReadAllText((Join-Path $root 'journal\owned-intent.json')) -ceq '{"fixture":"preserve-repair-intent"}') 'Repair journal intents were changed.'
   $passed++
  }catch{$failures.Add([pscustomobject]@{Scenario=$scenario;Message=$_.Exception.Message})}finally{
+  if ($null -ne $lockHandle) { $lockHandle.Dispose() }
   Close-SourceJournalHelperUpdate $state
   $resolved=[IO.Path]::GetFullPath($root)
   if(!$resolved.StartsWith('I:\FluxKnowledgeSourceAccess-Staging-',[StringComparison]::OrdinalIgnoreCase) -or

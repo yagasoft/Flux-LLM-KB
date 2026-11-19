@@ -1,5 +1,6 @@
 using System.Data;
 using System.Text.Json;
+using FluxKnowledge.Application.Gpu;
 using FluxKnowledge.Application.Indexing;
 using FluxKnowledge.Application.Pipeline;
 using FluxKnowledge.Application.Ports;
@@ -222,6 +223,7 @@ public sealed class SqlPipelineStore(
 
         string? inputText = null;
         string? inputDocumentMetadataJson = null;
+        var inputIsNativeTranscript = false;
         if (stage > PipelineStage.Extract)
         {
             var inputStage = (PipelineStage)((int)stage - 1);
@@ -231,11 +233,24 @@ public sealed class SqlPipelineStore(
                         artifact.PipelineRecordId == pipelineRecordId.Value &&
                         artifact.SourceRevision == sourceRevision &&
                         artifact.Stage == (int)inputStage)
-                .Select(artifact => new { artifact.SearchText, artifact.DocumentMetadataJson })
+                .Select(artifact => new
+                {
+                    artifact.SearchText,
+                    artifact.DocumentMetadataJson,
+                    IsNativeTranscript = inputStage == PipelineStage.Extract && source.SourceRevisionId != null &&
+                        context.OutboxMessages.Any(delivery => delivery.CompletedArtifactId == artifact.Id &&
+                            delivery.DispatchedAtUtc != null && delivery.PipelineRecordId == artifact.PipelineRecordId &&
+                            delivery.SourceRevision == artifact.SourceRevision && delivery.Stage == artifact.Stage &&
+                            delivery.Operation == MediaTranscriptionGpuContracts.Operation &&
+                            context.Jobs.Any(job => job.Id == delivery.JobId && job.PipelineRecordId == delivery.PipelineRecordId &&
+                                job.SourceRevision == delivery.SourceRevision && job.Stage == delivery.Stage &&
+                                job.Operation == MediaTranscriptionGpuContracts.Operation && job.PublicState == (int)PublicJobState.Completed))
+                })
                 .SingleOrDefaultAsync(cancellationToken)
                 .ConfigureAwait(false);
             inputText = input?.SearchText;
             inputDocumentMetadataJson = input?.DocumentMetadataJson;
+            inputIsNativeTranscript = input?.IsNativeTranscript == true;
         }
 
         return new PipelineStageSource(
@@ -247,7 +262,8 @@ public sealed class SqlPipelineStore(
             source.SourceRevisionId is null ? null : new FluxKnowledge.Domain.Sources.SourceRevisionId(source.SourceRevisionId.Value),
             source.SourceClassification,
             source.SourceExtension,
-            inputDocumentMetadataJson);
+            inputDocumentMetadataJson,
+            inputIsNativeTranscript);
     }
 
     public async ValueTask<IReadOnlyList<CanonicalTextChunk>> ReadChunksAsync(

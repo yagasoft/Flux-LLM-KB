@@ -1,4 +1,6 @@
 using FluxKnowledge.Application.Contracts;
+using FluxKnowledge.Domain.Gpu;
+using FluxKnowledge.Domain.Jobs;
 using FluxKnowledge.Domain.Pipeline;
 using FluxKnowledge.Infrastructure.SqlServer.Persistence;
 using FluxKnowledge.Web.Components.Sources;
@@ -10,6 +12,8 @@ namespace FluxKnowledge.Web.Components.Status;
 internal sealed record PipelineFileSample(PipelineFileItem File, bool RequiresOcr, bool OcrRunning,
     bool OcrWaiting, bool OcrDecisionUnconfirmed, int? RequestedPages, bool ProcessorRunning = false)
 {
+    internal IReadOnlyList<string> RecordedReasons { get; init; } = [];
+
     internal static async ValueTask<IReadOnlyList<PipelineFileSample>> ReadAsync(FluxKnowledgeDbContext context,
         IReadOnlyDictionary<Guid, SourceRootProjectionReader.SourceStateSummary> sources,
         IQueryable<PipelineJobActivityRow> jobs, IReadOnlyDictionary<Guid, string> names,
@@ -26,7 +30,7 @@ internal sealed record PipelineFileSample(PipelineFileItem File, bool RequiresOc
             .Select(j => new PipelineJobActivityRow
             {
                 Id = j.Id, PipelineRecordId = j.PipelineRecordId, LogicalSourceRevisionId = j.LogicalSourceRevisionId,
-                SourceRevision = j.SourceRevision, Stage = j.Stage, CurrentStage = j.CurrentStage,
+                SourceRevision = j.SourceRevision, Stage = j.Stage, CurrentStage = j.CurrentStage, RemovalCleanupBlocker = j.RemovalCleanupBlocker,
                 MatchesSelectedFileBranch = j.MatchesSelectedFileBranch, IsHistorical = j.IsHistorical,
                 PublicState = j.PublicState, SourceAdmitted = j.SourceAdmitted, HasWorkerLease = j.HasWorkerLease,
                 HasActiveGpu = j.HasActiveGpu, HasReadyGpu = j.HasReadyGpu, HasUncertainGpu = j.HasUncertainGpu,
@@ -34,6 +38,19 @@ internal sealed record PipelineFileSample(PipelineFileItem File, bool RequiresOc
                 Reason = j.Reason, AttemptStartedAtUtc = j.AttemptStartedAtUtc
             })
             .ToArrayAsync(cancellationToken).ConfigureAwait(false);
+        var eligibilityTargets = files.Where(file => file.Category is "Blocked" or "Failed" or "Deferred")
+            .Select(file => file.SourceRevisionId).ToHashSet();
+        var failedJobs = currentJobs.Where(job => job.PublicState == (int)PublicJobState.Failed &&
+                job.LogicalSourceRevisionId is { } owner && eligibilityTargets.Contains(owner) && !job.HasActiveGpu && !job.HasWaitingGpu)
+            .Select(job => job.Id).ToArray();
+        // A failed parent can still have an admitted GPU task whose ownership
+        // could not be confirmed. Treat the exact task as unsettled until it leaves Active.
+        var unsettledRows = failedJobs.Length == 0 ? [] : await context.GpuMiniTasks.AsNoTracking()
+            .Where(task => task.ParentJobId != null && failedJobs.Contains(task.ParentJobId.Value) &&
+                task.ExecutionState == (int)GpuMiniTaskExecutionState.Active)
+            .Select(task => new { JobId = task.ParentJobId!.Value, task.SourceRevision }).Distinct()
+            .ToArrayAsync(cancellationToken).ConfigureAwait(false);
+        var unsettledGpu = unsettledRows.Select(row => (row.JobId, row.SourceRevision)).ToHashSet();
         var selected = sources.Values.SelectMany(s => s.SelectedBranches).Distinct().ToArray();
         var processors = selected.Length == 0 ? [] : await context.SourceProcessorBranches.AsNoTracking()
             .Where(b => selected.Contains(b.Id) && (b.State == 0 || b.State == 1))
@@ -82,14 +99,16 @@ internal sealed record PipelineFileSample(PipelineFileItem File, bool RequiresOc
                 new Microsoft.Data.SqlClient.SqlParameter("@ownedGpuTasks", System.Data.SqlDbType.NVarChar, -1)
                     { Value = gpuEvidence.OwnedTasksJson }).ToArrayAsync(cancellationToken).ConfigureAwait(false)
             : [];
-        var projected = Project(files, currentJobs, processors, ocr, lifecycles);
-        return projected.Select(sample => sample with { File = sample.File with
-            { SourceName = names.GetValueOrDefault(sample.File.SourceRootId) ?? "Source binding unavailable" } }).ToArray();
+        var projected = Project(files, currentJobs, processors, ocr, lifecycles, unsettledGpu)
+            .Select(sample => sample with { File = sample.File with
+                { SourceName = names.GetValueOrDefault(sample.File.SourceRootId) ?? "Source binding unavailable" } }).ToArray();
+        return await FileAttentionPreferences.ApplyAsync(context, projected, cancellationToken).ConfigureAwait(false);
     }
 
     internal static IReadOnlyList<PipelineFileSample> Project(IReadOnlyList<SourceLogicalFileState> files,
         IReadOnlyList<PipelineJobActivityRow> jobs, IReadOnlyList<PipelineFileProcessorRow> processors,
-        IReadOnlyList<PipelineFileOcrRow> ocr, IReadOnlyDictionary<Guid, string> lifecycles)
+        IReadOnlyList<PipelineFileOcrRow> ocr, IReadOnlyDictionary<Guid, string> lifecycles,
+        IReadOnlySet<(Guid JobId, long SourceRevision)>? unsettledGpu = null)
     {
         var jobsByFile = jobs.Where(j => !j.IsHistorical && j.MatchesSelectedFileBranch && j.Stage == j.CurrentStage && j.LogicalSourceRevisionId != null)
             .GroupBy(j => j.LogicalSourceRevisionId!.Value).ToDictionary(g => g.Key, g => g.ToArray());
@@ -124,7 +143,13 @@ internal sealed record PipelineFileSample(PipelineFileItem File, bool RequiresOc
                     ? "Retained processor execution ownership is unconfirmed." : "Awaiting a bound pipeline job or retained processor."
                 : selected.Reason ?? PipelineFilePresentation.Classify(selected).Reason);
             if (preferProcessor) { stage = "Extracting"; state = "Running"; reason = file.Reason ?? "Retained processor lease confirmed; other current jobs are shown in details."; }
-            if (file.Category != "Pending")
+            if (file.Category == "MetadataOnly")
+            {
+                stage = "Metadata";
+                state = "Metadata indexed";
+                reason = "File metadata completed indexing. For audio and video, transcription is separate.";
+            }
+            else if (file.Category != "Pending")
             {
                 stage = file.Category == "Unconfirmed" ? "Stage unconfirmed" : selected is null ? "Complete or held" : stage;
                 state = file.Category;
@@ -138,13 +163,29 @@ internal sealed record PipelineFileSample(PipelineFileItem File, bool RequiresOc
             var jobItems = current.OrderBy(j => j.Stage).ThenBy(j => j.Id).Select(j => new PipelineFileJob(j.Id,
                 j.PipelineRecordId, ((PipelineStage)j.Stage).ToString(), PipelineFilePresentation.WorkState(j),
                 j.Reason ?? PipelineFilePresentation.Classify(j).Reason, j.AttemptStartedAtUtc)).ToArray();
+            var recordedReasons = file.RecordedReasons.Count > 0 ? file.RecordedReasons :
+                (file.Reason ?? selected?.Reason) is { } recorded ? [recorded] : [];
+            var canIgnore = file.Category is "Blocked" or "Failed" or "Deferred" &&
+                lifecycles.GetValueOrDefault(file.SourceRootId) != "Deleting" && branch is null &&
+                !recordedReasons.Any(FileAttentionIssue.NeedsEvidence) &&
+                current.All(job => job.PublicState == (int)PublicJobState.Failed && job.RemovalCleanupBlocker == 0 &&
+                    !job.HasWorkerLease && !job.HasActiveGpu && !job.HasUncertainGpu && !job.HasReadyGpu && !job.HasWaitingGpu &&
+                    unsettledGpu?.Contains((job.Id, job.SourceRevision)) != true);
             return new PipelineFileSample(new(file.SourceRootId, file.SourceRevisionId, "", file.FullPath,
                 file.ArchivePath, file.Category, stage, state, reason, PipelineFilePresentation.NextAction(file.Reason ?? selected?.Reason),
-                jobItems, []), requiresOcr, ocrRunning, pendingOcr && !ocrRunning,
+                jobItems, [])
+                {
+                    MetadataIndexed = file.MetadataIndexed,
+                    CanIgnore = canIgnore,
+                    IsBinaryIssue = canIgnore && FileAttentionIssue.IsBinary(file.Classification, recordedReasons)
+                }, requiresOcr, ocrRunning, pendingOcr && !ocrRunning,
                 file.Category == "Pending" && !requiresOcr && file.Classification is "" or "PdfDocumentContainer" or "ImageDocumentContainer" &&
                     (selected is null || selected.Stage <= (int)PipelineStage.Extract),
                 requiresOcr && demands.All(o => o.RequestedPages is not null) ? demands.Sum(o => o.RequestedPages) : null,
-                file.Category == "Pending" && branch?.Running == true);
+                file.Category == "Pending" && branch?.Running == true)
+            {
+                RecordedReasons = recordedReasons
+            };
         }).ToArray();
     }
 }

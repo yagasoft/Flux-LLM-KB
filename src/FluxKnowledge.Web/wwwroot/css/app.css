@@ -59,6 +59,15 @@ main { min-width: 0; max-width: 84rem; padding: 2rem clamp(1rem, 3vw, 3.25rem); 
 .issue-row button, .operation-link { padding: .55rem .8rem; border: 1px solid var(--accent); border-radius: .4rem; background: var(--canvas); color: var(--accent); font-weight: 620; text-decoration: none; cursor: pointer; }
 .issue-row button:hover, .operation-link:hover { background: var(--selected); }
 .issue-actions { display: flex; gap: .6rem; flex-wrap: wrap; align-items: center; }
+.file-issue-toolbar { margin-block: 1rem; }
+.reason-filters { display: flex; align-items: start; gap: .4rem; flex-wrap: wrap; margin-block: .75rem; }
+.reason-filters button { max-width: 100%; text-align: start; overflow-wrap: anywhere; }
+.reason-filters button[aria-pressed="true"]:not(.count-link) { background: var(--selected); border-color: var(--accent); color: var(--accent); font-weight: 650; }
+.file-ignore-actions:empty { display: none; }
+.file-ignore-preview { border: 1px solid var(--line); border-radius: .5rem; padding: .75rem; margin-block: .75rem; background: var(--canvas); }
+.ignore-rules { list-style: none; padding: 0; }
+.ignore-rules li { display: flex; gap: .6rem; align-items: center; justify-content: space-between; flex-wrap: wrap; padding: .6rem 0; border-bottom: 1px solid var(--line); }
+.ignore-rules li small { display: block; margin-top: .15rem; }
 button:not(.count-link) { border: 1px solid var(--line); border-radius: .4rem; background: var(--canvas); color: inherit; cursor: pointer; }
 button:not(.count-link):hover:enabled { background: var(--selected); }
 button:not(.count-link):disabled { opacity: .65; cursor: default; }

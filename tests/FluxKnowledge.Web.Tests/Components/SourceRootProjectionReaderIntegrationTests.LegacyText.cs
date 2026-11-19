@@ -30,7 +30,7 @@ public sealed partial class SourceRootProjectionReaderIntegrationTests
         var factory = new TestDbContextFactory(_fixture.ConnectionString);
         var pending = Activity(revision, SourceActivityState.Pending);
         var retained = Activity(revision, SourceActivityState.CancelledSuperseded);
-        var limit = lowerRootLimit ? 100 : SourcePolicyDefaults.MaximumTextBytes;
+        const long limit = SourcePolicyDefaults.MaximumTextBytes;
         retained.ActivityKind = (int)SourceActivityKind.DocumentParsing;
         retained.ExecutionClass = (int)ExecutionClass.DeferredCapability;
         retained.RequiredCapability = "source-artifact-store";
@@ -47,7 +47,7 @@ public sealed partial class SourceRootProjectionReaderIntegrationTests
             {
                 Id = root, CanonicalPath = $"E:\\source-projection-tests\\{root:N}",
                 DisplayName = "Legacy text assessment", State = (int)SourceRootState.Enabled,
-                ConfigurationRevision = 1, MaximumFileBytes = limit,
+                ConfigurationRevision = 1, MaximumFileBytes = lowerRootLimit ? 100 : limit,
                 CreatedAtUtc = now, UpdatedAtUtc = now
             });
             var source = Revision(revision, root, "retained.dart", now, false);
@@ -184,7 +184,7 @@ public sealed partial class SourceRootProjectionReaderIntegrationTests
     [InlineData(true, false)]
     [InlineData(true, true)]
     [InlineData(false, true)]
-    public async Task Legacy_pre_admission_reason_and_next_action_match_in_detail_and_overview_with_the_effective_root_limit(
+    public async Task Legacy_pre_admission_reason_and_next_action_match_with_the_app_wide_limit(
         bool withPolicyOwner, bool lowerLimit)
     {
         var root = Guid.NewGuid();
@@ -207,13 +207,13 @@ public sealed partial class SourceRootProjectionReaderIntegrationTests
             });
             var source = Revision(revision, root, "unadmitted.dart", now, false);
             source.Classification = "Unknown";
-            source.ByteLength = lowerLimit ? 2 * 1024 * 1024 : 1;
+            source.ByteLength = lowerLimit ? SourcePolicyDefaults.MaximumTextBytes + 1 : 1;
             setup.SourceRevisions.Add(source);
             setup.SourceActivities.AddRange(pending, prior);
             await setup.SaveChangesAsync();
         }
         var reason = lowerLimit ? "File exceeds the effective UTF-8 text ingestion limit." : "File extension is unknown to local source ingestion.";
-        var nextAction = lowerLimit ? "Review the file size and the source's effective text limit."
+        var nextAction = lowerLimit ? "Review the file size against the app's text limit."
             : "Reassess the retained input under the current source policy before queueing it.";
         var reader = new SourceRootProjectionReader(factory, new NoPathPolicy(), new NoEnumeration(), new LocalSourceCapabilityHandlerRegistry([]));
         var detail = Assert.IsType<SourceRootDetailProjection>(await reader.ReadRootAsync(root, default));

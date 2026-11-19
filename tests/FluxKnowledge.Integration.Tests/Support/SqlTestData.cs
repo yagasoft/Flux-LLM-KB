@@ -117,6 +117,7 @@ internal static class SqlTestData
             {Delete(context.GpuExecutorResultReceipts)}
             {Delete(context.GpuExecutorDispatches)}
             {Delete(context.DocumentOcrRequests)}
+            {Delete(context.MediaTranscriptionGpuRequests)}
             {Delete(context.EmbeddingGpuRequests)}
             {Delete(context.GpuMiniTasks)}
             UPDATE {Table(context.GpuCapacitySlots)} SET [ActiveBatchId]=NULL WHERE [ActiveBatchId] IS NOT NULL;

@@ -1,4 +1,4 @@
-param([string]$SourceRoot=(Split-Path -Parent (Split-Path -Parent $PSScriptRoot)),[switch]$CodexWorkspace)
+param([string]$SourceRoot=(Split-Path -Parent (Split-Path -Parent $PSScriptRoot)),[switch]$CodexWorkspace,[switch]$MediaTranscription)
 $ErrorActionPreference='Stop';Set-StrictMode -Version Latest
 . (Join-Path $SourceRoot 'scripts/deploy/incremental-passage-window-pre-ddl-abort.ps1')
 Import-Module (Join-Path $SourceRoot 'scripts/deploy/incremental-passage-window-eligibility-migration.psm1') -Force
@@ -41,10 +41,10 @@ $InteractiveHostTaskName = 'fixture'
 $SiteName = 'fixture'
 $ValidationHoldPath = Join-Path $caseRoot 'hold.json'
 $ReadinessTimeoutSeconds = 10
-$mode = if ($CodexWorkspace) { @{CodexWorkspace = $true} } else { @{Outlook = $true} }
+$mode = if ($MediaTranscription) { @{MediaTranscription = $true} } elseif ($CodexWorkspace) { @{CodexWorkspace = $true} } else { @{Outlook = $true} }
 $contract = Get-PassageWindowEligibilityMigrationContract @mode
 $purpose = $contract.ArtifactPrefix + '-migration'
-$receiptPrefix = if ($CodexWorkspace) { 'codex-workspace-pre-ddl-abort' } else { 'outlook-pre-ddl-abort' }
+$receiptPrefix = if ($MediaTranscription) { 'media-transcription-pre-ddl-abort' } elseif ($CodexWorkspace) { 'codex-workspace-pre-ddl-abort' } else { 'outlook-pre-ddl-abort' }
 $policy = [byte[]]@(1, 2, 3)
 $policyHash = [Convert]::ToHexString([Security.Cryptography.SHA256]::HashData($policy))
 $fixtureHelperTask = @{
@@ -82,8 +82,20 @@ function Assert-SegmentedUpdatePath($Path) { $Path }
 function Get-HybridPayloadFingerprint { 'original' }
 function Get-DeploymentSqlConnectionString { 'web' }
 function Get-RepositoryRecoveryCompanionConnectionString { 'outlook' }
-function Get-PassageWindowEligibilityDatabaseState { param($ConnectionString,[switch]$Outlook,[switch]$CodexWorkspace); if($Outlook -ne !$mode.ContainsKey('CodexWorkspace') -or $CodexWorkspace -ne $mode.ContainsKey('CodexWorkspace')){throw 'Missing Outlook state mode.'}; $ConnectionString }
-function Get-PassageWindowEligibilityStateKind { param($DatabaseState,$ExpectedDatabaseIdentity,[switch]$Outlook,[switch]$CodexWorkspace); if($Outlook -ne !$mode.ContainsKey('CodexWorkspace') -or $CodexWorkspace -ne $mode.ContainsKey('CodexWorkspace')){throw 'Missing Outlook classifier mode.'}; 'Old' }
+function Assert-FixtureMode($Selected) {
+    if ($Selected.Outlook -ne $mode.ContainsKey('Outlook') -or $Selected.CodexWorkspace -ne $mode.ContainsKey('CodexWorkspace') -or
+        $Selected.MediaTranscription -ne $mode.ContainsKey('MediaTranscription')) { throw 'Wrong migration proof mode.' }
+}
+function Get-PassageWindowEligibilityDatabaseState {
+    param($ConnectionString,[switch]$Outlook,[switch]$CodexWorkspace,[switch]$MediaTranscription)
+    Assert-FixtureMode @{Outlook=$Outlook;CodexWorkspace=$CodexWorkspace;MediaTranscription=$MediaTranscription}
+    $ConnectionString
+}
+function Get-PassageWindowEligibilityStateKind {
+    param($DatabaseState,$ExpectedDatabaseIdentity,[switch]$Outlook,[switch]$CodexWorkspace,[switch]$MediaTranscription)
+    Assert-FixtureMode @{Outlook=$Outlook;CodexWorkspace=$CodexWorkspace;MediaTranscription=$MediaTranscription}
+    'Old'
+}
 function Get-FileHash { @{Hash='config'} }
 function Get-RepositoryRecoveryTaskObservation { @{Enabled=$case.Enabled;State='Disabled';IdentityHash='companion-identity';LauncherSha256='launcher'} }
 function Wait-InteractiveHostStopped {}
@@ -109,6 +121,48 @@ function Enable-IndexCompatibleOutlookTask {
 }
 function Get-ScheduledTask { @{Settings=@{Enabled=$case.Enabled}} }
 try {
+    $case=@{Held=$true;Started=$false;Enabled=$false;Probes=0;EnableAttempts=0;Stops=0}
+    $reviewedSourceJournalPayloads=@('fixture candidate binding')
+    $intent=Join-Path $directory ($receiptPrefix+'-intent.json')
+    $outer=[Threading.Mutex]::new($false,'Global\FluxKnowledge.IncrementalIisUpdate.v1')
+    $owned=$false
+    try {
+        $owned=$outer.WaitOne(0)
+        if (!$owned) { throw 'Fixture could not establish the outer deployment lease.' }
+        $verified=Invoke-DeploymentPassageWindowPreDdlAbort $release $priorBindingSha -VerifyOnly @mode
+        if ($verified.ReleaseId -cne $release -or !$case.Held -or $case.Started -or $case.Probes -or
+            $case.Enabled -or $reviewedSourceJournalPayloads[0] -cne 'fixture candidate binding' -or
+            (Test-Path -LiteralPath $intent)) { throw 'Held proof changed candidate bindings or mutated the stopped release.' }
+        [IO.File]::WriteAllText($intent,'{}')
+        try {
+            $null=Invoke-DeploymentPassageWindowPreDdlAbort $release $priorBindingSha -VerifyOnly @mode
+            throw 'Cancelled predecessor was accepted.'
+        } catch {
+            if ($_.Exception.Message -cne 'media-continuation-predecessor-cancellation-exists') { throw }
+        }
+        if ($MediaTranscription) {
+            [IO.File]::Delete($intent)
+            $forward=Join-Path $directory 'media-transcription-hold-forward-intent.json'
+            # A torn receipt is still a claim. Prove refusal with either hold owner.
+            [IO.File]::WriteAllText($forward,'')
+            foreach ($held in @($true,$false)) {
+                $case.Held=$held
+                foreach ($operation in @(@{VerifyOnly=$true},@{Apply=$true})) {
+                    try {
+                        $null=Invoke-DeploymentPassageWindowPreDdlAbort $release $priorBindingSha @operation @mode
+                        throw 'Claimed predecessor was accepted.'
+                    } catch {
+                        if ($_.Exception.Message -cne 'media-continuation-predecessor-already-claimed') { throw }
+                    }
+                }
+            }
+            if ($case.Started) { throw 'Claimed predecessor started.' }
+        }
+    } finally {
+        if ($MediaTranscription) { [IO.File]::Delete((Join-Path $directory 'media-transcription-hold-forward-intent.json')) }
+        if ($owned) { $outer.ReleaseMutex() }
+        $outer.Dispose()
+    }
     foreach ($failure in 0..3) {
         $case=@{Held=$true;Started=$false;Enabled=$false;Probes=0;EnableAttempts=0;Stops=0}
         $intent=Join-Path $directory ($receiptPrefix+'-intent.json')

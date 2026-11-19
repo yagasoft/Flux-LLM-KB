@@ -4,10 +4,10 @@ using System.Text.Json;
 
 namespace FluxKnowledge.Application.Gpu;
 
-public enum GpuWorkloadKind { Ocr, Retrieval }
+public enum GpuWorkloadKind { Ocr, Retrieval, MediaTranscription }
 public sealed record GpuWorkloadProfile(string ModelRuntimeKey, string SettingsFingerprint, GpuWorkloadKind Kind);
 
-/// <summary>Exact trusted runtime/settings allowlist for the OCR turn rule; lanes do not identify workloads.</summary>
+/// <summary>Exact trusted runtime/settings allowlist for GPU admission and workload turns.</summary>
 public sealed class GpuWorkloadPolicy
 {
     private readonly GpuWorkloadProfile[] _profiles;

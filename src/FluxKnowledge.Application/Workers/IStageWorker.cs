@@ -29,7 +29,8 @@ public sealed record PipelineStageSource(
     SourceRevisionId? RetainedSourceRevisionId = null,
     string? RetainedSourceClassification = null,
     string? RetainedSourceExtension = null,
-    string? InputDocumentMetadataJson = null);
+    string? InputDocumentMetadataJson = null,
+    bool InputIsNativeTranscript = false);
 
 public interface IPipelineStageReader
 {
@@ -43,6 +44,7 @@ public interface IPipelineStageReader
 public interface IStageWorker
 {
     string Operation { get; }
+    bool CanClaim => true;
 
     ValueTask ExecuteAsync(StageWorkItem workItem, CancellationToken cancellationToken);
 }

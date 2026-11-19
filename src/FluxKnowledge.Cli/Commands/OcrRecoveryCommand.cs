@@ -108,7 +108,7 @@ public static class OcrRecoveryCommand
     }
 
     private static bool MatchesReviewedHistory(FluxKnowledgeDbContext db, string[] history, string[]? plannedHistory) =>
-        history.LastOrDefault() == "20261118225053_BindCodexNotesToWorkspace" &&
+        history.LastOrDefault() == "20261119125051_AddMediaTranscriptionGpuRequests" &&
         plannedHistory is not null && history.SequenceEqual(plannedHistory, StringComparer.Ordinal) &&
         history.SequenceEqual(db.Database.GetMigrations(), StringComparer.Ordinal);
 

@@ -12,13 +12,14 @@ public sealed class PipelineActivityView
     public int QueuedJobs => Jobs.Where(j => j.State == PipelineWorkState.Queued).Sum(j => j.Count);
     public int WaitingJobs => Jobs.Where(j => j.State == PipelineWorkState.Waiting).Sum(j => j.Count);
     public int AttentionJobs => Jobs.Where(j => j.State == PipelineWorkState.Attention).Sum(j => j.Count);
-    public int HistoricalJobs => Jobs.Where(j => j.IsHistorical).Sum(j => j.Count);
+    public int HistoricalJobs => Jobs.Where(j => j.IsHistorical && j.State != PipelineWorkState.Attention).Sum(j => j.Count);
     public int KnownFiles => Sources.Sum(s => s.KnownFiles);
     public int PublishedFiles => Sources.Sum(s => s.PublishedFiles);
     public int PendingFiles => Sources.Sum(s => s.PendingFiles);
-    public int BlockedFiles => Sources.Sum(s => s.BlockedFiles);
-    public int FailedFiles => Sources.Sum(s => s.FailedFiles);
-    public int ProvisionalFiles => Sources.Sum(s => s.ProvisionalFiles);
+    public int BlockedFiles { get; private init; }
+    public int FailedFiles { get; private init; }
+    public int ProvisionalFiles { get; private init; }
+    public int IgnoredFiles { get; private init; }
     public int ActiveGpuTasks { get; private init; }
     public int ReadyGpuTasks { get; private init; }
     public int UncertainGpuTasks { get; private init; }
@@ -42,7 +43,12 @@ public sealed class PipelineActivityView
         var catchingUp = sources.Any(s => s.PendingFiles > 0 && s.LastProgressAtUtc > s.LastDiscoveryAtUtc &&
             (s.ActiveProcessors > 0 || jobs.Any(j => j.SourceRootId == s.Id &&
                 j.State == PipelineWorkState.Running && !j.IsHistorical)));
-        var blocked = sources.Any(s => s.BlockedFiles > 0 || s.FailedFiles > 0 || s.ProvisionalFiles > 0 || s.LifecycleReason is not null || s.ScanErrors > 0) ||
+        var fileAttention = summary.FileAttention.Where(row => sourceRootId is null || row.SourceRootId == sourceRootId).ToArray();
+        var blockedFiles = summary.FileAttention.Count == 0 ? sources.Sum(s => s.BlockedFiles) : fileAttention.Sum(row => row.Blocked);
+        var failedFiles = summary.FileAttention.Count == 0 ? sources.Sum(s => s.FailedFiles) : fileAttention.Sum(row => row.Failed);
+        var provisionalFiles = sources.Sum(s => s.ProvisionalFiles);
+        var blocked = blockedFiles > 0 || failedFiles > 0 || provisionalFiles > 0 ||
+            sources.Any(s => s.LifecycleReason is not null || s.ScanErrors > 0) ||
             jobs.Any(j => j.State == PipelineWorkState.Attention);
         var waiting = pending > 0 || waitingGpu > 0 || sources.Any(s => s.DeferredFiles > 0 || s.WaitingScans > 0 || s.Lifecycle == "Deleting") ||
             jobs.Any(j => j.State == PipelineWorkState.Waiting);
@@ -65,6 +71,8 @@ public sealed class PipelineActivityView
         return new()
         {
             State = state, Message = message, Sources = sources, Jobs = jobs, ActiveGpuTasks = activeGpu,
+            BlockedFiles = blockedFiles, FailedFiles = failedFiles, ProvisionalFiles = provisionalFiles,
+            IgnoredFiles = fileAttention.Sum(row => row.Ignored),
             ReadyGpuTasks = gpu.Where(g => g.State == "Ready").Sum(g => g.Count),
             UncertainGpuTasks = uncertainGpu, UnconfirmedGpuTasks = unconfirmedGpu, WaitingGpuTasks = waitingGpu,
             HistoricalGpuTasks = gpu.Where(g => g.State == "Historical unresolved").Sum(g => g.Count)

@@ -57,7 +57,8 @@ public sealed class SourceCaptureLeaseTests
             Assert.Equal(length, discoveryReads);
             Assert.Equal(existing || snapshot.HasFullBoundedBuffer ? 0L : length, copyReads);
             Assert.Equal(0, retainedReads);
-            Assert.Equal(length <= Math.Min(maximumFileBytes, 33554432) ? length : Math.Min(length, 8192), snapshot.ClassificationBuffer.Length);
+            Assert.Equal(length <= SourcePolicyDefaults.MaximumTextBytes
+                ? length : Math.Min(length, 8192), snapshot.ClassificationBuffer.Length);
             Assert.Equal(bytes, await File.ReadAllBytesAsync(Path.Combine(storage.Root, receipt.StoreRelativePath)));
             Assert.Throws<IOException>(() => { using var writable = File.OpenWrite(path); });
             Assert.Empty(Directory.EnumerateFiles(storage.Root, "*.tmp", SearchOption.AllDirectories));
@@ -206,6 +207,11 @@ public sealed class SourceCaptureLeaseTests
         using var source = new CloudSourceFixture();
         using var storage = new CloudSourceFixture();
         var path = source.File("cancel.txt", new string('x', 262144));
+        if (!existing)
+        {
+            using var large = File.OpenWrite(path);
+            large.SetLength(SourcePolicyDefaults.MaximumTextBytes + 1);
+        }
         var root = SourceRootConfiguration.Create(source.Root, "capture", false, false, 1024);
         using var cancellation = new CancellationTokenSource();
         using var seedStore = new ContentAddressedSourceArtifactStore(storage.Root);

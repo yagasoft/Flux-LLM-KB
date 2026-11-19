@@ -1,3 +1,4 @@
+using FluxKnowledge.Domain.Jobs;
 using FluxKnowledge.Domain.Pipeline;
 using FluxKnowledge.Infrastructure.SqlServer.Persistence;
 using FluxKnowledge.Web.Components.Sources;
@@ -84,6 +85,24 @@ public sealed class PipelineFileSampleTests
         var item = Assert.Single(PipelineFileSample.Project([published], [job], [], [], new Dictionary<Guid, string>()));
         Assert.Equal("Published", item.File.Category);
         Assert.Empty(item.File.Jobs);
+    }
+
+    [Fact]
+    public void File_attention_never_hides_unresolved_worker_gpu_or_source_removal_evidence()
+    {
+        var failed = File() with { Category = "Failed", Reason = "pdf-document-container-invalid", Classification = "PdfDocumentContainer" };
+        var job = Job(failed, PipelineStage.Extract);
+        job.PublicState = (int)PublicJobState.Failed;
+        var roots = new Dictionary<Guid, string> { [failed.SourceRootId] = "Enabled" };
+        Assert.True(Assert.Single(PipelineFileSample.Project([failed], [job], [], [], roots)).File.CanIgnore);
+        job.HasUncertainGpu = true;
+        Assert.False(Assert.Single(PipelineFileSample.Project([failed], [job], [], [], roots)).File.CanIgnore);
+        job.HasUncertainGpu = false;
+        job.PublicState = (int)PublicJobState.WorkerProcessing;
+        Assert.False(Assert.Single(PipelineFileSample.Project([failed], [job], [], [], roots)).File.CanIgnore);
+        job.PublicState = (int)PublicJobState.Failed;
+        roots[failed.SourceRootId] = "Deleting";
+        Assert.False(Assert.Single(PipelineFileSample.Project([failed], [job], [], [], roots)).File.CanIgnore);
     }
 
     private static SourceLogicalFileState File() => new(Guid.NewGuid(), Guid.NewGuid(), "D:/source/file.pdf",

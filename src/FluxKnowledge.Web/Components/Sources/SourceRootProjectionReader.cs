@@ -1,7 +1,9 @@
 using System.Text.Json;
 using FluxKnowledge.Application.Contracts;
+using FluxKnowledge.Application.Gpu;
 using FluxKnowledge.Application.Ports;
 using FluxKnowledge.Application.Sources;
+using FluxKnowledge.Application.Workers;
 using FluxKnowledge.Domain.Jobs;
 using FluxKnowledge.Domain.Pipeline;
 using FluxKnowledge.Domain.Sources;
@@ -167,7 +169,7 @@ public sealed class SourceRootProjectionReader(
         // left join preserves its exact proof without a correlated probe per row.
         var unadmittedLegacyText = SqlCurrentSourceActivities.UnadmittedLegacyTextIds(context)
             .Select(id => new {ActivityId=(Guid?)id});
-        var effectiveTextLimit = Math.Min(root.MaximumFileBytes, SourcePolicyDefaults.MaximumTextBytes);
+        const long effectiveTextLimit = SourcePolicyDefaults.MaximumTextBytes;
         var activities = await (
                 from activity in SqlCurrentSourceActivities.Query(context)
                 join revision in context.SourceRevisions.AsNoTracking() on activity.SourceRevisionId equals revision.Id
@@ -453,14 +455,6 @@ public sealed class SourceRootProjectionReader(
         // Every summary/derived branch below joins this same current-owner set.
         // Empty roots need no branch plans; the overview still checks its fences.
         if (knownFiles.Length == 0) return new Dictionary<Guid, SourceStateSummary>();
-        // Joining root policy into the bulk activity query makes its plan
-        // depend on estimates for a frequently replaced set of roots. Capture
-        // only the policy scalars under the caller's transaction or fence.
-        var effectiveTextLimits = await context.SourceRootConfigurations.AsNoTracking()
-            .Where(root => rootIds.Contains(root.Id))
-            .Select(root => new { root.Id, root.MaximumFileBytes })
-            .ToDictionaryAsync(root => root.Id, root => Math.Min(root.MaximumFileBytes, SourcePolicyDefaults.MaximumTextBytes),
-                cancellationToken).ConfigureAwait(false);
         var unadmittedLegacyText = SqlCurrentSourceActivities.UnadmittedLegacyTextIds(context)
             .Select(id => new { ActivityId = (Guid?)id });
         var activityRows = await (
@@ -511,14 +505,27 @@ public sealed class SourceRootProjectionReader(
                     : record != null && record.CompletionCriteriaMet && !record.IsDeleted && record.SourceRevisionId == revision.Id &&
                         (activity.ResultingPipelineRecordRevision == null || record.Revision == activity.ResultingPipelineRecordRevision)
                         ? (DateTimeOffset?)artifact.CreatedAtUtc : null,
-                activity.Reason)
+                activity.Reason,
+                TranscriptPublished: revision.OriginKind == 0 && activity.ActivityKind == (int)SourceActivityKind.MediaTranscription &&
+                    activity.ProcessorVersion == MediaTranscriptionDiscoveryOptions.ProcessorVersion &&
+                    activity.DescriptorFingerprint == MediaTranscriptionDiscoveryOptions.DescriptorFingerprint &&
+                    EF.Functions.Collate(activity.InputFingerprint, SchemaConfiguration.SchedulerFenceCollation) ==
+                        EF.Functions.Collate(revision.ContentSha256, SchemaConfiguration.SchedulerFenceCollation) &&
+                    record != null && record.SourceRevisionId == revision.Id && record.Revision == activity.ResultingPipelineRecordRevision &&
+                    record.CompletionCriteriaMet && !record.IsDeleted && record.CurrentStage == (int)PipelineStage.Publish &&
+                    artifact != null && context.Jobs.Any(job => job.PipelineRecordId == record.Id && job.SourceRevision == record.Revision &&
+                        job.Stage == (int)PipelineStage.Extract && job.Operation == MediaTranscriptionGpuContracts.Operation &&
+                        job.PublicState == (int)PublicJobState.Completed) &&
+                    context.Jobs.Any(job => job.PipelineRecordId == record.Id && job.SourceRevision == record.Revision &&
+                        job.Stage == (int)PipelineStage.Publish && job.Operation == PipelineOperations.Publish &&
+                        job.PublicState == (int)PublicJobState.Completed))
             })
             .ToListAsync(cancellationToken).ConfigureAwait(false);
         var rows = new List<SourceStateRow>(activityRows.Count);
         foreach (var value in activityRows)
         {
             var row = value.Row;
-            if (!effectiveTextLimits.TryGetValue(row.SourceRootId, out var limit)) continue;
+            const long limit = SourcePolicyDefaults.MaximumTextBytes;
             if (value.NeedsAssessment || value.IsLegacyRefusal && value.ByteLength > limit)
             {
                 row = row with
@@ -541,11 +548,12 @@ public sealed class SourceRootProjectionReader(
                     state.Status == "Pending" ? (int)SourceActivityState.Pending : (int)SourceActivityState.Completed,
                 null,
                 null,
-                null,
-                null,
+                state.PublishedPipelineRecordId,
+                state.PublishedPipelineRecordId.HasValue ? 3 : null,
                 true,
                 state.BranchId,
                 state.Status == "Completed" ? "No extractable text" : null,
+                PublishedAtUtc: state.PublishedAtUtc,
                 Reason: state.Reason));
         }
         var unconfirmed = UnconfirmedRevisionIds(knownFiles);
@@ -589,7 +597,12 @@ public sealed class SourceRootProjectionReader(
             var reason = provisional ? "source-revision-binding-unconfirmed" : logical is not null ? logical.Reason
                 : relevantReasons.Length > 0 ? string.Join("; ", relevantReasons) : null;
             return new SourceLogicalFileState(file.SourceRootId, file.Id, file.CanonicalPath, file.ArchivePath,
-                category, reason, provisional ? null : branch, stateRows.Max(row => row.PublishedAtUtc), file.Classification);
+                category, reason, provisional ? null : branch, stateRows.Max(row => row.PublishedAtUtc), file.Classification)
+            {
+                MetadataIndexed = !provisional && (logical?.PublishedPipelineRecordId != null ||
+                    stateRows.Any(row => row.PublishedPipelineRecordId != null && row.PublishedOriginKind == 3)),
+                RecordedReasons = provisional ? [] : logical?.Reason is { } logicalReason ? [logicalReason] : relevantReasons
+            };
         }).GroupBy(file => file.SourceRootId).ToDictionary(group => group.Key, group => group.ToArray());
         return rows.GroupBy(row => row.SourceRootId).ToDictionary(
             group => group.Key,
@@ -622,6 +635,8 @@ public sealed class SourceRootProjectionReader(
 
     private static SourceRevisionProjectionState ClassifyRevision(IReadOnlyCollection<SourceStateRow> rows)
     {
+        if (rows.Any(row => row.TranscriptPublished))
+            return SourceRevisionProjectionState.Indexed;
         if (rows.Any(row => row.OverridesPublication && row.State == (int)SourceActivityState.FailedTerminal))
             return SourceRevisionProjectionState.Error;
         if (rows.Any(row => row.OverridesPublication && row.State == (int)SourceActivityState.DeferredPolicy))
@@ -634,6 +649,8 @@ public sealed class SourceRootProjectionReader(
             return SourceRevisionProjectionState.WithoutText;
         if (rows.Any(row => row.PublishedPipelineRecordId is not null && row.PublishedOriginKind == 2))
             return SourceRevisionProjectionState.Indexed;
+        if (rows.Any(row => row.OverridesPublication && row.PublishedPipelineRecordId.HasValue && row.PublishedOriginKind == 3))
+            return SourceRevisionProjectionState.MetadataOnly;
         if (rows.Any(row => row.State == (int)SourceActivityState.FailedTerminal && row.ResultingPipelineRecordId is null))
             return SourceRevisionProjectionState.Error;
         if (rows.Any(row => row.ProcessorBranchState == (int)RetainedProcessorBranchState.Blocked ||
@@ -708,13 +725,13 @@ public sealed class SourceRootProjectionReader(
                         PublishedDocumentClassification(revision.Extension, revision.Classification),
                         logicalState.Status,
                         logicalState.Reason,
-                        publication.PipelineRecordId);
+                        logicalState.PublishedPipelineRecordId.HasValue ? null : publication.PipelineRecordId);
                 }
                 return new SourceFileProjection(
                     Path.GetFileName(publishedRelativePath),
                     publishedRelativePath,
                     PublishedDocumentClassification(revision.Extension, revision.Classification),
-                    publication.InputOriginKind == 3 ? "Metadata only" : "Indexed",
+                    publication.InputOriginKind == 3 ? "Metadata indexed" : "Indexed",
                     publication.InputOriginKind == 3 ? "media-metadata-only" : null,
                     publication.PipelineRecordId);
             }
@@ -804,12 +821,71 @@ public sealed class SourceRootProjectionReader(
                     child.OriginKind == 3 ? 1 : 2, job.PublicState, job.Reason))
             .ToListAsync(cancellationToken).ConfigureAwait(false);
 
+        // JSON metadata completes the ordinary publish stage without a document selector.
+        // Only project completion if the owner, retained output and publish generation still agree.
+        var publishedMetadata = await (
+                from branch in context.SourceProcessorBranches.AsNoTracking()
+                join owner in currentOwners on branch.SourceRevisionId equals owner.Id
+                join ownerActivity in context.SourceActivities.AsNoTracking() on branch.SourceActivityId equals ownerActivity.Id
+                join member in context.SourceProcessorBranchMembers.AsNoTracking() on branch.Id equals member.BranchId
+                join child in context.SourceRevisions.AsNoTracking() on member.ChildSourceRevisionId equals child.Id
+                join childActivity in context.SourceActivities.AsNoTracking() on member.ChildSourceActivityId equals childActivity.Id
+                join record in context.PipelineRecords.AsNoTracking() on childActivity.ResultingPipelineRecordId equals (Guid?)record.Id
+                join artifact in context.Artifacts.AsNoTracking() on new { Id = record.Id, record.Revision }
+                    equals new { Id = artifact.PipelineRecordId, Revision = artifact.SourceRevision }
+                where branch.State == (int)RetainedProcessorBranchState.Completed && branch.CompletedMemberCount == 1 &&
+                      (branch.ProcessorVersion == MediaMetadataRetainedProcessor.Capability.ProcessorVersion &&
+                       branch.ProcessorFingerprint == MediaMetadataRetainedProcessor.Capability.ProcessorFingerprint ||
+                       branch.ProcessorVersion == MediaMetadataRetainedProcessor.LegacyProcessorVersion &&
+                       branch.ProcessorFingerprint == MediaMetadataRetainedProcessor.LegacyProcessorFingerprint) &&
+                      ownerActivity.SourceRevisionId == owner.Id &&
+                      ownerActivity.State != (int)SourceActivityState.CancelledSuperseded &&
+                      EF.Functions.Collate(owner.ContentSha256, SchemaConfiguration.SchedulerFenceCollation) ==
+                          EF.Functions.Collate(branch.InputSha256, SchemaConfiguration.SchedulerFenceCollation) &&
+                      EF.Functions.Collate(ownerActivity.InputFingerprint, SchemaConfiguration.SchedulerFenceCollation) ==
+                          EF.Functions.Collate(branch.InputSha256, SchemaConfiguration.SchedulerFenceCollation) &&
+                      EF.Functions.Collate(ownerActivity.ProcessorVersion, SchemaConfiguration.SchedulerFenceCollation) ==
+                          EF.Functions.Collate(branch.ProcessorVersion, SchemaConfiguration.SchedulerFenceCollation) &&
+                      EF.Functions.Collate(ownerActivity.DescriptorFingerprint, SchemaConfiguration.SchedulerFenceCollation) ==
+                          EF.Functions.Collate(branch.ProcessorFingerprint, SchemaConfiguration.SchedulerFenceCollation) &&
+                      member.Disposition == "completed" && member.ByteLength == child.ByteLength &&
+                      context.SourceProcessorBranchMembers.Count(other => other.BranchId == branch.Id) == 1 &&
+                      child.ParentSourceRevisionId == owner.Id && child.SourceRootId == owner.SourceRootId &&
+                      child.OriginKind == 3 && child.Extension == ".json" && child.Classification == "AcceptedUtf8Text" &&
+                      child.SuppressedAtUtc == null && childActivity.SourceRevisionId == child.Id &&
+                      childActivity.State == (int)SourceActivityState.Completed &&
+                      EF.Functions.Collate(childActivity.InputFingerprint, SchemaConfiguration.SchedulerFenceCollation) ==
+                          EF.Functions.Collate(child.ContentSha256, SchemaConfiguration.SchedulerFenceCollation) &&
+                      record.SourceRevisionId == child.Id && record.Revision == childActivity.ResultingPipelineRecordRevision &&
+                      EF.Functions.Collate(record.ContentHash, SchemaConfiguration.SchedulerFenceCollation) ==
+                          EF.Functions.Collate(child.ContentSha256, SchemaConfiguration.SchedulerFenceCollation) &&
+                      !record.IsDeleted && record.CompletionCriteriaMet && record.CurrentStage == (int)PipelineStage.Publish &&
+                      artifact.Stage == (int)PipelineStage.Publish &&
+                      context.SourceArtifacts.Any(retained => retained.SourceRevisionId == child.Id && retained.ByteLength == child.ByteLength &&
+                          EF.Functions.Collate(retained.ContentSha256, SchemaConfiguration.SchedulerFenceCollation) ==
+                              EF.Functions.Collate(child.ContentSha256, SchemaConfiguration.SchedulerFenceCollation)) &&
+                      context.Jobs.Any(job => job.PipelineRecordId == record.Id && job.SourceRevision == record.Revision &&
+                          job.Stage == (int)PipelineStage.Publish && job.Operation == PipelineOperations.Publish &&
+                          job.PublicState == (int)PublicJobState.Completed)
+                select new LogicalOwnerStateRow(owner.SourceRootId, owner.Id, branch.Id, branch.CreatedAtUtc,
+                    1, "Metadata indexed", "media-metadata-only", record.Id, artifact.CreatedAtUtc))
+            .ToListAsync(cancellationToken).ConfigureAwait(false);
+
+        var publishedMetadataBranches = publishedMetadata.Select(value => value.BranchId).ToHashSet();
+
         var incompleteBranches = await (
                 from branch in context.SourceProcessorBranches.AsNoTracking()
                 join owner in currentOwners on branch.SourceRevisionId equals owner.Id
                 join ownerActivity in SqlCurrentSourceActivities.Query(context) on branch.SourceActivityId equals ownerActivity.Id
                 where rootIds.Contains(owner.SourceRootId) && owner.SuppressedAtUtc == null &&
                       (branch.State != (int)RetainedProcessorBranchState.Completed ||
+                       ((branch.ProcessorVersion == MediaMetadataRetainedProcessor.Capability.ProcessorVersion &&
+                         branch.ProcessorFingerprint == MediaMetadataRetainedProcessor.Capability.ProcessorFingerprint ||
+                         branch.ProcessorVersion == MediaMetadataRetainedProcessor.LegacyProcessorVersion &&
+                         branch.ProcessorFingerprint == MediaMetadataRetainedProcessor.LegacyProcessorFingerprint) &&
+                        ownerActivity.State != (int)SourceActivityState.CancelledSuperseded &&
+                        EF.Functions.Collate(branch.InputSha256, SchemaConfiguration.SchedulerFenceCollation) ==
+                            EF.Functions.Collate(owner.ContentSha256, SchemaConfiguration.SchedulerFenceCollation)) ||
                        branch.ProcessorVersion == ZipArchiveRetainedProcessor.Capability.ProcessorVersion && branch.ProcessorFingerprint == ZipArchiveRetainedProcessor.Capability.ProcessorFingerprint ||
                        branch.ProcessorVersion == ZipArchiveRetainedProcessor.LegacyProcessorVersion && branch.ProcessorFingerprint == ZipArchiveRetainedProcessor.LegacyProcessorFingerprint ||
                        branch.ProcessorVersion == TarArchiveRetainedProcessor.Capability.ProcessorVersion && branch.ProcessorFingerprint == TarArchiveRetainedProcessor.Capability.ProcessorFingerprint ||
@@ -855,16 +931,18 @@ public sealed class SourceRootProjectionReader(
                     attempt.FinishedAtUtc,
                     attempt.OutcomeCode))
                 .ToListAsync(cancellationToken).ConfigureAwait(false);
-        var incompleteStates = incompleteBranches.Select(branch =>
-            new LogicalOwnerStateRow(
+        // A newer metadata branch holds the file at Pending until its own output publishes.
+        var incompleteStates = incompleteBranches
+            .Where(branch => !publishedMetadataBranches.Contains(branch.BranchId))
+            .Select(branch => new LogicalOwnerStateRow(
                 branch.SourceRootId,
                 branch.OwnerSourceRevisionId,
                 branch.BranchId,
                 branch.BranchCreatedAtUtc,
                 branch.Priority,
-                branch.State == (int)RetainedProcessorBranchState.Completed ? "Completed" :
+                branch.State == (int)RetainedProcessorBranchState.Completed && branch.Priority == 2 ? "Completed" :
                     branch.State == (int)RetainedProcessorBranchState.Blocked ? "Blocked" : "Pending",
-                branch.State == (int)RetainedProcessorBranchState.Completed ? "archive-expansion-completed-members-counted-separately" :
+                branch.State == (int)RetainedProcessorBranchState.Completed && branch.Priority == 2 ? "archive-expansion-completed-members-counted-separately" :
                 branch.State == (int)RetainedProcessorBranchState.Blocked
                     ? incompleteAttempts
                         .Where(attempt => attempt.BranchId == branch.BranchId)
@@ -898,6 +976,7 @@ public sealed class SourceRootProjectionReader(
                 .Where(static value => value is not null)
                 .Select(static value => value!))
             .Concat(incompleteStates)
+            .Concat(publishedMetadata)
             .GroupBy(value => value.OwnerSourceRevisionId)
             .Select(group => group.OrderByDescending(value => value.Priority)
                 .ThenByDescending(value => value.BranchCreatedAtUtc)
@@ -1057,7 +1136,9 @@ public sealed class SourceRootProjectionReader(
         DateTimeOffset BranchCreatedAtUtc,
         int Priority,
         string Status,
-        string? Reason);
+        string? Reason,
+        Guid? PublishedPipelineRecordId = null,
+        DateTimeOffset? PublishedAtUtc = null);
 
     private sealed record LogicalChildJobRow(
         Guid SourceRootId,
@@ -1112,7 +1193,8 @@ public sealed class SourceRootProjectionReader(
         Guid? PublicationBranchId = null,
         string? TerminalOutcome = null,
         DateTimeOffset? PublishedAtUtc = null,
-        string? Reason = null);
+        string? Reason = null,
+        bool TranscriptPublished = false);
 
     private enum SourceRevisionProjectionState
     {
@@ -1142,4 +1224,8 @@ public sealed class SourceRootProjectionReader(
 
 internal sealed record SourceLogicalFileState(Guid SourceRootId, Guid SourceRevisionId, string FullPath,
     string? ArchivePath, string Category, string? Reason, Guid? SelectedBranchId, DateTimeOffset? PublishedAtUtc,
-    string Classification = "");
+    string Classification = "")
+{
+    internal IReadOnlyList<string> RecordedReasons { get; init; } = [];
+    internal bool MetadataIndexed { get; init; }
+}

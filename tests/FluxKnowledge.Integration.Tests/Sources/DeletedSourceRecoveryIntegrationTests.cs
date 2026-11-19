@@ -232,15 +232,20 @@ public sealed partial class DeletedSourceRecoveryIntegrationTests(NativeSqlServe
     {
         private readonly string _area = Path.Combine(@"I:\Codex Workspaces\Staging\FluxKnowledge", "Removal-" + Guid.NewGuid().ToString("N"));
         internal string Files => Path.Combine(_area, "Sources");
+        internal string Retained => Path.Combine(_area, "Retained");
         internal SourceJournalStoreIntegrationTests.ContextFactory Factory { get; }
         internal SqlSourceScanStore Scans { get; }
         internal SourceWorkAdmission Admission { get; } = new();
         internal ClaimedSourceScan Claim { get; private set; } = null!;
         private ContentAddressedSourceArtifactStore? _artifacts;
-        private Scenario(string connection) { Factory = new(connection); Scans = new(Factory, TimeProvider.System); }
-        internal static async Task<Scenario> CreateAsync(string connection)
+        private Scenario(string connection, SqlSourceWorkRecoveryProgress? recoveryProgress)
         {
-            var result = new Scenario(connection);
+            Factory = new(connection);
+            Scans = new(Factory, TimeProvider.System, recoveryProgress: recoveryProgress);
+        }
+        internal static async Task<Scenario> CreateAsync(string connection, SqlSourceWorkRecoveryProgress? recoveryProgress = null)
+        {
+            var result = new Scenario(connection, recoveryProgress);
             Directory.CreateDirectory(Path.Combine(result.Files, "removed"));
             await File.WriteAllTextAsync(Path.Combine(result.Files, "removed", "one.txt"), "first input");
             await File.WriteAllTextAsync(Path.Combine(result.Files, "removed", "two.txt"), "second input");
@@ -252,18 +257,21 @@ public sealed partial class DeletedSourceRecoveryIntegrationTests(NativeSqlServe
             await commands.CommitAsync(mutation, preview.ConfirmationId, Guid.NewGuid().ToString("N"), "test", default);
             result.Claim = Assert.IsType<ClaimedSourceScan>(await result.Scans.ClaimNextReleasedAsync("removal", DateTimeOffset.UtcNow, TimeSpan.FromMinutes(10), default));
             result.Admission.Admit(result.Claim.SourceRoot.Id.Value, result.Claim.SourceRoot.ConfigurationRevision);
-            result._artifacts = new(Path.Combine(result._area, "Retained"));
-            await new SourceScanWorker(new LocalSourceEnumerator(), result.Scans, result._artifacts,
-                new SqlSourceActivityStore(result.Factory, TimeProvider.System)).ScanAsync(result.Claim.SourceRoot, result.Claim.ScanRequest, default);
+            result._artifacts = new(result.Retained);
+            await result.ScanFilesystemAsync();
             return result;
         }
-        internal async Task<Guid> PendingAsync(string path, bool subtree)
+        internal ValueTask<SourceScanResult> ScanFilesystemAsync() =>
+            new SourceScanWorker(new LocalSourceEnumerator(), Scans, _artifacts!,
+                new SqlSourceActivityStore(Factory, TimeProvider.System)).ScanAsync(Claim.SourceRoot, Claim.ScanRequest, default);
+        internal async Task<Guid> PendingAsync(string path, bool subtree, bool removalOnly = false)
         {
             var id = Guid.NewGuid();
             await using var db = Factory.CreateDbContext();
             db.SourcePendingChanges.Add(new SourcePendingChangeEntity { Id = id, SourceRootId = Claim.SourceRoot.Id.Value,
                 RelativePath = path, PathFingerprint = SqlSourceChangeJournalStore.PathKey(path), IsSubtree = subtree,
-                Generation = 1, ReasonFlags = 1 | SourcePendingReasons.RemovalPending, LastContentUsn = 0, LastUnjournaledGeneration = 1 });
+                Generation = 1, ReasonFlags = (removalOnly ? 0L : 1L) | SourcePendingReasons.RemovalPending,
+                LastContentUsn = 0, LastUnjournaledGeneration = 1 });
             await db.SaveChangesAsync();
             return id;
         }

@@ -4,6 +4,7 @@ using FluxKnowledge.Application.Documents;
 using FluxKnowledge.Application.Sources;
 using FluxKnowledge.Application.Indexing;
 using FluxKnowledge.Application.Pipeline;
+using FluxKnowledge.Application.Gpu;
 using FluxKnowledge.Application.Ports;
 using FluxKnowledge.Application.Workers;
 using FluxKnowledge.Domain.Common;
@@ -307,6 +308,27 @@ public sealed partial class SqlStageTransitionStore : IStageTransitionStore
                     SourceRevisionId: activity.SourceRevisionId, SourceActivityId: activity.Id,
                     CorrelationId: $"source:{activity.SourceRevisionId:N}", Details: new { stage = "Publish" }));
             }
+        }
+
+        if (request.NextStage is null && request.Artifact.Stage == PipelineStage.Extract &&
+            request.CurrentJob.Operation == MediaTranscriptionGpuContracts.Operation &&
+            request.Artifact.ContentType == MediaTranscriptionGpuContracts.SidecarReceiptContentType)
+        {
+            var now = _timeProvider.GetUtcNow();
+            await context.SourceActivities.Where(activity =>
+                activity.ResultingPipelineRecordId == request.CurrentJob.PipelineRecordId.Value &&
+                activity.ResultingPipelineRecordRevision == request.CurrentJob.SourceRevision &&
+                activity.SourceRevisionId == validated.PipelineRecord.SourceRevisionId &&
+                activity.ActivityKind == (int)SourceActivityKind.MediaTranscription &&
+                activity.ProcessorVersion == MediaTranscriptionDiscoveryOptions.ProcessorVersion &&
+                activity.DescriptorFingerprint == MediaTranscriptionDiscoveryOptions.DescriptorFingerprint &&
+                activity.InputFingerprint == request.Artifact.ContentHash &&
+                (activity.State == (int)SourceActivityState.Pending ||
+                 activity.State == (int)SourceActivityState.Running ||
+                 activity.State == (int)SourceActivityState.FailedRetryable))
+                .ExecuteUpdateAsync(setters => setters.SetProperty(row => row.State, (int)SourceActivityState.Completed)
+                    .SetProperty(row => row.Reason, "transcription-sidecar-saved")
+                    .SetProperty(row => row.UpdatedAtUtc, now), cancellationToken).ConfigureAwait(false);
         }
 
         JobId? nextJobId = null;

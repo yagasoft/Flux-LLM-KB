@@ -27,14 +27,15 @@ public static class SqlPipelineActivityQuery
         // need no second join to Jobs/PipelineRecords just to recover these scalars.
         if (selectedBranches.HasJobFacts)
             return context.Database.SqlQueryRaw<PipelineJobClassificationRow>("""
-                SELECT SourceRootId, Stage, PublicState, IsHistorical, SourceAdmitted, HasWorkerLease,
+                SELECT SourceRootId, Stage, PublicState, IsHistorical, RemovalCleanupBlocker, SourceAdmitted, HasWorkerLease,
                   HasActiveGpu, HasReadyGpu, HasUncertainGpu, HasWaitingGpu, HasPendingDispatch, IsDue, Reason
                 FROM #FluxPipelineJobFacts
                 """);
         return Jobs(context, now, admission, selectedBranches, gpuEvidence).Select(row => new PipelineJobClassificationRow
         {
             SourceRootId = row.SourceRootId, Stage = row.Stage, PublicState = row.PublicState, IsHistorical = row.IsHistorical,
-            SourceAdmitted = row.SourceAdmitted, HasWorkerLease = row.HasWorkerLease, HasActiveGpu = row.HasActiveGpu,
+            SourceAdmitted = row.SourceAdmitted, RemovalCleanupBlocker = row.RemovalCleanupBlocker,
+            HasWorkerLease = row.HasWorkerLease, HasActiveGpu = row.HasActiveGpu,
             HasReadyGpu = row.HasReadyGpu, HasUncertainGpu = row.HasUncertainGpu, HasWaitingGpu = row.HasWaitingGpu,
             HasPendingDispatch = row.HasPendingDispatch, IsDue = row.IsDue, Reason = row.Reason
         });
@@ -79,7 +80,8 @@ public static class SqlPipelineActivityQuery
                   AND currentAttempt.LeaseOwner COLLATE Latin1_General_100_BIN2 = j.LeaseOwner COLLATE Latin1_General_100_BIN2
                   AND currentAttempt.CompletedAtUtc IS NULL
                   AND j.LeaseExpiresAtUtc > @nowUtc) AS AttemptStartedAtUtc,
-              CAST(CASE WHEN {{HistoricalBindingFor(activeRebuildJob)}} THEN 1 ELSE 0 END AS bit) AS IsHistorical,
+              CAST(CASE WHEN removal.Id IS NOT NULL OR {{HistoricalBindingFor(activeRebuildJob)}} THEN 1 ELSE 0 END AS bit) AS IsHistorical,
+              COALESCE(removedJob.Blocker, 0) AS RemovalCleanupBlocker,
               CAST(CASE WHEN (s.Id IS NULL OR r.State = 0 OR {{activeRebuildJob}})
                 AND {{rebuildAdmission}}
                 AND {{deploymentAdmission}} THEN 1 ELSE 0 END AS bit) AS SourceAdmitted,
@@ -94,7 +96,8 @@ public static class SqlPipelineActivityQuery
                 AND dispatch.Stage = j.Stage AND dispatch.Operation COLLATE Latin1_General_100_BIN2 = j.Operation COLLATE Latin1_General_100_BIN2
                 AND dispatch.DispatchedAtUtc IS NULL) THEN 1 ELSE 0 END AS bit) AS HasPendingDispatch,
               CAST(CASE WHEN j.DueAtUtc <= @nowUtc THEN 1 ELSE 0 END AS bit) AS IsDue,
-              j.Reason,
+              CASE WHEN j.Reason = N'source-removed' AND removal.Id IS NULL
+                   AND ({{HistoricalBindingFor(activeRebuildJob)}}) THEN N'source-revision-withdrawn' ELSE j.Reason END AS Reason,
               COALESCE((SELECT MAX(attempt.StartedAtUtc) FROM JobAttempts attempt WHERE attempt.JobId = j.Id),
                 p.RegisteredAtUtc) AS RecordedAtUtc
             FROM Jobs j
@@ -104,6 +107,9 @@ public static class SqlPipelineActivityQuery
             LEFT JOIN SourceRootConfigurations r ON r.Id = s.SourceRootId
             LEFT JOIN SourceRevisions owner ON owner.Id = s.ParentSourceRevisionId
             LEFT JOIN SourceRevisions archiveOwner ON archiveOwner.Id = owner.ParentSourceRevisionId
+            {{RemovedInputJoin}}
+            LEFT JOIN OPENJSON(@removedJobBlockers) WITH (Id uniqueidentifier '$.Id', Blocker int '$.Blocker') removedJob
+              ON removedJob.Id = j.Id
             {{(facts ? "LEFT JOIN #FluxPipelineGpuFacts gpu ON gpu.ParentJobId = j.Id AND gpu.SourceRevision = j.SourceRevision" : "")}}
             WHERE j.PublicState <> 4
             """;
@@ -112,7 +118,7 @@ public static class SqlPipelineActivityQuery
 
     private const string JobFactColumns = """
         Id, PipelineRecordId, SourceRootId, LogicalSourceRevisionId, SourceRevision, CurrentStage,
-        MatchesSelectedFileBranch, Stage, PublicState, IsHistorical, SourceAdmitted, HasWorkerLease,
+        MatchesSelectedFileBranch, Stage, PublicState, IsHistorical, RemovalCleanupBlocker, SourceAdmitted, HasWorkerLease,
         HasActiveGpu, HasReadyGpu, HasUncertainGpu, HasWaitingGpu, HasPendingDispatch, IsDue, Reason
         """;
 
@@ -172,14 +178,17 @@ public static class SqlPipelineActivityQuery
         var sql = $$"""
             SELECT t.Id, j.PipelineRecordId, s.SourceRootId, t.CreatedAtUtc, t.State AS ExecutionState,
               CASE
+                WHEN t.State = 3 AND removedGpu.Id IS NOT NULL THEN N'Outcome uncertain'
                 WHEN t.State = 3 AND (t.ParentJobId IS NOT NULL AND ({{HistoricalBinding}})
+                  OR removal.Id IS NOT NULL
                   OR EXISTS (SELECT 1 FROM OPENJSON(@releasedGpuOutcomesJson) WITH (Id uniqueidentifier '$') released
                     WHERE released.Id = t.Id)) THEN N'Historical unresolved'
                 WHEN t.State = 3 THEN N'Outcome uncertain'
                 WHEN t.State = 1 AND {{OwnedTask("t", false)}} THEN N'Active'
                 WHEN t.State = 1 AND {{OwnedTask("t", true)}} THEN N'Awaiting dispatch'
                 WHEN t.State = 1 THEN N'Ownership unconfirmed'
-                WHEN t.ParentJobId IS NOT NULL AND ({{HistoricalBinding}}) THEN N'Historical unresolved'
+                WHEN removedGpu.Id IS NOT NULL THEN N'Ownership unconfirmed'
+                WHEN t.ParentJobId IS NOT NULL AND (removal.Id IS NOT NULL OR {{HistoricalBinding}}) THEN N'Historical unresolved'
                 WHEN t.ParentJobId IS NULL AND (t.InteractiveCancellationRequested = 1 OR t.QueueDeadlineUtc <= @nowUtc)
                   THEN N'Ownership unconfirmed'
                 WHEN t.ParentJobId IS NOT NULL AND (j.Id IS NULL OR j.SourceRevision <> t.SourceRevision OR j.PublicState NOT IN (2,3))
@@ -196,6 +205,8 @@ public static class SqlPipelineActivityQuery
             LEFT JOIN SourceRevisions s ON s.Id = p.SourceRevisionId
             LEFT JOIN SourceRootConfigurations r ON r.Id = s.SourceRootId
             LEFT JOIN SourceRevisions owner ON owner.Id = s.ParentSourceRevisionId
+            {{RemovedInputJoin}}
+            LEFT JOIN OPENJSON(@removedGpuBlockers) WITH (Id uniqueidentifier '$') removedGpu ON removedGpu.Id = t.Id
             WHERE t.State IN (0,1,3)
             """;
         return context.Database.SqlQueryRaw<GpuTaskActivityRow>(sql, Parameters(now, admission, gpuEvidence));
@@ -203,6 +214,9 @@ public static class SqlPipelineActivityQuery
 
     // Every condition here proves applicability; timestamps are deliberately not used.
     private static string HistoricalBinding => HistoricalBindingFor(SqlCorpusRebuildEligibility.ActiveJob("j.Id"));
+    private const string RemovedInputJoin = """
+        LEFT JOIN OPENJSON(@removedInputIds) WITH (Id uniqueidentifier '$') removal ON removal.Id = p.SourceRevisionId
+        """;
 
     private static string HistoricalBindingFor(string activeRebuildJob) => $$"""
         p.IsDeleted = 1 OR p.Revision <> j.SourceRevision
@@ -265,7 +279,10 @@ public static class SqlPipelineActivityQuery
         new SqlParameter("@permittedRebuildOperationId", SqlDbType.UniqueIdentifier)
             { Value = (object?)admission.PermittedCorpusRebuildOperationId ?? DBNull.Value },
         new SqlParameter("@ownedGpuTasks", SqlDbType.NVarChar, -1) { Value = gpuEvidence.OwnedTasksJson },
-        new SqlParameter("@releasedGpuOutcomesJson", SqlDbType.NVarChar, -1) { Value = gpuEvidence.ReleasedOutcomesJson }
+        new SqlParameter("@releasedGpuOutcomesJson", SqlDbType.NVarChar, -1) { Value = gpuEvidence.ReleasedOutcomesJson },
+        SqlRemovedSourceWork.JsonParameter("@removedInputIds", gpuEvidence.RemovedInputIdsJson),
+        SqlRemovedSourceWork.JsonParameter("@removedJobBlockers", gpuEvidence.RemovedJobBlockersJson),
+        SqlRemovedSourceWork.JsonParameter("@removedGpuBlockers", gpuEvidence.RemovedGpuBlockersJson)
     ];
 }
 
@@ -282,6 +299,7 @@ public sealed class PipelineJobClassificationRow
     public int Stage { get; set; }
     public int PublicState { get; set; }
     public bool IsHistorical { get; set; }
+    public int RemovalCleanupBlocker { get; set; }
     public bool SourceAdmitted { get; set; }
     public bool HasWorkerLease { get; set; }
     public bool HasActiveGpu { get; set; }
@@ -308,6 +326,7 @@ public sealed class PipelineJobActivityRow
     public int Stage { get; set; }
     public int PublicState { get; set; }
     public bool IsHistorical { get; set; }
+    public int RemovalCleanupBlocker { get; set; }
     public bool SourceAdmitted { get; set; }
     public bool HasWorkerLease { get; set; }
     public bool HasActiveGpu { get; set; }

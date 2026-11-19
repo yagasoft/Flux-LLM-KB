@@ -13,7 +13,8 @@ namespace FluxKnowledge.Infrastructure.SqlServer.Persistence;
 internal static class SqlSourceWorkEligibility
 {
     // Expressions and aliases are application-owned constants, never caller input.
-    internal static string Source(string revisionExpression, bool includePending = true, bool includeAdmission = true) => $$"""
+    internal static string Source(string revisionExpression, bool includePending = true, bool includeAdmission = true,
+        bool checkAllPending = false) => $$"""
         ({{revisionExpression}} IS NULL OR EXISTS
         (
             SELECT 1 FROM [SourceRevisions] AS [swInput]
@@ -30,7 +31,7 @@ internal static class SqlSourceWorkEligibility
                    [swInput].[OriginKind] IN (2,3) AND ([swParent].[OriginKind]=0 OR
                      [swParent].[OriginKind]=1 AND [swArchive].[OriginKind]=0 AND [swArchive].[SuppressedAtUtc] IS NULL
                        AND [swArchive].[SourceRootId]=[swInput].[SourceRootId]))))
-              {{(includePending ? PendingScope : "")}}
+              {{(includePending ? checkAllPending ? AllPendingScopes : RemovalPendingScopes : "")}}
               {{(includeAdmission ? SqlGuidedRetainedBinding.DerivedInputFence : "")}}
               {{(includeAdmission ? AdmissionScope : "")}}
         ))
@@ -46,7 +47,11 @@ internal static class SqlSourceWorkEligibility
         new("@sourceAdmittedRoots", SqlDbType.NVarChar, -1)
         { Value = JsonSerializer.Serialize((admission ?? SourceWorkAdmission.Closed).ReadAdmittedRoots()) };
 
-    private static readonly string PendingScope = $$"""
+    private static readonly string RemovalPendingScopes = PendingScopes(
+        $"([swPending].[ReasonFlags] & CAST({SourcePendingReasons.RemovalPending} AS bigint))<>0");
+    private static readonly string AllPendingScopes = PendingScopes("[swPending].[ReasonFlags]<>0");
+
+    private static string PendingScopes(string reasons) => $$"""
         AND NOT EXISTS
         (
             SELECT 1 FROM [SourcePendingChanges] AS [swPending]
@@ -54,7 +59,7 @@ internal static class SqlSourceWorkEligibility
                 CASE WHEN RIGHT([swRoot].[CanonicalPath],1)=N'\' THEN N'' ELSE N'\' END,
                 REPLACE([swPending].[RelativePath] COLLATE Latin1_General_100_CI_AS,N'/',N'\')) AS [Path]) AS [swScope]
             WHERE [swPending].[SourceRootId]=[swInput].[SourceRootId]
-              AND ([swPending].[ReasonFlags] & CAST({{SourcePendingReasons.RemovalPending}} AS bigint))<>0
+              AND {{reasons}}
               AND ([swPending].[RelativePath]=N'.' OR
                 [swPhysical].[Path] COLLATE Latin1_General_100_CI_AS=[swScope].[Path] COLLATE Latin1_General_100_CI_AS OR
                 [swPending].[IsSubtree]=1 AND LEFT([swPhysical].[Path],LEN([swScope].[Path])+1) COLLATE Latin1_General_100_CI_AS=
@@ -70,10 +75,10 @@ internal static class SqlSourceWorkEligibility
     }
 
     internal static IQueryable<PipelineRecordEntity> Records(FluxKnowledgeDbContext db, ISourceWorkAdmission? admission = null,
-        bool includePending = true, bool includeAdmission = true)
+        bool includePending = true, bool includeAdmission = true, bool checkAllPending = false)
     {
         var sql = "SELECT [swRecord].* FROM [PipelineRecords] AS [swRecord] WHERE [swRecord].[IsDeleted]=0 AND " +
-            Source("[swRecord].[SourceRevisionId]", includePending, includeAdmission);
+            Source("[swRecord].[SourceRevisionId]", includePending, includeAdmission, checkAllPending);
         return includeAdmission ? db.PipelineRecords.FromSqlRaw(sql, AdmissionParameter(admission)) : db.PipelineRecords.FromSqlRaw(sql);
     }
 

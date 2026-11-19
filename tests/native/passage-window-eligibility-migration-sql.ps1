@@ -56,3 +56,7 @@ $codexReceipts = Join-Path $ReceiptDirectory 'codex-workspace'
 $null = New-Item -ItemType Directory -Path $outlookReceipts, $codexReceipts
 & $successorScript -SourceRoot $SourceRoot -ReceiptDirectory $outlookReceipts -ForwardOnly
 & $successorScript -SourceRoot $SourceRoot -ReceiptDirectory $codexReceipts -CodexWorkspace -ForwardOnly
+
+$mediaReceipts = Join-Path $ReceiptDirectory 'media-transcription'
+$null = New-Item -ItemType Directory -Path $mediaReceipts
+& $successorScript -SourceRoot $SourceRoot -ReceiptDirectory $mediaReceipts -MediaTranscription

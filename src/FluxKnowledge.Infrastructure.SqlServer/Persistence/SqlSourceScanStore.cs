@@ -17,10 +17,11 @@ namespace FluxKnowledge.Infrastructure.SqlServer.Persistence;
 public sealed partial class SqlSourceScanStore(
     IDbContextFactory<FluxKnowledgeDbContext> contextFactory,
     TimeProvider timeProvider, EmbeddingGpuRuntime? embeddingRuntime = null,
-    ILogger<SqlSourceScanStore>? logger = null, SourceJournalOptions? sourceJournalOptions = null) : ISourceScanStore, ISourceScanControlStore
+    ILogger<SqlSourceScanStore>? logger = null, SourceJournalOptions? sourceJournalOptions = null, SqlSourceWorkRecoveryProgress? recoveryProgress = null) : ISourceScanStore, ISourceScanControlStore
 {
     private const string SourceArtifactStoreCapability = "source-artifact-store";
     private const string SourceProcessorVersion = "phase-3a-v1";
+    private static readonly string WithdrawnDiscoveryEvidence = SqlRepositoryWorkRecovery.Withdraw();
     public ValueTask<SourceRevisionId> ConvergeRevisionAndArtifactAsync(
         SourceRootConfiguration sourceRoot,
         SourceDiscoveredFile file,
@@ -141,6 +142,9 @@ public sealed partial class SqlSourceScanStore(
             string.Equals(value.CanonicalPath, file.CanonicalPath, StringComparison.Ordinal));
         var eventType = "source.unchanged";
         var selectionChanged = false;
+        var returnedAfterRemoval = authoritativePhysicalCapture && revision is not null &&
+            (revision.SuppressedAtUtc is not null || revision.CurrentDiscoveryEvidenceJson == WithdrawnDiscoveryEvidence) &&
+            file.Classification.IsAccepted;
         var selectionScopes = new List<IndexAffectedScope>();
         if (revision is null)
         {
@@ -272,6 +276,7 @@ public sealed partial class SqlSourceScanStore(
             }
         }
         await transaction.CommitAsync(cancellationToken).ConfigureAwait(false);
+        if (returnedAfterRemoval) recoveryProgress?.NotifyRediscovery(sourceRoot.Id.Value);
         return new SourceRetentionConvergence(new SourceRevisionId(revision.Id), receipt is null && artifact is null);
     }
 

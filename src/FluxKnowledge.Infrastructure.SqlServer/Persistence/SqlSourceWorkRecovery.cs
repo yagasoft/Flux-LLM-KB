@@ -1,6 +1,8 @@
+using FluxKnowledge.Application.Contracts;
 using FluxKnowledge.Application.Ports;
 using FluxKnowledge.Application.Gpu;
 using FluxKnowledge.Application.Sources;
+using FluxKnowledge.Application.Workers;
 using FluxKnowledge.Domain.Gpu;
 using FluxKnowledge.Domain.Sources;
 using FluxKnowledge.Infrastructure.SqlServer.Persistence.Entities;
@@ -16,12 +18,59 @@ public sealed class SqlSourceWorkRecoveryProgress
 {
     internal System.Collections.Concurrent.ConcurrentDictionary<Guid, Guid> After { get; } = new();
     internal System.Collections.Concurrent.ConcurrentDictionary<SourceWorkAdmittedRoot, byte> AnnouncedAdmissions { get; } = new();
+    private const int MaximumRediscoveryHints = 64;
+    private readonly object _rediscoveryGate = new();
+    private readonly HashSet<Guid> _rediscoveryRoots = [];
+    private bool _rediscoveryOverflow;
+
+    internal SemaphoreSlim RediscoveryOwner { get; } = new(1);
+    internal RediscoverySweep? ActiveRediscovery { get; set; }
+    internal DateTimeOffset NextRediscoveryFallback { get; set; }
+    internal DateTimeOffset RediscoveryRetryAt { get; set; }
+
+    // Signals only schedule a check. A committed capture and every existing
+    // source and job ownership proof are still required by the recovery store.
+    internal void NotifyRediscovery(Guid rootId)
+    {
+        lock (_rediscoveryGate)
+        {
+            if (_rediscoveryOverflow) return;
+            _rediscoveryRoots.Add(rootId);
+            if (_rediscoveryRoots.Count <= MaximumRediscoveryHints) return;
+            _rediscoveryRoots.Clear();
+            _rediscoveryOverflow = true;
+        }
+    }
+
+    internal RediscoverySweep? StartRediscovery(DateTimeOffset now)
+    {
+        lock (_rediscoveryGate)
+        {
+            if (_rediscoveryOverflow || now >= NextRediscoveryFallback)
+            {
+                _rediscoveryOverflow = false;
+                _rediscoveryRoots.Clear();
+                return new(null);
+            }
+            if (_rediscoveryRoots.Count == 0) return null;
+            var root = _rediscoveryRoots.First();
+            _rediscoveryRoots.Remove(root);
+            return new(root);
+        }
+    }
+
+    internal sealed class RediscoverySweep(Guid? rootId)
+    {
+        internal Guid? RootId { get; } = rootId;
+        internal Guid? After { get; set; }
+    }
 }
 
-public sealed class SqlSourceWorkRecovery(IDbContextFactory<FluxKnowledgeDbContext> factory, SourceWorkAdmission admission,
+public sealed partial class SqlSourceWorkRecovery(IDbContextFactory<FluxKnowledgeDbContext> factory, SourceWorkAdmission admission,
     ISourceRemovalReconciler removals, ISourceObservationReader observations, TimeProvider clock,
     ISourceWorkRetirement? retirement = null, Guid? targetRootId = null,
-    SqlSourceWorkRecoveryProgress? recoveryProgress = null, IGpuSchedulerWakeSignal? schedulerWake = null) : ISourceWorkRecovery
+    SqlSourceWorkRecoveryProgress? recoveryProgress = null, IGpuSchedulerWakeSignal? schedulerWake = null,
+    IOutboxWakeSignal? outboxWake = null, IStatusEventPublisher? statusEvents = null) : ISourceWorkRecovery
 {
     private readonly SqlSourceWorkRecoveryProgress _progress = recoveryProgress ?? new();
 
@@ -73,6 +122,8 @@ public sealed class SqlSourceWorkRecovery(IDbContextFactory<FluxKnowledgeDbConte
             foreach (var id in _progress.After.Keys.Where(id => !roots.Any(root => root.Id == id)))
                 _progress.After.TryRemove(id, out _);
         if (retirement is not null) await retirement.RetireAsync(cancellationToken).ConfigureAwait(false);
+        // A standalone admission check owns only the exact command it serves.
+        if (targetRootId is null) await ResumeRediscoveredExtractionAsync(cancellationToken).ConfigureAwait(false);
     }
 
     private async Task AnnounceAdmissionsAsync(CancellationToken ct)

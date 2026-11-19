@@ -14,7 +14,7 @@ public static class PipelineFilePresentation
         new("Blocked", "Blocked", source.BlockedFiles),
         new("Failed", "Failed", source.FailedFiles),
         new("Deferred", "Deferred", source.DeferredFiles),
-        new("MetadataOnly", "Metadata-only", source.MetadataOnlyFiles),
+        new("MetadataOnly", "Metadata indexed", source.MetadataOnlyFiles),
         new("NoText", "No extractable text", source.CompletedWithoutTextFiles),
         new("Unconfirmed", "Unconfirmed revisions", source.ProvisionalFiles)
     ];
@@ -42,7 +42,7 @@ public static class PipelineFilePresentation
     internal static PipelineJobClassification Classify(PipelineJobActivityRow row) =>
         PipelineActivityClassifier.Classify(new((PublicJobState)row.PublicState, row.IsHistorical,
             row.SourceAdmitted, row.HasWorkerLease, row.HasActiveGpu, row.HasReadyGpu, row.HasUncertainGpu,
-            row.IsDue, row.Reason, row.HasWaitingGpu, row.HasPendingDispatch));
+            row.IsDue, row.Reason, row.HasWaitingGpu, row.HasPendingDispatch, row.RemovalCleanupBlocker));
 
     internal static PipelineJobActivityRow? SelectJob(IEnumerable<PipelineJobActivityRow> jobs) => jobs
         .Where(j => !j.IsHistorical)
@@ -70,7 +70,7 @@ public static class PipelineFilePresentation
     {
         RetainedDefaultPolicy.UnadmittedLegacyTextReason => "Reassess the retained input under the current source policy before queueing it.",
         "File extension is unknown to local source ingestion." => "Reassess the retained input under the current source policy before queueing it.",
-        "File exceeds the effective UTF-8 text ingestion limit." => "Review the file size and the source's effective text limit.",
+        "File exceeds the effective UTF-8 text ingestion limit." => "Review the file size against the app's text limit.",
         "source-content-not-available-locally" => "Check that this file is available locally, then inspect source status.",
         "source-revision-binding-unconfirmed" => "Inspect source reconciliation; no winning revision is confirmed.",
         "repository-source-blocked" => "Review the source policy and recorded refusal.",

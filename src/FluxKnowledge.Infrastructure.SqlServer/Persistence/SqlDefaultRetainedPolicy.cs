@@ -63,7 +63,7 @@ internal static partial class SqlDefaultRetainedPolicy
         await retained.Stream.ReadExactlyAsync(bytes, token).ConfigureAwait(false);
         var allowed = JsonSerializer.Deserialize<string[]>(root.AllowedClassificationsJson) ?? [];
         if (isText && !SourceClassifier.Classify(revision.CanonicalPath, bytes, retained.ByteLength,
-                maximumAcceptedTextBytes: Math.Min(root.MaximumFileBytes, SourcePolicyDefaults.MaximumTextBytes),
+                maximumAcceptedTextBytes: SourcePolicyDefaults.MaximumTextBytes,
                 indexSourceText: allowed.Contains("text/x-source-code", StringComparer.OrdinalIgnoreCase)).IsAccepted)
             throw new NativeOperationException("policy-item-not-eligible");
         if (descriptor is not null && !MatchesSignature(descriptor, revision.Extension, bytes))
@@ -202,7 +202,7 @@ internal static partial class SqlDefaultRetainedPolicy
     {
         if (!MatchesScope(root, revision, request) || root.CrawlMode != (int)SourceDiscoveryMode.Filesystem ||
             revision.Classification is not ("Unknown" or "DeferredPolicy" or "AcceptedUtf8Text") ||
-            revision.ByteLength < 0 || revision.ByteLength > Math.Min(root.MaximumFileBytes, SourcePolicyDefaults.MaximumTextBytes) ||
+            revision.ByteLength < 0 || revision.ByteLength > SourcePolicyDefaults.MaximumTextBytes ||
             activity.Id != request.ActivityId || activity.SourceRevisionId != revision.Id || activity.InputFingerprint != request.Hash ||
             activity.ResultingPipelineRecordId is not null) return false;
         return activity.State == (int)SourceActivityState.DeferredPolicy &&

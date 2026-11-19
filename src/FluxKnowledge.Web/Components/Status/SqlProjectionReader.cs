@@ -32,6 +32,8 @@ public interface IProjectionReader
     ValueTask<PipelineRecordProjection?> ReadPipelineRecordAsync(Guid id, CancellationToken cancellationToken);
     ValueTask<PipelineAttentionPage> ReadPipelineAttentionAsync(string unit, Guid? sourceRootId, int page,
         CancellationToken cancellationToken) => ValueTask.FromResult(PipelineAttentionPage.Empty);
+    ValueTask<PipelineAttentionPage> ReadPipelineAttentionAsync(string unit, Guid? sourceRootId, int page,
+        string? reason, CancellationToken cancellationToken) => ReadPipelineAttentionAsync(unit, sourceRootId, page, cancellationToken);
     ValueTask<PipelineFilePage> ReadPipelineFilesAsync(PipelineFileFilter filter, Guid? sourceRootId, int page,
         CancellationToken cancellationToken) => ValueTask.FromResult(PipelineFilePage.Unavailable);
 }
@@ -49,24 +51,49 @@ public sealed partial class SqlProjectionReader(
     private readonly TimeProvider _clock = timeProvider ?? TimeProvider.System;
     private readonly SqlPipelineActivityReader _activityReader = new(validationHold, timeProvider ?? TimeProvider.System, journalOptions);
 
+    public ValueTask<PipelineAttentionPage> ReadPipelineAttentionAsync(string unit, Guid? sourceRootId, int page,
+        CancellationToken cancellationToken) => ReadPipelineAttentionAsync(unit, sourceRootId, page, null, cancellationToken);
+
     public async ValueTask<PipelineAttentionPage> ReadPipelineAttentionAsync(string unit, Guid? sourceRootId, int page,
-        CancellationToken cancellationToken)
+        string? reason, CancellationToken cancellationToken)
     {
-        for (var attempt = 0; attempt < 2; attempt++)
+        using var deadline = new CancellationTokenSource(OverviewReadOptions.ReadBudget, _clock);
+        using var budget = CancellationTokenSource.CreateLinkedTokenSource(cancellationToken, deadline.Token);
+        var snapshot = ReadOptions.UseSnapshotIsolation;
+        try
         {
-            await using var execution = await contextFactory.CreateDbContextAsync(cancellationToken).ConfigureAwait(false);
-            var result = await execution.Database.CreateExecutionStrategy().ExecuteAsync(
-                state: (Unit: unit, SourceRootId: sourceRootId, Page: page),
-                operation: async (_, state, token) =>
-                {
-                    // A transient retry needs a fresh connection and its selected-branch table.
-                    await using var context = await contextFactory.CreateDbContextAsync(token).ConfigureAwait(false);
-                    return await _activityReader.ReadAttentionAsync(context, state.Unit, state.SourceRootId, state.Page, token).ConfigureAwait(false);
-                },
-                verifySucceeded: null, cancellationToken: cancellationToken).ConfigureAwait(false);
-            if (result is not null) return result;
+            for (var attempt = 0; attempt < (snapshot ? 1 : 2); attempt++)
+            {
+                await using var execution = await contextFactory.CreateDbContextAsync(budget.Token).ConfigureAwait(false);
+                var result = await execution.Database.CreateExecutionStrategy().ExecuteAsync(
+                    state: (Unit: unit, SourceRootId: sourceRootId, Page: page, Reason: reason),
+                    operation: async (_, state, token) =>
+                    {
+                        // Each attempt owns its connection, transaction and temporary tables.
+                        await using var context = await contextFactory.CreateDbContextAsync(token).ConfigureAwait(false);
+                        await using var transaction = snapshot
+                            ? await context.Database.BeginTransactionAsync(IsolationLevel.Snapshot, token).ConfigureAwait(false)
+                            : null;
+                        var sample = await _activityReader.ReadAttentionAsync(context, state.Unit, state.SourceRootId,
+                            state.Page, state.Reason, snapshot, token).ConfigureAwait(false);
+                        if (transaction is not null) await transaction.CommitAsync(token).ConfigureAwait(false);
+                        return sample;
+                    },
+                    verifySucceeded: null, cancellationToken: budget.Token).ConfigureAwait(false);
+                budget.Token.ThrowIfCancellationRequested();
+                if (result is not null) return result;
+            }
+            throw new InvalidOperationException("Status changed during both attention reads.");
         }
-        throw new InvalidOperationException("Status changed during both attention reads.");
+        catch (OperationCanceledException exception) when (!cancellationToken.IsCancellationRequested && deadline.IsCancellationRequested)
+        {
+            throw new OverviewReadBudgetExceededException(exception);
+        }
+        catch (SqlException exception) when (!cancellationToken.IsCancellationRequested && deadline.IsCancellationRequested &&
+            OverviewReadBudgetExceededException.HasCommandCancellationErrors(exception))
+        {
+            throw new OverviewReadBudgetExceededException(exception);
+        }
     }
 
     public async ValueTask<OverviewProjection> ReadOverviewAsync(CancellationToken cancellationToken)

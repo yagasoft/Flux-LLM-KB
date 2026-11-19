@@ -41,7 +41,7 @@ internal sealed class SqlPipelineActivityReader(IDeploymentValidationHold? hold,
         var jobRows = await SqlPipelineActivityQuery.JobClassifications(context, now, admission, branches, gpuEvidence)
             .GroupBy(row => new
             {
-                row.SourceRootId, row.Stage, row.PublicState, row.IsHistorical, row.SourceAdmitted, row.HasWorkerLease,
+                row.SourceRootId, row.Stage, row.PublicState, row.IsHistorical, row.RemovalCleanupBlocker, row.SourceAdmitted, row.HasWorkerLease,
                 row.HasActiveGpu, row.HasReadyGpu, row.HasUncertainGpu, row.HasWaitingGpu, row.HasPendingDispatch, row.IsDue,
                 Reason = row.Reason == "repository-source-blocked" || row.Reason == "repository-source-deferred" ||
                     row.Reason == "source-content-not-available-locally" || row.Reason == "index-storage-capacity-deferred" ||
@@ -55,7 +55,7 @@ internal sealed class SqlPipelineActivityReader(IDeploymentValidationHold? hold,
             var row = group.Key;
             var result = PipelineActivityClassifier.Classify(new((PublicJobState)row.PublicState, row.IsHistorical,
                 row.SourceAdmitted, row.HasWorkerLease, row.HasActiveGpu, row.HasReadyGpu, row.HasUncertainGpu, row.IsDue,
-                row.Reason, row.HasWaitingGpu, row.HasPendingDispatch));
+                row.Reason, row.HasWaitingGpu, row.HasPendingDispatch, row.RemovalCleanupBlocker));
             var reason = row.SourceAdmitted && !row.IsHistorical &&
                 result.State is PipelineWorkState.Waiting or PipelineWorkState.Queued or PipelineWorkState.Running &&
                 row.Reason is "index-storage-capacity-deferred" or "publication-snapshot-conflict" or "embedding-gpu-retry"
@@ -189,6 +189,13 @@ internal sealed class SqlPipelineActivityReader(IDeploymentValidationHold? hold,
                     file.FullPath, file.ArchivePath, "Code analysis", "Running", false, null);
             }).ToArray();
         }
+        var fileAttention = files.Where(file => FileAttentionIssue.IsCurrent(file.File)).GroupBy(file => file.File.SourceRootId)
+            .Select(group => new PipelineFileAttentionCounts(group.Key,
+                group.Count(file => file.File.Category == "Blocked" && !file.File.IsIgnored),
+                group.Count(file => file.File.Category == "Failed" && !file.File.IsIgnored),
+                group.Count(file => file.File.Category == "Deferred" && !file.File.IsIgnored),
+                group.Count(file => file.File.Category == "Unconfirmed"),
+                group.Count(file => file.File.IsIgnored))).ToArray();
         var runningTasks = runningJobs.Select(j => new PipelineRunningTask(j.Id, j.SourceRootId, j.PipelineRecordId,
                 SourceName(j.SourceRootId, names), j.FullPath, j.ArchivePath,
                 ((PipelineStage)j.Stage) + (!j.MatchesSelectedFileBranch && !j.IsHistorical ? " (admitted index rebuild)" : ""),
@@ -209,7 +216,8 @@ internal sealed class SqlPipelineActivityReader(IDeploymentValidationHold? hold,
             FileStages = files.Where(f => f.File.Category == "Pending")
                 .GroupBy(f => new { f.File.SourceRootId, f.File.Stage, f.File.State })
                 .Select(g => new PipelineFileStageGroup(g.Key.SourceRootId, g.Key.Stage, g.Key.State, g.Count())).ToArray(),
-            FileCauses = files.Where(f => f.File.Category is "Blocked" or "Failed")
+            FileAttention = fileAttention,
+            FileCauses = files.Where(f => !f.File.IsIgnored && f.File.Category is "Blocked" or "Failed" or "Deferred")
                 .GroupBy(f => new { f.File.SourceRootId, f.File.Category, f.File.Reason, f.File.NextAction })
                 .Select(g => new PipelineFileCauseGroup(g.Key.SourceRootId, g.Key.Category, g.Key.Reason, g.Key.NextAction, g.Count()))
                 .GroupBy(g => g.SourceRootId).SelectMany(g => g.OrderByDescending(c => c.Count).ThenBy(c => c.Reason).Take(20)).ToArray(),
@@ -225,33 +233,53 @@ internal sealed class SqlPipelineActivityReader(IDeploymentValidationHold? hold,
     }
 
     public async ValueTask<PipelineAttentionPage?> ReadAttentionAsync(FluxKnowledgeDbContext context, string unit,
-        Guid? sourceRootId, int page, CancellationToken cancellationToken)
+        Guid? sourceRootId, int page, string? reason, bool snapshot, CancellationToken cancellationToken)
     {
         if (unit is not ("jobs" or "gpu" or "current-jobs" or "current-gpu" or "historical-jobs" or "historical-gpu"))
             throw new ArgumentException("Unknown attention counting unit.", nameof(unit));
-        var before = await SqlPipelineActivityQuery.ReadFenceAsync(context, cancellationToken).ConfigureAwait(false);
+        var before = snapshot ? new ActivityReadFence { IsStable = true }
+            : await SqlPipelineActivityQuery.ReadFenceAsync(context, cancellationToken).ConfigureAwait(false);
         if (!before.IsStable) throw new InvalidOperationException("Status has a pending transaction.");
+        var jobsRequested = unit.EndsWith("jobs", StringComparison.Ordinal);
         var names = await context.SourceRootConfigurations.AsNoTracking()
+            .Select(r => new { r.Id, r.DisplayName })
             .ToDictionaryAsync(r => r.Id, r => r.DisplayName, cancellationToken).ConfigureAwait(false);
-        var states = await SourceRootProjectionReader.ReadStateSummariesAsync(context, names.Keys.ToArray(), cancellationToken).ConfigureAwait(false);
-        await using var branches = await SqlSelectedBranchReadScope.CreateAsync(context,
-            states.Values.SelectMany(s => s.SelectedBranches).Distinct().ToArray(), cancellationToken).ConfigureAwait(false);
+        // GPU job history can depend on a selected processor branch only
+        // for Ready and OutcomeUncertain tasks whose logical owner has a branch.
+        // Use the full existing source selection when any binding may apply.
+        Guid[] selected = [];
+        if (jobsRequested || await GpuMayHaveSelectedBranchAsync(context, sourceRootId, cancellationToken).ConfigureAwait(false))
+        {
+            var states = await SourceRootProjectionReader.ReadStateSummariesAsync(context, names.Keys.ToArray(), cancellationToken).ConfigureAwait(false);
+            selected = states.Values.SelectMany(s => s.SelectedBranches).Distinct().ToArray();
+        }
+        await using var branches = await SqlSelectedBranchReadScope.CreateAsync(context, selected, cancellationToken).ConfigureAwait(false);
         var admission = hold?.ReadAdmissionState() ?? new(false, null);
         var now = clock.GetUtcNow();
-        var gpuEvidence = await SqlGpuActivityReadEvidence.ReadAsync(context, cancellationToken).ConfigureAwait(false);
+        var gpuEvidence = await SqlGpuActivityReadEvidence.ReadAsync(context, cancellationToken,
+            jobsRequested ? SqlGpuActivityReadPurpose.Jobs : SqlGpuActivityReadPurpose.GpuTasks).ConfigureAwait(false);
         const int pageSize = 25;
         int total;
         PipelineAttentionItem[] items;
-        if (unit.EndsWith("jobs", StringComparison.Ordinal))
+        PipelineAttentionReasonGroup[] reasons;
+        if (jobsRequested)
         {
+            if (snapshot)
+            {
+                await branches.MaterializeGpuFactsAsync(now, gpuEvidence, cancellationToken).ConfigureAwait(false);
+                await branches.MaterializeJobFactsAsync(now, admission, gpuEvidence, cancellationToken).ConfigureAwait(false);
+            }
             var query = SqlPipelineActivityQuery.Jobs(context, now, admission, branches, gpuEvidence);
             if (sourceRootId is { } root) query = query.Where(row => row.SourceRootId == root);
-            if (unit == "historical-jobs") query = query.Where(row => row.IsHistorical);
+            if (unit == "historical-jobs") query = query.Where(row => row.IsHistorical &&
+                (row.RemovalCleanupBlocker == 0 || row.HasActiveGpu ||
+                 row.PublicState == (int)PublicJobState.WorkerProcessing && row.HasWorkerLease));
             if (unit == "current-jobs")
             {
                 // Apply the Attention branches of PipelineActivityClassifier before counting and paging.
-                query = query.Where(row => !row.IsHistorical && !row.HasActiveGpu &&
+                query = query.Where(row => !row.HasActiveGpu &&
                     !(row.PublicState == (int)PublicJobState.WorkerProcessing && row.HasWorkerLease) &&
+                    (row.RemovalCleanupBlocker != 0 || !row.IsHistorical &&
                     (row.PublicState == (int)PublicJobState.Failed ||
                      row.HasUncertainGpu && !row.HasReadyGpu && !row.HasWaitingGpu ||
                      row.Reason == "repository-source-blocked" ||
@@ -259,17 +287,37 @@ internal sealed class SqlPipelineActivityReader(IDeploymentValidationHold? hold,
                      (row.PublicState == (int)PublicJobState.WorkerProcessing ||
                       !row.HasWaitingGpu &&
                       ((row.PublicState == (int)PublicJobState.GpuQueued || row.PublicState == (int)PublicJobState.GpuProcessing) && !row.HasReadyGpu ||
-                       row.PublicState == (int)PublicJobState.WorkerQueued && row.IsDue && !row.HasPendingDispatch))));
+                       row.PublicState == (int)PublicJobState.WorkerQueued && row.IsDue && !row.HasPendingDispatch)))));
             }
-            total = await query.CountAsync(cancellationToken).ConfigureAwait(false);
+            var byReason = query.Select(row => new
+            {
+                Row = row,
+                Reason = row.RemovalCleanupBlocker == 1 ? "worker-cleanup-unconfirmed-after-removal" :
+                    row.RemovalCleanupBlocker == 2 ? "gpu-cleanup-unconfirmed-after-removal" :
+                    row.HasActiveGpu || row.PublicState == (int)PublicJobState.WorkerProcessing && row.HasWorkerLease ? "execution-confirmed" :
+                    row.IsHistorical ? row.Reason ?? "previous-source-revision" :
+                    row.PublicState == (int)PublicJobState.Failed ? row.Reason ?? "job-failed" :
+                    row.HasUncertainGpu && !row.HasReadyGpu && !row.HasWaitingGpu ? "gpu-outcome-unverified" :
+                    row.PublicState == (int)PublicJobState.WorkerProcessing ? "worker-claim-unconfirmed" :
+                    (row.PublicState == (int)PublicJobState.GpuQueued || row.PublicState == (int)PublicJobState.GpuProcessing) && !row.HasReadyGpu && !row.HasWaitingGpu ? "gpu-claim-unconfirmed" :
+                    row.PublicState == (int)PublicJobState.WorkerQueued && row.IsDue && !row.HasPendingDispatch ? "dispatch-unconfirmed" :
+                    row.Reason ?? "no-reason-recorded"
+            });
+            var groups = await byReason.GroupBy(entry => entry.Reason).Select(group => new { Reason = group.Key, Count = group.Count() })
+                .OrderByDescending(group => group.Count).ThenBy(group => group.Reason).ToArrayAsync(cancellationToken).ConfigureAwait(false);
+            reasons = groups.Select(group => new PipelineAttentionReasonGroup(group.Reason, AttentionReasonLabel(group.Reason), group.Count)).ToArray();
+            if (reason is not null) byReason = byReason.Where(entry => entry.Reason == reason);
+            total = reason is null ? reasons.Sum(group => group.Count) : await byReason.CountAsync(cancellationToken).ConfigureAwait(false);
             page = Math.Clamp(page, 0, Math.Max(0, (total - 1) / pageSize));
-            var rows = await query.OrderBy(row => row.Id).Skip(page * pageSize).Take(pageSize).ToArrayAsync(cancellationToken).ConfigureAwait(false);
+            var rows = await byReason.OrderBy(entry => entry.Row.Id).Skip(page * pageSize).Take(pageSize).Select(entry => entry.Row)
+                .ToArrayAsync(cancellationToken).ConfigureAwait(false);
             items = rows.Select(row => new PipelineAttentionItem(row.Id, row.SourceRootId, row.PipelineRecordId,
                 SourceName(row.SourceRootId, names), "Pipeline job", ((PublicJobState)row.PublicState).ToString(),
-                row.IsHistorical ? "Historical" : "Current", row.Reason ?? PipelineActivityClassifier.Classify(
+                row.RemovalCleanupBlocker != 0 ? "Removed source" : row.IsHistorical ? "Historical" : "Current",
+                (row.RemovalCleanupBlocker != 0 ? null : row.Reason) ?? PipelineActivityClassifier.Classify(
                     new((PublicJobState)row.PublicState, row.IsHistorical, row.SourceAdmitted, row.HasWorkerLease,
                         row.HasActiveGpu, row.HasReadyGpu, row.HasUncertainGpu, row.IsDue, row.Reason,
-                        row.HasWaitingGpu, row.HasPendingDispatch)).Reason, row.RecordedAtUtc)
+                        row.HasWaitingGpu, row.HasPendingDispatch, row.RemovalCleanupBlocker)).Reason, row.RecordedAtUtc)
                 { Stage = ((PipelineStage)row.Stage).ToString() }).ToArray();
         }
         else
@@ -279,7 +327,12 @@ internal sealed class SqlPipelineActivityReader(IDeploymentValidationHold? hold,
             if (sourceRootId is { } root) query = query.Where(row => row.SourceRootId == root);
             if (unit == "current-gpu") query = query.Where(row => row.State != "Historical unresolved");
             if (unit == "historical-gpu") query = query.Where(row => row.State == "Historical unresolved");
-            total = await query.CountAsync(cancellationToken).ConfigureAwait(false);
+            var groups = await query.GroupBy(row => row.State).Select(group => new
+                { Reason = group.Key, Count = group.Count(), Matches = reason == null || group.Key == reason })
+                .OrderByDescending(group => group.Count).ThenBy(group => group.Reason).ToArrayAsync(cancellationToken).ConfigureAwait(false);
+            reasons = groups.Select(group => new PipelineAttentionReasonGroup(group.Reason, AttentionReasonLabel(group.Reason), group.Count)).ToArray();
+            if (reason is not null) query = query.Where(row => row.State == reason);
+            total = groups.Where(group => group.Matches).Sum(group => group.Count);
             page = Math.Clamp(page, 0, Math.Max(0, (total - 1) / pageSize));
             var rows = await query.OrderBy(row => row.Id).Skip(page * pageSize).Take(pageSize).ToArrayAsync(cancellationToken).ConfigureAwait(false);
             var released = JsonSerializer.Deserialize<HashSet<Guid>>(gpuEvidence.ReleasedOutcomesJson) ?? [];
@@ -293,11 +346,47 @@ internal sealed class SqlPipelineActivityReader(IDeploymentValidationHold? hold,
                 CapacityStatus = released.Contains(row.Id) ? "Scheduler release recorded" : "Release evidence unavailable in this sample"
             }).ToArray();
         }
-        var after = await SqlPipelineActivityQuery.ReadFenceAsync(context, cancellationToken).ConfigureAwait(false);
+        var after = snapshot ? before
+            : await SqlPipelineActivityQuery.ReadFenceAsync(context, cancellationToken).ConfigureAwait(false);
         await branches.CompleteAsync(cancellationToken).ConfigureAwait(false);
         if (!before.Accepts(after)) return null;
-        return new(total, page, pageSize, items);
+        return new(total, page, pageSize, items) { Reasons = reasons };
     }
+
+    private static Task<bool> GpuMayHaveSelectedBranchAsync(FluxKnowledgeDbContext context, Guid? sourceRootId,
+        CancellationToken cancellationToken)
+    {
+        var candidates = from task in context.GpuMiniTasks.AsNoTracking()
+            join job in context.Jobs.AsNoTracking() on task.ParentJobId equals (Guid?)job.Id
+            join record in context.PipelineRecords.AsNoTracking() on job.PipelineRecordId equals record.Id
+            join source in context.SourceRevisions.AsNoTracking() on record.SourceRevisionId equals (Guid?)source.Id
+            where (sourceRootId == null || source.SourceRootId == sourceRootId) &&
+                (task.ExecutionState == (int)GpuMiniTaskExecutionState.Ready ||
+                 task.ExecutionState == (int)GpuMiniTaskExecutionState.OutcomeUncertain)
+            select source.OriginKind == 0 || source.OriginKind == 1 ? (Guid?)source.Id :
+                source.OriginKind == 2 || source.OriginKind == 3 ? source.ParentSourceRevisionId : null;
+        return candidates.AnyAsync(owner => owner != null &&
+            context.SourceProcessorBranches.Any(branch => branch.SourceRevisionId == owner), cancellationToken);
+    }
+
+    private static string AttentionReasonLabel(string reason) => reason switch
+    {
+        "worker-cleanup-unconfirmed-after-removal" => "Worker cleanup unconfirmed after source removal",
+        "gpu-cleanup-unconfirmed-after-removal" => "GPU cleanup unconfirmed after source removal",
+        "worker-claim-unconfirmed" => "Worker claim could not be verified",
+        "gpu-claim-unconfirmed" or "Ownership unconfirmed" => "GPU claim could not be verified",
+        "gpu-outcome-unverified" or "Outcome uncertain" => "GPU result could not be verified",
+        "dispatch-unconfirmed" => "Queue handoff could not be verified",
+        "repository-source-blocked" => "Source processing is blocked",
+        "execution-confirmed" => "Execution confirmed",
+        "previous-source-revision" => "Previous source revision",
+        "source-removed" => "Source removed",
+        "source-revision-withdrawn" => "Source revision withdrawn",
+        "Historical unresolved" => "Earlier attempt still has unresolved evidence",
+        "job-failed" => "Processing failed",
+        "no-reason-recorded" => "Reason not recorded",
+        _ => FileAttentionIssue.Label(reason)
+    };
 
     private static string SourceName(Guid? root, IReadOnlyDictionary<Guid, string> names) =>
         root is { } id ? names.GetValueOrDefault(id) ?? "Source binding unavailable" : "Local ingress";

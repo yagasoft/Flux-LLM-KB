@@ -737,7 +737,21 @@ public sealed partial class EmbeddingGpuRequestTests(NativeSqlServerFixture fixt
         Assert.Empty(await context.Vectors.ToArrayAsync());
         if (fileRemoval)
         {
-            Assert.Equal(1, await new SqlSourceWorkRetirement(environment.Factory, TimeProvider.System, executor).RetireAsync(default));
+            var retired = new SqlSourceWorkRetirement(environment.Factory, TimeProvider.System, executor);
+            var request = await context.EmbeddingGpuRequests.AsNoTracking().SingleAsync();
+            var dispatch = await context.GpuExecutorDispatches.AsNoTracking().SingleAsync(x => x.DispatchId == request.DispatchId);
+            var settledBatch = await context.GpuBatches.AsNoTracking().SingleAsync(x => x.Id == dispatch.BatchId);
+            var dispatchQuery = context.GpuExecutorDispatches.Where(x => x.DispatchId == dispatch.DispatchId);
+            var batchQuery = context.GpuBatches.Where(x => x.Id == settledBatch.Id);
+            await dispatchQuery.ExecuteUpdateAsync(set => set.SetProperty(x => x.ExecutorKey, "other-executor"));
+            Assert.Equal(0, await retired.RetireAsync(default));
+            await dispatchQuery.ExecuteUpdateAsync(set => set.SetProperty(x => x.ExecutorKey, dispatch.ExecutorKey)
+                .SetProperty(x => x.State, (int)GpuExecutorDispatchState.DeliveryUncertain));
+            await batchQuery.ExecuteUpdateAsync(set => set.SetProperty(x => x.State, (int)GpuBatchState.Completed));
+            Assert.Equal(0, await retired.RetireAsync(default));
+            await dispatchQuery.ExecuteUpdateAsync(set => set.SetProperty(x => x.State, dispatch.State));
+            await batchQuery.ExecuteUpdateAsync(set => set.SetProperty(x => x.State, settledBatch.State));
+            Assert.Equal(1, await retired.RetireAsync(default));
             Assert.Equal("source-removed", await context.Jobs.AsNoTracking().Where(x => x.Id == worker.Job.JobId.Value).Select(x => x.Reason).SingleAsync());
         }
     }

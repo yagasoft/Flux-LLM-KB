@@ -4,6 +4,8 @@ using FluxKnowledge.Infrastructure.SqlServer.Visibility;
 using FluxKnowledge.Infrastructure.SqlServer.Configuration;
 using FluxKnowledge.Infrastructure.SqlServer.Provisioning;
 using FluxKnowledge.Application.Ports;
+using FluxKnowledge.Application.Gpu;
+using FluxKnowledge.Integrations.Windows;
 using FluxKnowledge.Web;
 using FluxKnowledge.Web.Components;
 using FluxKnowledge.Web.Components.Status;
@@ -14,6 +16,7 @@ using FluxKnowledge.Web.NativeV1;
 using Microsoft.AspNetCore.Components.Server.Circuits;
 using Microsoft.Data.SqlClient;
 using Microsoft.EntityFrameworkCore;
+using Microsoft.Extensions.DependencyInjection.Extensions;
 using FluxKnowledge.Cli.Commands;
 using FluxKnowledge.Application.Search;
 using FluxKnowledge.Infrastructure.Inference.Search;
@@ -110,6 +113,8 @@ builder.Configuration.Sources.Clear();
 builder.Configuration.AddConfiguration(settings.Configuration);
 builder.WebHost.ConfigureKestrel(options => options.Listen(IPAddress.Loopback, settings.Origin.Port));
 WebHostComposition.AddStagingFluxKnowledgeServices(builder.Services, settings);
+// Index ownership also needs the current process identity in model-free staging.
+builder.Services.TryAddSingleton<IGpuInteractiveOwnerProbe, WindowsInteractiveGpuOwnerProbe>();
 if (fixtureCleanup) StagingNormalGpuComposition.AddCleanupProfile(builder.Services);
 if (expandedGpu) StagingExpandedGpuComposition.Add(builder.Services,settings,trialScheduler,maximumGpuCohorts);
 if (normalBinding is not null)

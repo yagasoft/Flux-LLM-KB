@@ -138,8 +138,10 @@ public sealed partial class SqlSourceIncrementalCoordinator
             }
         }
 
+        var releasedContentHold = false;
         await _journal.ExecuteAsync(async db =>
         {
+            releasedContentHold = false;
             var current = await RequireOwnedAsync(db, root, request, ct).ConfigureAwait(false);
             var state = await db.SourceRootScanStates.SingleAsync(x => x.SourceRootId == root.Id.Value, ct).ConfigureAwait(false);
             SqlSourceIncrementalState.RequirePlan(state, plan);
@@ -175,7 +177,11 @@ public sealed partial class SqlSourceIncrementalCoordinator
                     // acknowledgement; content completion cannot consume its work.
                     if ((item.ReasonFlags & SourcePendingReasons.RemovalPending) != 0)
                         item.ReasonFlags = SourcePendingReasons.RemovalPending;
-                    else db.SourcePendingChanges.Remove(item);
+                    else
+                    {
+                        db.SourcePendingChanges.Remove(item);
+                        releasedContentHold |= item.ReasonFlags != 0;
+                    }
                 }
                 else
                 {
@@ -257,6 +263,8 @@ public sealed partial class SqlSourceIncrementalCoordinator
             }
             full &= state.NamespaceComplete && state.NamespaceGeneration == plan.NamespaceGeneration;
         }, ct, rootAuthority.ValidateCurrent).ConfigureAwait(false);
+        if (releasedContentHold && root.DiscoveryMode == SourceDiscoveryMode.Filesystem)
+            recoveryProgress?.NotifyRediscovery(root.Id.Value);
         return full;
 
         bool InDeclaredScope(string relative) => plan.IsBaseline || plan.Targets.Any(x => x.HasCaptureScope &&

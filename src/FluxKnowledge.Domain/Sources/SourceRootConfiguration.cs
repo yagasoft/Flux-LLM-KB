@@ -25,7 +25,7 @@ public sealed record SourceRootConfiguration
 
     public bool IndexSourceText => AllowedClassifications.Contains("text/x-source-code", StringComparer.OrdinalIgnoreCase);
 
-    public long MaximumFileBytes { get; private init; }
+    public long MaximumFileBytes => SourcePolicyDefaults.MaximumTextBytes;
 
     public IReadOnlyList<string> IncludePatterns { get; private init; }
 
@@ -63,6 +63,7 @@ public sealed record SourceRootConfiguration
     {
         EnsureCanonicalPath(canonicalPath);
         ArgumentException.ThrowIfNullOrWhiteSpace(displayName);
+        // Keep the legacy parameter shape for persisted and API callers.
         if (maximumFileBytes <= 0)
         {
             throw new DomainInvariantException("Maximum file bytes must be positive.");
@@ -88,7 +89,6 @@ public sealed record SourceRootConfiguration
             displayName,
             recursive,
             followLinks,
-            maximumFileBytes,
             effectiveIncludePatterns,
             effectiveExcludePatterns,
             effectiveAllowedClassifications,
@@ -201,7 +201,6 @@ public sealed record SourceRootConfiguration
         string displayName,
         bool recursive,
         bool followLinks,
-        long maximumFileBytes,
         IReadOnlyList<string> includePatterns,
         IReadOnlyList<string> excludePatterns,
         IReadOnlyList<string> allowedClassifications,
@@ -215,7 +214,6 @@ public sealed record SourceRootConfiguration
         DisplayName = displayName;
         Recursive = recursive;
         FollowLinks = followLinks;
-        MaximumFileBytes = maximumFileBytes;
         IncludePatterns = includePatterns;
         ExcludePatterns = excludePatterns;
         AllowedClassifications = allowedClassifications;

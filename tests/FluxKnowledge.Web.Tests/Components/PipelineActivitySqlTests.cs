@@ -465,6 +465,28 @@ public sealed partial class PipelineActivitySqlTests(NativeSqlServerFixture fixt
     }
 
     [NativeSqlServerFact]
+    public async Task Job_reason_counts_cover_all_pages_and_filter_before_paging()
+    {
+        var now = DateTimeOffset.UtcNow;
+        var root = await AddActivityRootAsync(now);
+        for (var index = 0; index < 26; index++)
+            await SeedActivityJobAsync(root, now, PublicJobState.Failed, null);
+        var worker = await SeedActivityJobAsync(root, now, PublicJobState.WorkerProcessing, now.AddMinutes(-1), leaseGeneration: 1);
+        var reader = ActivityReader();
+        var all = await reader.ReadPipelineAttentionAsync("current-jobs", root, 0, CancellationToken.None);
+        Assert.Equal(27, all.TotalCount);
+        Assert.Equal(25, all.Items.Count);
+        Assert.Equal(new[] { 26, 1 }, all.Reasons.Select(reason => reason.Count));
+        Assert.Equal("worker-claim-unconfirmed", all.Reasons[1].Reason);
+
+        var focused = await reader.ReadPipelineAttentionAsync("current-jobs", root, 5, "worker-claim-unconfirmed", CancellationToken.None);
+        Assert.Equal(1, focused.TotalCount);
+        Assert.Equal(0, focused.Page);
+        Assert.Equal(worker, Assert.Single(focused.Items).PipelineRecordId);
+        Assert.Equal(all.Reasons, focused.Reasons);
+    }
+
+    [NativeSqlServerFact]
     public async Task Historical_attention_paging_retains_exact_total_and_all_records_without_mutation()
     {
         var now = DateTimeOffset.UtcNow;

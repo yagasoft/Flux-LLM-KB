@@ -6,7 +6,7 @@
 
 function Get-OcrLifecycleMigrationContract {
     [ordered]@{ Baseline='20261021010911_AddIndexRecoveryReferenceAudit';Target='20261024061418_AddDocumentOcrExecutionLifecycle';
-        CurrentSchemaTarget='20261118225053_BindCodexNotesToWorkspace';
+        CurrentSchemaTarget='20261119125051_AddMediaTranscriptionGpuRequests';
         ScriptSha256='3A66996FC45853B16E7329B5D51C1E10DDD0F05F9AC842C702591E516115DC20';
         TargetSchemaSha256='0E47151306639D34CE7F884EBC3B3B005DF2A87480D8AE4DF7662CE13843F74B';
         DatabaseCollation='SQL_Latin1_General_CP1_CI_AS' }

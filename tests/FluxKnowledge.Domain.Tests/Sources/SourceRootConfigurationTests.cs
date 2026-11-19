@@ -26,14 +26,14 @@ public sealed class SourceRootConfigurationTests
     }
 
     [Fact]
-    public void New_root_uses_the_workspace_text_default_but_explicit_restrictions_are_preserved()
+    public void All_roots_use_the_workspace_text_default_and_preserve_classifications()
     {
         var root = SourceRootConfiguration.Create(@"C:\Corpus", "Corpus", true, false, 32 * 1024 * 1024);
         Assert.True(root.IndexSourceText);
         var restricted = SourceRootConfiguration.Create(@"C:\Corpus", "Corpus", true, false, 1024,
             allowedClassifications: ["text/plain"]);
         Assert.False(restricted.IndexSourceText);
-        Assert.Equal(1024, restricted.MaximumFileBytes);
+        Assert.Equal(200 * 1024 * 1024, restricted.MaximumFileBytes);
     }
 
     [Fact]
@@ -41,14 +41,14 @@ public sealed class SourceRootConfigurationTests
     {
         using var defaults = System.Text.Json.JsonDocument.Parse("{\"path\":\"C:\\\\Corpus\",\"displayName\":\"Corpus\"}");
         var request = FluxKnowledge.Application.IntegrationV1.Corpus.NativeSourceRootCreation.Parse(defaults.RootElement, "test");
-        Assert.Equal(32 * 1024 * 1024, request.MaximumFileBytes);
+        Assert.Equal(200 * 1024 * 1024, request.MaximumFileBytes);
         Assert.Contains("text/x-source-code", request.AllowedClassifications);
         Assert.Equal(SourceDiscoveryMode.Filesystem, request.DiscoveryMode);
         Assert.False(request.FollowLinks);
         using var restricted = System.Text.Json.JsonDocument.Parse("{\"path\":\"C:\\\\Corpus\",\"displayName\":\"Corpus\",\"indexSourceText\":false,\"maximumFileBytes\":1024}");
         var explicitRequest = FluxKnowledge.Application.IntegrationV1.Corpus.NativeSourceRootCreation.Parse(restricted.RootElement, "test");
         Assert.DoesNotContain("text/x-source-code", explicitRequest.AllowedClassifications);
-        Assert.Equal(1024, explicitRequest.MaximumFileBytes);
+        Assert.Equal(200 * 1024 * 1024, explicitRequest.MaximumFileBytes);
     }
 
     [Fact]

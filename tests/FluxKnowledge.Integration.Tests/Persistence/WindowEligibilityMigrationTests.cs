@@ -14,7 +14,7 @@ namespace FluxKnowledge.Integration.Tests.Persistence;
 public sealed class WindowEligibilityMigrationTests(NativeSqlServerFixture fixture) : IClassFixture<NativeSqlServerFixture>
 {
     [NativeSqlServerFact]
-    public async Task Populated_schema_79_upgrades_through_82_preserving_canonical_data_and_blocked_receipts()
+    public async Task Populated_schema_79_upgrades_through_83_preserving_canonical_data_and_blocked_receipts()
     {
         await using var environment=await SqlToUsearchRebuildTests.PipelineEnvironment.CreateAsync(fixture,"A canonical migration control.",segmented:true);
         await environment.AddRetainedAndPumpAsync("An independently owned retained migration control.");

@@ -39,6 +39,8 @@ public sealed class OutboxWorkerRegistration
     }
 
     public IReadOnlyCollection<string> Operations => _operations;
+    public IReadOnlyCollection<string> ReadyOperations => _workers.Values.Where(worker => worker.CanClaim)
+        .Select(worker => worker.Operation).ToArray();
 
     public IStageWorker? Find(string operation) =>
         _workers.TryGetValue(operation, out var worker) ? worker : null;

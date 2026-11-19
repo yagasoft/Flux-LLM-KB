@@ -1,3 +1,4 @@
+using FluxKnowledge.Application.Contracts;
 using FluxKnowledge.Application.Ports;
 using FluxKnowledge.Application.Gpu;
 using FluxKnowledge.Domain.Gpu;
@@ -11,7 +12,8 @@ using System.Data;
 namespace FluxKnowledge.Infrastructure.SqlServer.Persistence;
 
 public sealed class SqlSourceWorkRetirement(IDbContextFactory<FluxKnowledgeDbContext> factory, TimeProvider clock,
-    EmbeddingGpuExecutor? embeddings = null, PaddleOcrVlmExecutionRegistry? ocr = null) : ISourceWorkRetirement
+    EmbeddingGpuExecutor? embeddings = null, PaddleOcrVlmExecutionRegistry? ocr = null,
+    IStatusEventPublisher? statusEvents = null) : ISourceWorkRetirement
 {
     public async ValueTask<int> RetireAsync(CancellationToken cancellationToken)
     {
@@ -21,7 +23,7 @@ public sealed class SqlSourceWorkRetirement(IDbContextFactory<FluxKnowledgeDbCon
             foreach (var id in active) { embeddings?.RequestCancellation(id); ocr?.RequestCancellation(id); }
         }
         await using var execution = await factory.CreateDbContextAsync(cancellationToken).ConfigureAwait(false);
-        return await execution.Database.CreateExecutionStrategy().ExecuteAsync(async () =>
+        var (retired, changed) = await execution.Database.CreateExecutionStrategy().ExecuteAsync(async () =>
         {
             await using var db = await factory.CreateDbContextAsync(cancellationToken).ConfigureAwait(false);
             await using var transaction = await db.Database.BeginTransactionAsync(IsolationLevel.Serializable, cancellationToken).ConfigureAwait(false);
@@ -33,10 +35,13 @@ public sealed class SqlSourceWorkRetirement(IDbContextFactory<FluxKnowledgeDbCon
                 join root in db.SourceRootConfigurations on source.SourceRootId equals root.Id
                 where root.State != (int)SourceRootState.Deleting && !eligible.Contains(record.Id)
                 select record.Id;
-            // Admission generation zero and no batch prove that no native reservation
-            // ever existed. Do not rewrite previously admitted/uncertain task evidence.
-            await db.GpuMiniTasks.Where(x => x.ParentJobId != null && x.ExecutionState == (int)GpuMiniTaskExecutionState.Ready &&
-                    x.AdmissionGeneration == 0 && x.ReservationAttemptCount == 0 && x.BatchId == null && obsolete.Contains(x.ParentJob!.PipelineRecordId))
+            var unconfirmed = SqlRemovedSourceWork.UnconfirmedJobIds(db);
+            // A scheduler deferral counts as an attempt without admitting a task.
+            var ready = db.GpuMiniTasks.Where(x => x.ParentJobId != null && x.ExecutionState == (int)GpuMiniTaskExecutionState.Ready &&
+                    x.AdmissionGeneration == 0 && x.BatchId == null && x.SourceRevision == x.ParentJob!.SourceRevision &&
+                    obsolete.Contains(x.ParentJob.PipelineRecordId) && !unconfirmed.Contains(x.ParentJobId.Value))
+                .OrderBy(x => x.CreatedSequence).Take(128).Select(x => x.Id);
+            var gpuTasks = await db.GpuMiniTasks.Where(x => ready.Contains(x.Id))
                 .ExecuteUpdateAsync(set => set.SetProperty(x => x.ExecutionState, (int)GpuMiniTaskExecutionState.Cancelled), cancellationToken).ConfigureAwait(false);
             var now = clock.GetUtcNow();
             var availableInputs = SqlSourceWorkEligibility.Inputs(db, includePending: false, includeAdmission: false).Select(x => x.Id);
@@ -76,12 +81,13 @@ public sealed class SqlSourceWorkRetirement(IDbContextFactory<FluxKnowledgeDbCon
             }
             var jobs = await db.Jobs.Where(job => obsolete.Contains(job.PipelineRecordId) &&
                     (job.PublicState == (int)PublicJobState.WorkerQueued || job.PublicState == (int)PublicJobState.GpuQueued ||
-                     job.PublicState == (int)PublicJobState.WorkerProcessing && (job.LeaseExpiresAtUtc == null || job.LeaseExpiresAtUtc <= now) ||
                      job.PublicState == (int)PublicJobState.GpuProcessing) &&
+                    job.LeaseOwner == null && job.LeaseExpiresAtUtc == null &&
                     !db.GpuMiniTasks.Any(task => task.ParentJobId == job.Id && (task.ExecutionState == (int)GpuMiniTaskExecutionState.Active ||
                         task.ExecutionState == (int)GpuMiniTaskExecutionState.Ready)) &&
-                    !db.EmbeddingGpuRequests.Any(request => request.ParentJobId == job.Id && request.ExecutorInstanceId != null && !request.NativeCleanupConfirmed) &&
-                    !db.DocumentOcrRequests.Any(request => request.ParentJobId == job.Id && request.ExecutionInstanceId != null && request.NativeCleanupConfirmedAtUtc == null))
+                    (job.PublicState != (int)PublicJobState.GpuProcessing || db.GpuMiniTasks.Any(task =>
+                        task.ParentJobId == job.Id && task.SourceRevision == job.SourceRevision)) &&
+                    !unconfirmed.Contains(job.Id))
                 .OrderBy(x => x.DueAtUtc).ThenBy(x => x.Id).Take(128).ToArrayAsync(cancellationToken).ConfigureAwait(false);
             foreach (var job in jobs)
             {
@@ -98,8 +104,13 @@ public sealed class SqlSourceWorkRetirement(IDbContextFactory<FluxKnowledgeDbCon
                     .SetProperty(x => x.Reason, "source-removed").SetProperty(x => x.UpdatedAtUtc, now), cancellationToken).ConfigureAwait(false);
             await db.SaveChangesAsync(cancellationToken).ConfigureAwait(false);
             await transaction.CommitAsync(cancellationToken).ConfigureAwait(false);
-            return jobs.Length + branches.Length;
+            var retiredCount = jobs.Length + branches.Length;
+            return (retiredCount, retiredCount != 0 || unbound.Length != 0 || gpuTasks != 0);
         }).ConfigureAwait(false);
+        if (changed && statusEvents is not null)
+            await statusEvents.PublishAsync(new StatusChanged(null, "sources", clock.GetUtcNow()), CancellationToken.None)
+                .ConfigureAwait(false);
+        return retired;
     }
 
     internal static IQueryable<Guid> UnavailableActiveTaskIds(FluxKnowledgeDbContext db)

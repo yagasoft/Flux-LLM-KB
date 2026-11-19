@@ -51,7 +51,7 @@ public sealed class SourceClassifierTests
         var result = SourceClassifier.Classify("large.csv", bytes, bytes.Length);
         Assert.True(result.IsAccepted);
         Assert.Equal(bytes.Length, result.Text!.Length);
-        Assert.False(SourceClassifier.Classify("oversized.csv", "a"u8, 32L * 1024 * 1024 + 1).IsAccepted);
+        Assert.False(SourceClassifier.Classify("oversized.csv", "a"u8, 200L * 1024 * 1024 + 1).IsAccepted);
         Assert.False(SourceClassifier.Classify("partial.csv", "a"u8, bytes.Length, hasFullBoundedBuffer: false).IsAccepted);
     }
 

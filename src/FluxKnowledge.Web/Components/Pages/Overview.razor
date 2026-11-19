@@ -91,6 +91,8 @@
         {
             var causes = activity.FileCauses.Where(c => SelectedRoot is null || c.SourceRootId == SelectedRoot)
                 .OrderByDescending(c => c.Count).ThenBy(c => c.Reason, StringComparer.Ordinal).ToArray();
+            var causeCards = causes.GroupBy(c => (c.SourceRootId, c.Category, Title: IssueTitle(c)))
+                .OrderByDescending(group => group.Sum(c => c.Count));
             var pausedSources = view.Sources.Where(s => s.Lifecycle == "Paused").ToArray();
             var issuesVisible = causes.Length > 0 || pausedSources.Length > 0 ||
                 view.BlockedFiles > 0 || view.FailedFiles > 0 || view.ProvisionalFiles > 0 ||
@@ -105,16 +107,19 @@
             <div class="issue-workspace @(_filesOpen ? "has-selection" : null)">
             <div class="issue-list-panel">
             <ul class="issue-list">
-                @foreach (var cause in causes)
+                @foreach (var group in causeCards)
                 {
-                    var sourceName = view.Sources.FirstOrDefault(s => s.Id == cause.SourceRootId)?.Name ?? "Source unavailable";
-                    <li class="issue-row" @key="(cause.SourceRootId, cause.Category, cause.Reason, cause.NextAction)">
+                    var count = group.Sum(c => c.Count);
+                    var single = group.Count() == 1 ? group.First() : null;
+                    var sourceName = view.Sources.FirstOrDefault(s => s.Id == group.Key.SourceRootId)?.Name ?? "Source unavailable";
+                    var filter = CurrentFiles(group.Key.Category, single?.Reason);
+                    <li class="issue-row" @key="group.Key">
                         <div>
-                            <h3>@IssueTitle(cause)</h3>
-                            <p>@cause.NextAction</p>
-                            <small>@FormatCount(cause.Count, "file") · @sourceName</small>
+                            <h3>@group.Key.Title</h3>
+                            <p>@(single?.NextAction ?? "Review the reasons and suggested actions for these files.")</p>
+                            <small>@FormatCount(count, "file") · @sourceName</small>
                         </div>
-                        <button type="button" @onclick="() => LoadFilesAsync(new(cause.Category, Reason: cause.Reason), cause.SourceRootId, cause.Count)">Review files</button>
+                        <button type="button" @onclick="() => LoadFilesAsync(filter, group.Key.SourceRootId, single?.Count)">Review files</button>
                     </li>
                 }
                 @foreach (var source in pausedSources)
@@ -154,7 +159,7 @@
                 @if (view.AttentionJobs > 0)
                 {
                     <li class="issue-row">
-                        <div><h3>Indexing work needs review</h3><p>Some steps failed or have no valid worker or dispatch claim.</p><small>@FormatCount(view.AttentionJobs, "job")</small></div>
+                        <div><h3>Indexing work needs review</h3><p>Check failed steps, unconfirmed claims and cleanup that still needs verification.</p><small>@FormatCount(view.AttentionJobs, "job")</small></div>
                         <button type="button" @onclick='() => LoadAttentionAsync("current-jobs", 0)'>Review current jobs</button>
                     </li>
                 }
@@ -171,25 +176,24 @@
                 {
                     <li class="issue-row">
                         <div><h3>Files waiting for source verification</h3><p>Indexing will use the confirmed revision after source reconciliation.</p><small>@FormatCount(view.ProvisionalFiles, "file")</small></div>
-                        <button type="button" @onclick='() => LoadFilesAsync(new("Unconfirmed"), SelectedRoot, view.ProvisionalFiles)'>Review files</button>
+                        <button type="button" @onclick='() => LoadFilesAsync(CurrentFiles("Unconfirmed"), SelectedRoot, view.ProvisionalFiles)'>Review files</button>
                     </li>
                 }
             </ul>
-            @if (view.BlockedFiles > 0 || view.FailedFiles > 0)
-            {
-                <p class="issue-actions">
-                    @if (view.BlockedFiles > 0) { <button type="button" @onclick='() => LoadFilesAsync(new("Blocked"), SelectedRoot, view.BlockedFiles)'>Review @FormatCount(view.BlockedFiles, "blocked file")</button> }
-                    @if (view.FailedFiles > 0) { <button type="button" @onclick='() => LoadFilesAsync(new("Failed"), SelectedRoot, view.FailedFiles)'>Review @FormatCount(view.FailedFiles, "failed file")</button> }
-                </p>
-            }
+            <div class="issue-actions file-issue-toolbar">
+                @if (view.BlockedFiles > 0) { <button type="button" @onclick='() => LoadFilesAsync(CurrentFiles("Blocked"), SelectedRoot, view.BlockedFiles)'>Review @FormatCount(view.BlockedFiles, "blocked file")</button> }
+                @if (view.FailedFiles > 0) { <button type="button" @onclick='() => LoadFilesAsync(CurrentFiles("Failed"), SelectedRoot, view.FailedFiles)'>Review @FormatCount(view.FailedFiles, "failed file")</button> }
+                <button type="button" @onclick="ShowIgnoredFilesAsync">Ignored files and rules@(view.IgnoredFiles > 0 ? $" ({view.IgnoredFiles:N0})" : null)</button>
+            </div>
             </div>
             <div class="issue-inspector" hidden="@(!_filesOpen)">
                 <button class="inspector-close" type="button" @onclick="CloseFilesAsync">Close file details</button>
-                <PipelineFileExplorer @ref="_fileExplorer" SourceRootId="@SelectedRoot" Sources="@activity.Sources" ActionsEnabled="@(!ProjectionState.IsStale)" />
+                <PipelineFileExplorer @ref="_fileExplorer" SourceRootId="@SelectedRoot" Sources="@activity.Sources" ActionsEnabled="@(!ProjectionState.IsStale)" PreferencesChanged="RefreshAsync" />
             </div>
             </div>
             <details class="diagnostic-details overview-disclosure"><summary>Previous attempts</summary>
                 <p>@view.HistoricalJobs historical pipeline jobs and @view.HistoricalGpuTasks historical GPU attempts. Earlier records can help explain an interruption.</p>
+                <p>When file removal is confirmed, FluxKnowledge retires queued work automatically. The job history keeps the result. Worker or GPU cleanup that still needs verification appears under Needs attention.</p>
                 <p class="issue-actions"><button type="button" @onclick='() => LoadAttentionAsync("historical-jobs", 0)'>View previous jobs</button>
                     <button type="button" @onclick='() => LoadAttentionAsync("historical-gpu", 0)'>View previous GPU attempts</button></p>
             </details>
@@ -201,6 +205,26 @@
         @if (_attentionError is not null) { <p role="alert">@_attentionError</p> }
         @if (_attention is { } attention)
         {
+            <h3 id="attention-records-heading" tabindex="-1" @ref="_attentionRecordsHeading">@AttentionRecordHeading</h3>
+            @if (attention.Reasons.Count > 1)
+            {
+                <div class="reason-filters" role="group" aria-label="Filter records by reason">
+                    <button type="button" aria-pressed="@AttentionPressed(null)" @onclick="() => LoadAttentionAsync(_attentionUnit, 0, null, false)">All reasons (@attention.Reasons.Sum(r => r.Count).ToString("N0"))</button>
+                    @foreach (var reason in attention.Reasons)
+                    {
+                        <button type="button" @key="reason.Reason" aria-pressed="@AttentionPressed(reason.Reason)" @onclick="() => LoadAttentionAsync(_attentionUnit, 0, reason.Reason, false)">@reason.Label (@reason.Count.ToString("N0"))</button>
+                    }
+                </div>
+            }
+            else if (_attentionReason is not null && !attention.Reasons.Any(r => r.Reason == _attentionReason))
+            {
+                <button type="button" @onclick="() => LoadAttentionAsync(_attentionUnit, 0, null, false)">Clear reason filter</button>
+            }
+            else if (attention.Reasons.Count == 1)
+            {
+                <p class="file-reason-summary">@attention.Reasons[0].Label · @FormatCount(attention.Reasons[0].Count, "record")</p>
+            }
+            @if (attention.TotalCount == 0) { <p>No records match this view.</p> }
             <div class="table-scroll"><table>
                 <caption>@attention.TotalCount @(_attentionUnit.EndsWith("jobs", StringComparison.Ordinal) ? "pipeline job" : "GPU task") records for @AttentionScopeLabel. Page @(attention.Page + 1). Loaded @Time(_attentionReadAtUtc).</caption>
                 <thead><tr><th>Source</th><th>Unit / status</th><th>Applicability</th><th>Reason</th><th>Details</th></tr></thead>
@@ -225,9 +249,9 @@
                 </tbody>
             </table></div>
             <p class="status-freshness">Record status is the retained pipeline label. Confirmed execution and current applicability are shown above.</p>
-            <p><button type="button" disabled="@(attention.Page == 0)" @onclick="() => LoadAttentionAsync(_attentionUnit, attention.Page - 1)">Previous records</button>
-                <button type="button" disabled="@((attention.Page + 1) * attention.PageSize >= attention.TotalCount)" @onclick="() => LoadAttentionAsync(_attentionUnit, attention.Page + 1)">Next records</button>
-                <button type="button" @onclick="() => LoadAttentionAsync(_attentionUnit, attention.Page)">Refresh records</button></p>
+            <p><button type="button" disabled="@(attention.Page == 0)" @onclick="() => LoadAttentionAsync(_attentionUnit, attention.Page - 1, _attentionReason, false)">Previous records</button>
+                <button type="button" disabled="@((attention.Page + 1) * attention.PageSize >= attention.TotalCount)" @onclick="() => LoadAttentionAsync(_attentionUnit, attention.Page + 1, _attentionReason, false)">Next records</button>
+                <button type="button" @onclick="() => LoadAttentionAsync(_attentionUnit, attention.Page, _attentionReason, false)">Refresh records</button></p>
         }
     </section>
     @if (submitted.Length > 0)
@@ -322,7 +346,7 @@
                     }
                     @if (source.DeferredFiles + source.MetadataOnlyFiles + source.CompletedWithoutTextFiles > 0)
                     {
-                        <details><summary>Other file outcomes</summary><p>@source.DeferredFiles deferred files; @source.MetadataOnlyFiles metadata-only files; @source.CompletedWithoutTextFiles files processed without extractable text. These are not counted as published full-text files.</p></details>
+                        <details><summary>Other file outcomes</summary><p>@source.DeferredFiles deferred files; @source.MetadataOnlyFiles files with metadata indexed; @source.CompletedWithoutTextFiles files processed without extractable text. These are not counted as published full-text files.</p></details>
                     }
                 </article>
             }
@@ -490,6 +514,9 @@
     private string _announcement = "Loading pipeline status…";
     private string _sourceScope = "";
     private string _attentionUnit = "jobs";
+    private string? _attentionReason;
+    private bool _focusAttentionRecords;
+    private ElementReference _attentionRecordsHeading;
     private PipelineAttentionPage? _attention;
     private string? _attentionError;
     private DateTimeOffset? _attentionReadAtUtc;
@@ -497,6 +524,9 @@
     private PipelineFileExplorer? _fileExplorer;
     private bool _filesOpen;
     private ElementReference _attentionHeading;
+    private static PipelineFileFilter CurrentFiles(string category, string? reason = null) =>
+        new(category, Reason: reason, Attention: PipelineFileAttentionScope.Current);
+    private Task ShowIgnoredFilesAsync() => LoadFilesAsync(new(Attention: PipelineFileAttentionScope.Ignored), SelectedRoot);
     private async Task LoadFilesAsync(PipelineFileFilter filter, Guid? root, int? expected = null)
     {
         if (_fileExplorer is null) return;
@@ -509,6 +539,22 @@
         _filesOpen = false;
         _fileExplorer?.ClearSelection();
         await _attentionHeading.FocusAsync();
+    }
+    private string AttentionPressed(string? reason) => _attentionReason == reason ? "true" : "false";
+    private string AttentionRecordHeading => _attentionUnit switch
+    {
+        "current-jobs" => "Current indexing issues",
+        "current-gpu" => "GPU work to verify",
+        "historical-jobs" => "Previous indexing jobs",
+        "historical-gpu" => "Previous GPU attempts",
+        "jobs" => "Pipeline job records",
+        _ => "GPU task records"
+    };
+    protected override async Task OnAfterRenderAsync(bool firstRender)
+    {
+        if (!_focusAttentionRecords) return;
+        _focusAttentionRecords = false;
+        if (_attention is not null) await _attentionRecordsHeading.FocusAsync();
     }
     private string AttentionScopeLabel => _attentionUnit.StartsWith("current-", StringComparison.Ordinal) ? "current issues" :
         _attentionUnit.StartsWith("historical-", StringComparison.Ordinal) ? "previous attempts" : "diagnostics";
@@ -573,6 +619,8 @@
     {
         _attentionRequest++;
         _attention = null;
+        _attentionReason = null;
+        _focusAttentionRecords = false;
         _attentionReadAtUtc = null;
         _attentionError = null;
         _filesOpen = false;
@@ -580,18 +628,20 @@
         Announce();
         return Task.CompletedTask;
     }
-    private async Task LoadAttentionAsync(string unit, int page)
+    private async Task LoadAttentionAsync(string unit, int page, string? reason = null, bool focus = true)
     {
         var request = ++_attentionRequest;
         var root = SelectedRoot;
         var requestId = Guid.NewGuid();
         try
         {
-            var result = await ProjectionReader.ReadPipelineAttentionAsync(unit, root, page, _stopping.Token);
+            var result = await ProjectionReader.ReadPipelineAttentionAsync(unit, root, page, reason, _stopping.Token);
             if (request != _attentionRequest || root != SelectedRoot) return;
             _attention = result;
             _attentionReadAtUtc = DateTimeOffset.UtcNow;
             _attentionUnit = unit;
+            _attentionReason = reason;
+            _focusAttentionRecords = focus;
             _attentionError = null;
         }
         catch (Exception exception) when (exception is System.Data.Common.DbException or InvalidOperationException or TimeoutException)

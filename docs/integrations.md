@@ -80,6 +80,8 @@ confirmation, canonical fingerprint and idempotency receipt. REST and
 - `root_resume` resumes event processing without requesting a full content scan.
 - `root_create` uses 604,800 seconds for metadata reconciliation. Its compatibility
   `reconciliationSeconds` field rejects other explicit values.
+- All source roots inherit the 200 MiB UTF-8 text limit. The legacy
+  `maximumFileBytes` field in `root_create` is accepted for compatibility.
 
 `source_verify` and `source_verification_set` are retired and refuse new work.
 `corpus.query` still accepts `view: "verification"` with one `root_id` and `limit: 1`

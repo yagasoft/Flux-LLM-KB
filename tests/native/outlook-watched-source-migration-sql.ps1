@@ -1,4 +1,4 @@
-param([Parameter(Mandatory)][string]$SourceRoot,[Parameter(Mandatory)][string]$ReceiptDirectory,[switch]$CodexWorkspace,[switch]$ForwardOnly)
+param([Parameter(Mandatory)][string]$SourceRoot,[Parameter(Mandatory)][string]$ReceiptDirectory,[switch]$CodexWorkspace,[switch]$MediaTranscription,[switch]$ForwardOnly)
 $ErrorActionPreference='Stop';Set-StrictMode -Version Latest
 foreach($name in @('incremental-vector-publication-metadata-migration','incremental-source-deletion-pending-queue-index','incremental-passage-window-eligibility-migration','incremental-source-journal-migration')){
  Import-Module (Join-Path $SourceRoot ('scripts/deploy/'+$name+'.psm1')) -Force
@@ -17,7 +17,7 @@ function Test-Sql([string]$Text){
   $null=$command.ExecuteNonQuery()
  }finally{$connection.Dispose()}
 }
-$mode = if ($CodexWorkspace) { @{CodexWorkspace = $true} } else { @{Outlook = $true} }
+$mode = if ($MediaTranscription) { @{MediaTranscription=$true} } elseif ($CodexWorkspace) { @{CodexWorkspace = $true} } else { @{Outlook = $true} }
 $contract=Get-PassageWindowEligibilityMigrationContract @mode
 $sqlPath=(Resolve-Path -LiteralPath (Join-Path $SourceRoot ('scripts/deploy/' + $contract.ArtifactPrefix + '-up.sql'))).Path
 $read={Get-PassageWindowEligibilityDatabaseState $connectionText @mode}
@@ -32,6 +32,13 @@ if ($ForwardOnly) {
  Check ($state.Applied -and $state.SettledState -ceq 'New') 'The exact successor was not applied.'
  Assert-SourceJournalSchema (Get-SourceJournalDatabaseState $connectionText)
  return
+}
+if ($MediaTranscription) {
+ Test-Sql 'CREATE TABLE dbo.MediaTranscriptionGpuRequests (Incomplete bit);'
+ try {
+    Refuse { Get-PassageWindowEligibilityStateKind @mode (&$read) $initial.Identity }
+    Refuse { Assert-SourceJournalSchema (Get-SourceJournalDatabaseState $connectionText) }
+ } finally { Test-Sql 'DROP TABLE dbo.MediaTranscriptionGpuRequests;' }
 }
 if ($CodexWorkspace) {
  Test-Sql 'ALTER TABLE dbo.KnowledgeItems ADD CodexWorkspaceRootId uniqueidentifier NULL;'
@@ -67,10 +74,14 @@ Invoke-PassageWindowEligibilityMigrationAttempt $state $read {} {throw 'Complete
 Invoke-PassageWindowEligibilityMigrationSql @mode $connectionText $sqlPath $initial.Identity
 Check $state.Applied 'Already-new state was not validated.'
 Assert-SourceJournalSchema (Get-SourceJournalDatabaseState $connectionText)
-$alter = if ($CodexWorkspace) {
+$alter = if ($MediaTranscription) {
+    'ALTER TABLE dbo.MediaTranscriptionGpuRequests NOCHECK CONSTRAINT CK_MediaTranscriptionGpuRequests_Phase;'
+} elseif ($CodexWorkspace) {
     'ALTER INDEX IX_KnowledgeItems_CodexWorkspaceRootId_CreatedAtUtc_Id ON dbo.KnowledgeItems DISABLE;'
 } else { 'ALTER TABLE dbo.OutlookCaptureProfiles ALTER COLUMN WatchedRootIdentity varchar(127) NULL;' }
-$restore = if ($CodexWorkspace) {
+$restore = if ($MediaTranscription) {
+    'ALTER TABLE dbo.MediaTranscriptionGpuRequests WITH CHECK CHECK CONSTRAINT CK_MediaTranscriptionGpuRequests_Phase;'
+} elseif ($CodexWorkspace) {
     'ALTER INDEX IX_KnowledgeItems_CodexWorkspaceRootId_CreatedAtUtc_Id ON dbo.KnowledgeItems REBUILD;'
 } else { 'ALTER TABLE dbo.OutlookCaptureProfiles ALTER COLUMN WatchedRootIdentity varchar(128) NULL;' }
 Test-Sql $alter
@@ -90,3 +101,13 @@ $hold=Join-Path $ReceiptDirectory 'hold.json'
 $recoveredIntent=Get-SourceJournalHeldMigrationIntent $hold $ReceiptDirectory $initial.Identity
 Check ($recoveredIntent -ceq $journalState.IntentPath) 'The successor journal release intent could not be recovered.'
 Write-Output 'Owned SQL: exact schema migration, atomic rollback, lost acknowledgement and zero-DDL reapply passed.'
+
+if ($MediaTranscription) {
+    $down = Join-Path $SourceRoot 'scripts/deploy/media-transcription-gpu-down.sql'
+    Check ((Get-FileHash -LiteralPath $down).Hash -ceq $contract.DownSha256) 'Unreviewed Down script.'
+    foreach ($batch in [regex]::Split((Get-Content -Raw -LiteralPath $down),'(?im)^\s*GO\s*$')) {
+        if ($batch.Trim()) { Test-Sql $batch }
+    }
+    Check ((Get-PassageWindowEligibilityStateKind @mode (&$read) $initial.Identity) -ceq 'Old') 'Disposable Down did not restore exact 82.'
+    Invoke-PassageWindowEligibilityMigrationSql @mode $connectionText $sqlPath $initial.Identity
+}

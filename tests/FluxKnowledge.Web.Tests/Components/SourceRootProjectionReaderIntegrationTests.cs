@@ -877,7 +877,7 @@ public sealed partial class SourceRootProjectionReaderIntegrationTests(NativeSql
         Assert.Equal("office-document-no-extractable-text", noContent.Reason);
         Assert.Null(noContent.CorpusPipelineRecordId);
         var metadata = Assert.Single(detail.Files, value => value.FileName == "scan.png");
-        Assert.Equal("Metadata only", metadata.Status);
+        Assert.Equal("Metadata indexed", metadata.Status);
         Assert.Equal("media-metadata-only", metadata.Reason);
         var failed = Assert.Single(detail.Files, value => value.FileName == "replacement.pdf");
         Assert.Equal("Failed", failed.Status);

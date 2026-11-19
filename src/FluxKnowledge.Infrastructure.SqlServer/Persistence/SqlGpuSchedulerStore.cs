@@ -1272,22 +1272,8 @@ public sealed partial class SqlGpuSchedulerStore : IGpuSchedulerStore, IGpuExecu
         var eligibility = ready.Where(task => includeFutureDeferrals || task.DeferredUntilUtc == null || task.DeferredUntilUtc <= now);
 
         GpuMiniTaskEntity? head = null;
-        GpuMiniTaskEntity? oldestOcr = null;
-        if (options.WorkloadPolicy is not null)
-        {
-            oldestOcr = await WithWorkload(ready.Where(t => t.ParentJobId != null), options.WorkloadPolicy, GpuWorkloadKind.Ocr)
-                .OrderBy(t => t.CreatedSequence).ThenBy(t => t.Id).FirstOrDefaultAsync(cancellationToken).ConfigureAwait(false);
-            var state = await context.GpuSchedulerStates.SingleAsync(s => s.Id == 1, cancellationToken).ConfigureAwait(false);
-            if (oldestOcr is null) state.SearchBatchesWhileOcrWaiting = 0;
-            else if (state.SearchBatchesWhileOcrWaiting >= GpuSchedulerOptions.MaxSearchBatchesBeforeOcr)
-            {
-                if (!includeFutureDeferrals && oldestOcr.DeferredUntilUtc > now) return [];
-                head = oldestOcr;
-            }
-        }
         foreach (var lane in Enum.GetValues<GpuPriorityLane>())
         {
-            if (head is not null) break;
             head = await eligibility
                 .Where(task => task.PriorityLane == (int)lane)
                 .OrderBy(task => task.CreatedSequence)
@@ -1304,10 +1290,21 @@ public sealed partial class SqlGpuSchedulerStore : IGpuSchedulerStore, IGpuExecu
         {
             return [];
         }
-        if (oldestOcr is not null && options.WorkloadPolicy!.Classify(head.ModelRuntimeKey, head.SettingsFingerprint) == GpuWorkloadKind.Ocr)
+        GpuMiniTaskEntity? oldestOcr = null;
+        if (head.PriorityLane != (int)GpuPriorityLane.InteractiveRetrieval &&
+            options.WorkloadPolicy is { } policy &&
+            policy.Classify(head.ModelRuntimeKey, head.SettingsFingerprint) == GpuWorkloadKind.Ocr)
         {
-            if (!includeFutureDeferrals && oldestOcr.DeferredUntilUtc > now) return [];
-            head = oldestOcr;
+            oldestOcr = await WithWorkload(ready.Where(task => task.ParentJobId != null), policy, GpuWorkloadKind.Ocr)
+                .OrderBy(task => task.CreatedSequence)
+                .ThenBy(task => task.Id)
+                .FirstOrDefaultAsync(cancellationToken)
+                .ConfigureAwait(false);
+            if (oldestOcr is not null)
+            {
+                if (!includeFutureDeferrals && oldestOcr.DeferredUntilUtc > now) return [];
+                head = oldestOcr;
+            }
         }
 
         if (head.EstimatedBytes > options.MaxBatchEstimatedBytes)
@@ -1315,10 +1312,11 @@ public sealed partial class SqlGpuSchedulerStore : IGpuSchedulerStore, IGpuExecu
             throw new InvalidOperationException("The strict-priority GPU head exceeds the configured batch byte limit.");
         }
 
-        // Each embedding request already contains up to four passages. Aggregate no
-        // other mini-task into its native session or durable completion boundary.
-        var maximumSelected = await context.EmbeddingGpuRequests.AnyAsync(request => request.MiniTaskId == head.Id, cancellationToken)
-            .ConfigureAwait(false) ? 1 : options.MaxBatchItems;
+        // Tracked embedding requests and transcription each own one native
+        // session and completion boundary. Do not combine either with another task.
+        var singleItem = options.WorkloadPolicy?.Classify(head.ModelRuntimeKey, head.SettingsFingerprint) == GpuWorkloadKind.MediaTranscription ||
+            await context.EmbeddingGpuRequests.AnyAsync(request => request.MiniTaskId == head.Id, cancellationToken).ConfigureAwait(false);
+        var maximumSelected = singleItem ? 1 : options.MaxBatchItems;
         var orderedPrefix = await eligibility
             .Where(task => task.PriorityLane == head.PriorityLane)
             .Where(task => oldestOcr == null || head.Id != oldestOcr.Id || task.Id == head.Id)
@@ -1585,7 +1583,6 @@ public sealed partial class SqlGpuSchedulerStore : IGpuSchedulerStore, IGpuExecu
         }
 
         await RecomputeNextDeferredAsync(context, now, cancellationToken).ConfigureAwait(false);
-        await RecordWorkloadTurnAsync(context, selected[0], options, cancellationToken).ConfigureAwait(false);
         RequireUnexpiredInteractive(selected);
         var result = new GpuSchedulerAdmissionRoundResult(true, GpuAdmissionDisposition.Admit, null);
         RecordAdmissionReceipt(context, operationId, batchId, wakeReason, options, result);
@@ -1718,8 +1715,9 @@ public sealed partial class SqlGpuSchedulerStore : IGpuSchedulerStore, IGpuExecu
             options.CapacityDeferralCap.Ticks.ToString(CultureInfo.InvariantCulture),
             options.FallbackInterval.Ticks.ToString(CultureInfo.InvariantCulture),
             options.UnresponsiveDiagnosticAge.Ticks.ToString(CultureInfo.InvariantCulture));
+        // Preserve the stored receipt identity so an admission committed before the policy change can still replay.
         return options.WorkloadPolicy is null ? original : CreateRequestFingerprint(original,
-            "ocr-turn-v1", options.WorkloadPolicy.Fingerprint, GpuSchedulerOptions.MaxSearchBatchesBeforeOcr.ToString(CultureInfo.InvariantCulture));
+            "ocr-turn-v1", options.WorkloadPolicy.Fingerprint, "3");
     }
 
     private static string CreateExecutorAcknowledgementFingerprint(GpuExecutorAcknowledgement acknowledgement) =>

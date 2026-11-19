@@ -95,6 +95,30 @@ public sealed class OutboxWorkerRegistrationTests
         Assert.Single(provider.GetServices<IHostedService>().OfType<GpuExecutorDispatchRecoveryService>());
     }
 
+    [Fact]
+    public void Missing_runtime_excludes_only_its_operation_until_it_returns()
+    {
+        var ready = false;
+        var registration = new OutboxWorkerRegistration([
+            new TestWorker(PipelineOperations.ExtractUtf8, () => true),
+            new TestWorker(MediaTranscriptionGpuContracts.Operation, () => ready)]
+        );
+
+        Assert.Equal([PipelineOperations.ExtractUtf8], registration.ReadyOperations);
+        Assert.Contains(MediaTranscriptionGpuContracts.Operation, registration.Operations);
+
+        ready = true;
+        Assert.Contains(MediaTranscriptionGpuContracts.Operation, registration.ReadyOperations);
+    }
+
+    private sealed class TestWorker(string operation, Func<bool> ready) : IStageWorker
+    {
+        public string Operation => operation;
+        public bool CanClaim => ready();
+        public ValueTask ExecuteAsync(StageWorkItem workItem, CancellationToken cancellationToken) =>
+            throw new Xunit.Sdk.XunitException("Claim readiness must never invoke stage work.");
+    }
+
     private sealed class UnusedRetainedReader : IRetainedSourceReader
     {
         public ValueTask<RetainedSourceBytes> ReadBytesAsync(

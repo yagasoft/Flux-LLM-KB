@@ -609,15 +609,14 @@ public sealed class SqlNativeOperationStore(
             await LockCanonicalRootAsync(context, path, cancellationToken);
             if (await context.SourceRootConfigurations.AnyAsync(value => value.CanonicalPath == path, cancellationToken)) throw new NativeOperationException("operation-fenced");
             var rootId = Guid.NewGuid();
-            var recursive = Bool(payload, "recursive", true); var followLinks = Bool(payload, "followLinks", false); var maximumFileBytes = Long(payload, "maximumFileBytes", SourcePolicyDefaults.MaximumTextBytes);
             var creation = NativeSourceRootCreation.Parse(payload, actor) with { FullPath = path };
             var configuration = SourceRootControlConfiguration.From(creation);
             context.SourceRootConfigurations.Add(new SourceRootConfigurationEntity
             {
                 Id = rootId, CanonicalPath = path, DisplayName = name, State = (int)SourceRootState.Enabled,
-                Recursive = recursive, FollowLinks = followLinks, IncludePatternsJson = configuration.IncludePatternsJson,
+                Recursive = creation.Recursive, FollowLinks = creation.FollowLinks, IncludePatternsJson = configuration.IncludePatternsJson,
                 ExcludePatternsJson = configuration.ExcludePatternsJson, AllowedClassificationsJson = configuration.AllowedClassificationsJson,
-                MaximumFileBytes = maximumFileBytes, CrawlMode = (int)creation.DiscoveryMode, ReconciliationCadenceSeconds = checked((long)creation.ReconciliationCadence.TotalSeconds),
+                MaximumFileBytes = configuration.MaximumFileBytes, CrawlMode = (int)creation.DiscoveryMode, ReconciliationCadenceSeconds = checked((long)creation.ReconciliationCadence.TotalSeconds),
                 PermissionEvidenceJson = operation.RootAdmission.PermissionEvidenceJson,
                 HealthEvidenceJson = SourceRootControlAuditEvidence.CreateHealthEvidence(operation.RootAdmission, configuration),
                 ConfigurationRevision = 1, CreatedAtUtc = now, UpdatedAtUtc = now
@@ -685,7 +684,6 @@ public sealed class SqlNativeOperationStore(
             source.UpdatedAtUtc = now;
             if (Bool(payload, "applyDefaultPolicy", false))
             {
-                source.MaximumFileBytes = SourcePolicyDefaults.MaximumTextBytes;
                 source.AllowedClassificationsJson = JsonSerializer.Serialize(SourcePolicyDefaults.AllowedClassifications);
             }
             var configuration = SourceRootControlConfiguration.From(source);
@@ -1104,7 +1102,6 @@ public sealed class SqlNativeOperationStore(
     private static Guid RequiredGuid(JsonElement payload, string name) => System.Guid.TryParse(String(payload, name, 64), out var value) ? value : throw new NativeOperationException("invalid-payload");
     private static bool Bool(JsonElement payload, string name, bool defaultValue) => !payload.TryGetProperty(name, out var value) ? defaultValue : value.ValueKind == JsonValueKind.True;
     private static bool BoolRequired(JsonElement payload, string name) => payload.TryGetProperty(name, out var value) && value.ValueKind is JsonValueKind.True or JsonValueKind.False ? value.GetBoolean() : throw new NativeOperationException("invalid-payload");
-    private static long Long(JsonElement payload, string name, long defaultValue) => payload.TryGetProperty(name, out var value) && value.TryGetInt64(out var result) && result > 0 ? result : defaultValue;
     private static string SourceRootConfigurationFingerprint(string displayName, bool recursive, bool followLinks, long maximumFileBytes, long cadenceSeconds) => Convert.ToHexStringLower(SHA256.HashData(Encoding.UTF8.GetBytes(string.Join("\n", displayName, "[]", "[]", "[]", recursive ? "1" : "0", followLinks ? "1" : "0", maximumFileBytes.ToString(System.Globalization.CultureInfo.InvariantCulture), cadenceSeconds.ToString(System.Globalization.CultureInfo.InvariantCulture)))));
 
     private static void EnsureKnowledgeTarget(IReadOnlyList<NativeTargetVersion> targets, string kind, Guid id, byte[] rowVersion)

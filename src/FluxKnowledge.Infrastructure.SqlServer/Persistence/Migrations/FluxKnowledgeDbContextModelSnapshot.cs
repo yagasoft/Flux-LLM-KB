@@ -2438,6 +2438,139 @@ namespace FluxKnowledge.Infrastructure.SqlServer.Persistence.Migrations
                     b.ToTable("KnowledgeTombstones", (string)null);
                 });
 
+            modelBuilder.Entity("FluxKnowledge.Infrastructure.SqlServer.Persistence.Entities.MediaTranscriptionGpuRequestEntity", b =>
+                {
+                    b.Property<Guid>("MiniTaskId")
+                        .HasColumnType("uniqueidentifier");
+
+                    b.Property<DateTimeOffset?>("ClaimedAtUtc")
+                        .HasColumnType("datetimeoffset");
+
+                    b.Property<DateTimeOffset?>("CleanupConfirmedAtUtc")
+                        .HasColumnType("datetimeoffset");
+
+                    b.Property<int?>("CleanupKind")
+                        .HasColumnType("int");
+
+                    b.Property<string>("ContentSha256")
+                        .IsRequired()
+                        .HasMaxLength(64)
+                        .IsUnicode(false)
+                        .HasColumnType("char(64)")
+                        .IsFixedLength()
+                        .UseCollation("Latin1_General_100_BIN2");
+
+                    b.Property<DateTimeOffset>("CreatedAtUtc")
+                        .HasColumnType("datetimeoffset");
+
+                    b.Property<DateTimeOffset?>("DeadlineAtUtc")
+                        .HasColumnType("datetimeoffset");
+
+                    b.Property<long?>("ExecutionAdmissionGeneration")
+                        .HasColumnType("bigint");
+
+                    b.Property<Guid?>("ExecutionBatchId")
+                        .HasColumnType("uniqueidentifier");
+
+                    b.Property<Guid?>("ExecutionDispatchId")
+                        .HasColumnType("uniqueidentifier");
+
+                    b.Property<Guid?>("ExecutionInstanceId")
+                        .HasColumnType("uniqueidentifier");
+
+                    b.Property<int>("ExecutionPhase")
+                        .HasColumnType("int");
+
+                    b.Property<string>("MachineFingerprint")
+                        .HasMaxLength(64)
+                        .IsUnicode(false)
+                        .HasColumnType("char(64)");
+
+                    b.Property<string>("ModelRuntimeKey")
+                        .IsRequired()
+                        .HasMaxLength(256)
+                        .HasColumnType("nvarchar(256)")
+                        .UseCollation("Latin1_General_100_BIN2");
+
+                    b.Property<int?>("NativeProcessId")
+                        .HasColumnType("int");
+
+                    b.Property<DateTimeOffset?>("NativeProcessStartedAtUtc")
+                        .HasColumnType("datetimeoffset");
+
+                    b.Property<Guid>("ParentJobId")
+                        .HasColumnType("uniqueidentifier");
+
+                    b.Property<Guid>("PipelineRecordId")
+                        .HasColumnType("uniqueidentifier");
+
+                    b.Property<DateTimeOffset?>("RequeuedAtUtc")
+                        .HasColumnType("datetimeoffset");
+
+                    b.Property<byte[]>("ResultDigest")
+                        .HasColumnType("varbinary(32)");
+
+                    b.Property<string>("ResultJson")
+                        .HasColumnType("nvarchar(max)");
+
+                    b.Property<Guid>("RetainedSourceRevisionId")
+                        .HasColumnType("uniqueidentifier");
+
+                    b.Property<byte[]>("RowVersion")
+                        .IsConcurrencyToken()
+                        .IsRequired()
+                        .ValueGeneratedOnAddOrUpdate()
+                        .HasColumnType("rowversion");
+
+                    b.Property<string>("SettingsFingerprint")
+                        .IsRequired()
+                        .HasMaxLength(256)
+                        .HasColumnType("nvarchar(256)")
+                        .UseCollation("Latin1_General_100_BIN2");
+
+                    b.Property<long>("SourceRevision")
+                        .HasColumnType("bigint");
+
+                    b.Property<Guid?>("SupervisorInstanceId")
+                        .HasColumnType("uniqueidentifier");
+
+                    b.Property<int?>("SupervisorProcessId")
+                        .HasColumnType("int");
+
+                    b.Property<DateTimeOffset?>("SupervisorProcessStartedAtUtc")
+                        .HasColumnType("datetimeoffset");
+
+                    b.HasKey("MiniTaskId");
+
+                    b.HasIndex("ParentJobId", "RetainedSourceRevisionId")
+                        .IsUnique();
+
+                    b.HasIndex("PipelineRecordId", "SourceRevision");
+
+                    b.HasIndex("ExecutionPhase", "RequeuedAtUtc", "CreatedAtUtc");
+
+                    b.ToTable("MediaTranscriptionGpuRequests", null, t =>
+                        {
+                            t.HasCheckConstraint("CK_MediaTranscriptionGpuRequests_Cleanup", "([ExecutionPhase]<3 AND [CleanupConfirmedAtUtc] IS NULL AND [CleanupKind] IS NULL) OR\n([ExecutionPhase]>=3 AND [CleanupConfirmedAtUtc] IS NOT NULL AND [CleanupKind] IS NOT NULL AND\n ([CleanupKind]=0 AND [NativeProcessId] IS NULL OR [CleanupKind]=1 AND [NativeProcessId] IS NOT NULL))");
+
+                            t.HasCheckConstraint("CK_MediaTranscriptionGpuRequests_ContentSha256", "LEN([ContentSha256]) = 64 AND [ContentSha256] COLLATE Latin1_General_100_BIN2 NOT LIKE '%[^0-9a-f]%'");
+
+                            t.HasCheckConstraint("CK_MediaTranscriptionGpuRequests_Execution", "([ExecutionPhase]=0 AND [ExecutionInstanceId] IS NULL) OR\n([ExecutionPhase]>0 AND [ExecutionInstanceId] IS NOT NULL AND [ExecutionBatchId] IS NOT NULL AND\n [ExecutionDispatchId] IS NOT NULL AND [ExecutionAdmissionGeneration] IS NOT NULL AND [ExecutionAdmissionGeneration]>0 AND\n [SupervisorInstanceId] IS NOT NULL AND [SupervisorProcessId] IS NOT NULL AND [SupervisorProcessId]>0 AND\n [SupervisorProcessStartedAtUtc] IS NOT NULL AND [MachineFingerprint] IS NOT NULL AND\n [ClaimedAtUtc] IS NOT NULL AND [DeadlineAtUtc] IS NOT NULL AND [DeadlineAtUtc]>[ClaimedAtUtc])");
+
+                            t.HasCheckConstraint("CK_MediaTranscriptionGpuRequests_ModelRuntimeKey", "DATALENGTH([ModelRuntimeKey]) > 0 AND UNICODE(RIGHT([ModelRuntimeKey], 1)) NOT IN (9, 10, 11, 12, 13, 32, 133, 160, 5760, 8192, 8193, 8194, 8195, 8196, 8197, 8198, 8199, 8200, 8201, 8202, 8232, 8233, 8239, 8287, 12288)");
+
+                            t.HasCheckConstraint("CK_MediaTranscriptionGpuRequests_Native", "([NativeProcessId] IS NULL AND [NativeProcessStartedAtUtc] IS NULL AND [ExecutionPhase]<>2) OR\n([NativeProcessId] IS NOT NULL AND [NativeProcessId]>0 AND [NativeProcessStartedAtUtc] IS NOT NULL AND [ExecutionPhase]>=2)");
+
+                            t.HasCheckConstraint("CK_MediaTranscriptionGpuRequests_Phase", "[ExecutionPhase] BETWEEN 0 AND 4");
+
+                            t.HasCheckConstraint("CK_MediaTranscriptionGpuRequests_Requeue", "[RequeuedAtUtc] IS NULL OR [ExecutionPhase]=4");
+
+                            t.HasCheckConstraint("CK_MediaTranscriptionGpuRequests_Result", "([ResultJson] IS NULL AND [ResultDigest] IS NULL AND [ExecutionPhase]<4) OR\n([ExecutionPhase]>=3 AND [ResultJson] IS NOT NULL AND DATALENGTH([ResultJson]) BETWEEN 1 AND 4194304 AND\n [ResultDigest] IS NOT NULL AND DATALENGTH([ResultDigest])=32)");
+
+                            t.HasCheckConstraint("CK_MediaTranscriptionGpuRequests_SettingsFingerprint", "DATALENGTH([SettingsFingerprint]) > 0 AND UNICODE(RIGHT([SettingsFingerprint], 1)) NOT IN (9, 10, 11, 12, 13, 32, 133, 160, 5760, 8192, 8193, 8194, 8195, 8196, 8197, 8198, 8199, 8200, 8201, 8202, 8232, 8233, 8239, 8287, 12288)");
+                        });
+                });
+
             modelBuilder.Entity("FluxKnowledge.Infrastructure.SqlServer.Persistence.Entities.NativeOperationFenceTargetEntity", b =>
                 {
                     b.Property<string>("TargetId")

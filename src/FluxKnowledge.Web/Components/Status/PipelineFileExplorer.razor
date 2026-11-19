@@ -5,9 +5,25 @@
 @implements IAsyncDisposable
 @inject IProjectionReader Reader
 @inject ILogger<PipelineFileExplorer> Logger
+@inject IServiceProvider Services
 
 <section class="pipeline-file-explorer" aria-labelledby="affected-files-heading" aria-busy="@_loading.ToString().ToLowerInvariant()">
-    <h2 id="affected-files-heading" tabindex="-1" @ref="_heading">Affected files</h2>
+    <h2 id="affected-files-heading" tabindex="-1" @ref="_heading">@(_filter?.Attention == PipelineFileAttentionScope.Ignored ? "Ignored files and rules" : "Affected files")</h2>
+    @if (_feedback is not null) { <p role="status">@_feedback</p> }
+    @if (_preferenceError is not null) { <p role="alert">@_preferenceError</p> }
+    @if (_ruleChange is { } change)
+    {
+        <div class="file-ignore-preview" role="group" aria-label="Confirm ignore rule">
+            <strong>@(change.Kind == PipelineAttentionRuleKind.Binary ? "Ignore binary file issues" : $"Ignore issues reported as {change.Label}")</strong>
+            <p>Applies to @RuleScope(change.SourceRootId), including future files with matching issues. Indexing and recovery continue as usual.</p>
+            @if (change.Kind == PipelineAttentionRuleKind.Binary)
+            {
+                <p>This covers files recognised as binary, including document containers, images and archives.</p>
+            }
+            <div class="issue-actions"><button type="button" class="primary-action" disabled="@(!CanChangePreferences)" @onclick="() => ChangeRuleAsync(change, true)">Ignore category</button>
+                <button type="button" disabled="@_saving" @onclick="() => _ruleChange = null">Cancel</button></div>
+        </div>
+    }
     @if (_filter is null)
     {
         <p>Select a file category, pending stage or current cause to inspect its files.</p>
@@ -16,8 +32,68 @@
     @if (_error is not null) { <p role="alert">@_error</p> }
     @if (_page is { IsAvailable: true } page)
     {
-        <p><strong>@ScopeName</strong> · @_loadedFilter?.Category @_loadedFilter?.Stage @_loadedFilter?.State</p>
-        <p>@Number(page.TotalCount) matching logical files. Page @(page.Page + 1). Showing @(page.Items.Count) of at most @(page.PageSize) records per page.</p>
+        var filter = _loadedFilter!;
+        var ignored = filter.Attention == PipelineFileAttentionScope.Ignored;
+        <p><strong>@ScopeName</strong>@(filter.Category != "all" ? $" · {filter.Category}" : null) @(filter.Stage) @(filter.State)</p>
+        @if (ignored)
+        {
+            <p>These preferences hide file issues from Needs attention. You can restore a file or remove a rule here.</p>
+            @if (_rules is { Count: > 0 } rules)
+            {
+                <h3>Ignore rules</h3>
+                <ul class="ignore-rules">
+                    @foreach (var rule in rules)
+                    {
+                        <li @key="(rule.SourceRootId, rule.Kind, rule.Reason)">
+                            <span><strong>@rule.Label</strong> <small>@RuleScope(rule.SourceRootId)</small></span>
+                            @if (CanManagePreferences)
+                            {
+                                <button type="button" disabled="@(!CanChangePreferences)" @onclick="() => ChangeRuleAsync(rule, false)">Remove rule</button>
+                            }
+                        </li>
+                    }
+                </ul>
+            }
+            else if (_rules is not null) { <p>No ignore rules apply to this view.</p> }
+            @if (CanManagePreferences && _rules is { } loadedRules &&
+                !loadedRules.Any(rule => rule.Kind == PipelineAttentionRuleKind.Binary && (rule.SourceRootId is null || rule.SourceRootId == _loadedRoot)))
+            {
+                <button type="button" disabled="@(!CanChangePreferences)" @onclick='() => PreviewRule(PipelineAttentionRuleKind.Binary, null, "Binary files")'>Add binary file rule</button>
+            }
+        }
+        @if (page.Reasons.Count > 1)
+        {
+            <div class="reason-filters" role="group" aria-label="Filter by reason">
+                <button type="button" aria-pressed="@Pressed(filter.Reason is null)" disabled="@(_loading || _saving)" @onclick="() => ChangeReasonAsync(null)">All reasons (@Number(page.Reasons.Sum(r => r.Count)))</button>
+                @foreach (var reason in page.Reasons)
+                {
+                    <button type="button" @key="reason.Reason" aria-pressed="@Pressed(filter.Reason == reason.Reason)" disabled="@(_loading || _saving)" @onclick="() => ChangeReasonAsync(reason.Reason)">@reason.Label (@Number(reason.Count))</button>
+                }
+            </div>
+        }
+        else if (filter.Reason is not null && !page.Reasons.Any(r => r.Reason == filter.Reason))
+        {
+            <button type="button" disabled="@(_loading || _saving)" @onclick="() => ChangeReasonAsync(null)">Clear reason filter</button>
+        }
+        else if (page.Reasons.Count == 1)
+        {
+            <p class="file-reason-summary">@(page.Reasons[0].Label) · @Number(page.Reasons[0].Count) files</p>
+        }
+        @if (filter.Attention == PipelineFileAttentionScope.Current && CanManagePreferences)
+        {
+            var selectedReason = page.Reasons.FirstOrDefault(r => r.Reason == filter.Reason) ?? (page.Reasons.Count == 1 ? page.Reasons[0] : null);
+            <div class="issue-actions file-ignore-actions">
+                @if (selectedReason?.RuleReason is { } ruleReason)
+                {
+                    <button type="button" disabled="@(!CanChangePreferences)" @onclick="() => PreviewRule(PipelineAttentionRuleKind.Reason, ruleReason, selectedReason.Label)">Ignore this reason</button>
+                }
+                @if (page.HasBinaryIssues)
+                {
+                    <button type="button" disabled="@(!CanChangePreferences)" @onclick='() => PreviewRule(PipelineAttentionRuleKind.Binary, null, "Binary files")'>Ignore binary file issues</button>
+                }
+            </div>
+        }
+        <p>@Number(page.TotalCount) @(ignored ? "ignored files" : "matching logical files") · Page @(page.Page + 1)</p>
         <p class="status-freshness">List sampled at @Time(page.ObservedAtUtc). This is a separate committed sample from the overview.
             @if (_summaryCount is { } expected && expected != page.TotalCount)
             { <span>The earlier summary counted @Number(expected); files or their status may have changed between samples.</span> }</p>
@@ -27,7 +103,27 @@
             {
                 <article class="pipeline-file-item" @key="file.SourceRevisionId">
                     <FilePath FullPath="@file.FullPath" ArchivePath="@file.ArchivePath" />
-                    <p>@file.SourceName · @file.Category · <strong>@file.Stage · @file.State</strong></p>
+                    @if (file.Category == "MetadataOnly")
+                    {
+                        <p>@file.SourceName · <strong>@file.State</strong></p>
+                        <p>@file.Reason</p>
+                    }
+                    else
+                    {
+                        <p>@file.SourceName · @file.Category · <strong>@file.Stage · @file.State</strong></p>
+                        @if (file.MetadataIndexed)
+                        {
+                            <p>Metadata indexed</p>
+                        }
+                    }
+                    @if (file.Transcription is { } transcription)
+                    {
+                        <p><strong>@transcription.Status</strong>@(transcription.Detail is { } detail ? $" · {detail}" : null)</p>
+                        @if (transcription.PublishedRecordId is { } transcriptId)
+                        {
+                            <p><a href="@($"/corpus/{transcriptId:D}")">Read transcript</a></p>
+                        }
+                    }
                     @if (file.Category is "Blocked" or "Failed" or "Deferred" or "Unconfirmed")
                     {
                         <p>@file.NextAction</p>
@@ -40,6 +136,20 @@
                     else if (file.Reason == "archive-expansion-completed-members-counted-separately")
                     {
                         <p>Archive expanded. Its retained members have their own indexing status.</p>
+                    }
+                    @if (CanManagePreferences && (file.CanIgnore || file.IsIgnored))
+                    {
+                        <div class="issue-actions file-ignore-actions">
+                            @if (file.IsIndividuallyIgnored)
+                            {
+                                <button type="button" disabled="@(!CanChangePreferences)" @onclick="() => ChangeFileAsync(file, false)">Unignore file</button>
+                            }
+                            else if (file.IsIgnored) { <small>Ignored by a rule</small> }
+                            else
+                            {
+                                <button type="button" disabled="@(!CanChangePreferences)" @onclick="() => ChangeFileAsync(file, true)">Ignore file</button>
+                            }
+                        </div>
                     }
                     @if (!string.IsNullOrWhiteSpace(file.Reason))
                     {
@@ -92,10 +202,10 @@
                 </article>
             }
         </div>
-        @if (page.Items.Count == 0) { <p>No files match this filter in this sample.</p> }
-        <p class="file-page-controls"><button type="button" disabled="@(_loading || page.Page == 0)" @onclick="() => LoadAsync(_loadedFilter!, _loadedRoot, page.Page - 1)">Previous files</button>
-            <button type="button" disabled="@(_loading || (page.Page + 1) * page.PageSize >= page.TotalCount)" @onclick="() => LoadAsync(_loadedFilter!, _loadedRoot, page.Page + 1)">Next files</button>
-            <button type="button" disabled="@_loading" @onclick="() => LoadAsync(_loadedFilter!, _loadedRoot, page.Page)">Refresh file list</button></p>
+        @if (page.Items.Count == 0) { <p>@(ignored ? "No current files are ignored in this view." : "No files match this filter.")</p> }
+        <p class="file-page-controls"><button type="button" disabled="@(_loading || _saving || page.Page == 0)" @onclick="() => LoadAsync(_loadedFilter!, _loadedRoot, page.Page - 1)">Previous files</button>
+            <button type="button" disabled="@(_loading || _saving || (page.Page + 1) * page.PageSize >= page.TotalCount)" @onclick="() => LoadAsync(_loadedFilter!, _loadedRoot, page.Page + 1)">Next files</button>
+            <button type="button" disabled="@(_loading || _saving)" @onclick="() => LoadAsync(_loadedFilter!, _loadedRoot, page.Page)">Refresh file list</button></p>
     }
 </section>
 
@@ -103,12 +213,23 @@
     [Parameter] public Guid? SourceRootId { get; set; }
     [Parameter] public IReadOnlyList<SourcePipelineProgress> Sources { get; set; } = [];
     [Parameter] public bool ActionsEnabled { get; set; }
+    [Parameter] public EventCallback PreferencesChanged { get; set; }
     private readonly CancellationTokenSource _stopping = new();
     private PipelineFilePage? _page;
     private PipelineFileFilter? _filter, _loadedFilter;
     private Guid? _previousScope, _loadedRoot;
     private int? _summaryCount;
-    private bool _loading;
+    private bool _loading, _saving;
+    private string? _feedback, _preferenceError;
+    private IReadOnlyList<PipelineAttentionRule>? _rules;
+    private PipelineAttentionRule? _ruleChange;
+    private IFileAttentionPreferences? Preferences => Services.GetService<IFileAttentionPreferences>();
+    private bool CanManagePreferences => Preferences?.CanManage == true;
+    private bool CanChangePreferences => ActionsEnabled && CanManagePreferences && !_loading && !_saving;
+    private static string Pressed(bool selected) => selected ? "true" : "false";
+    private string RuleScope(Guid? sourceRootId) => sourceRootId is { } root
+        ? Sources.FirstOrDefault(s => s.Id == root)?.Name ?? "the original source"
+        : "all configured sources";
     private string? _error;
     private long _request;
     private ElementReference _heading;
@@ -139,16 +260,67 @@
         _page = null;
         _filter = null;
         _error = null;
+        _feedback = null;
+        _preferenceError = null;
+        _rules = null;
+        _ruleChange = null;
         _loading = false;
         _focusResult = false;
     }
     public async Task ShowAsync(PipelineFileFilter filter, Guid? root, int? summaryCount = null)
     {
+        ClearSelection();
         _summaryCount = summaryCount;
-        _page = null;
         await LoadAsync(filter, root, 0);
     }
-    private async Task LoadAsync(PipelineFileFilter filter, Guid? root, int page)
+    private Task ChangeReasonAsync(string? reason)
+    {
+        _summaryCount = null;
+        _ruleChange = null;
+        return LoadAsync(_loadedFilter! with { Reason = reason }, _loadedRoot, 0, focus: false);
+    }
+    private void PreviewRule(PipelineAttentionRuleKind kind, string? reason, string label)
+    {
+        _preferenceError = null;
+        _ruleChange = new(_loadedRoot, kind, reason, label, string.Empty);
+    }
+    private Task ChangeFileAsync(PipelineFileItem file, bool ignored) => ChangePreferenceAsync(
+        (preferences, cancellationToken) => preferences.SetFileIgnoredAsync(file.SourceRootId, file.SourceRevisionId, ignored, file.IgnoreVersion, cancellationToken),
+        ignored ? "File ignored. Find it under Ignored files and rules." : "File preference cleared. Any matching category rule still applies.");
+    private Task ChangeRuleAsync(PipelineAttentionRule rule, bool ignored) => ChangePreferenceAsync(
+        (preferences, cancellationToken) => preferences.SetRuleIgnoredAsync(rule.SourceRootId, rule.Kind, rule.Reason, ignored, ignored ? null : rule.Version, cancellationToken),
+        ignored ? "Ignore rule saved. Manage it under Ignored files and rules." : "Ignore rule removed.");
+    private async Task ChangePreferenceAsync(Func<IFileAttentionPreferences, CancellationToken, ValueTask> save, string feedback)
+    {
+        if (!CanChangePreferences || Preferences is not { } preferences || _loadedFilter is not { } filter) return;
+        var selection = _request;
+        var root = _loadedRoot;
+        var page = _page?.Page ?? 0;
+        _saving = true;
+        _preferenceError = null;
+        _feedback = null;
+        try
+        {
+            await save(preferences, _stopping.Token);
+            if (selection == _request)
+            {
+                _feedback = feedback;
+                _ruleChange = null;
+                _summaryCount = null;
+                await LoadAsync(filter, root, page);
+            }
+            await PreferencesChanged.InvokeAsync();
+        }
+        catch (OperationCanceledException) when (_stopping.IsCancellationRequested) { }
+        catch (Exception exception) when (exception is System.Data.Common.DbException or InvalidOperationException or TimeoutException or UnauthorizedAccessException)
+        {
+            Logger.LogWarning(exception, "File attention preference could not be changed for source {SourceRootId}.", root);
+            if (selection == _request)
+                _preferenceError = "The change could not be confirmed. Refresh the file list and try again.";
+        }
+        finally { _saving = false; }
+    }
+    private async Task LoadAsync(PipelineFileFilter filter, Guid? root, int page, bool focus = true)
     {
         var request = ++_request;
         _filter = filter; _loading = true; _error = null;
@@ -157,9 +329,16 @@
         {
             var result = await Reader.ReadPipelineFilesAsync(filter, root, page, _stopping.Token);
             if (request != _request) return;
+            if (result.IsAvailable && page > 0 && result.Items.Count == 0)
+                result = await Reader.ReadPipelineFilesAsync(filter, root, Math.Max(result.TotalCount - 1, 0) / result.PageSize, _stopping.Token);
+            if (request != _request) return;
             if (!result.IsAvailable) { _error = "File status unavailable. A zero count has not been confirmed."; _page = null; return; }
-            _page = result; _loadedFilter = filter; _loadedRoot = root;
-            _focusResult = true;
+            IReadOnlyList<PipelineAttentionRule>? rules = null;
+            if (filter.Attention == PipelineFileAttentionScope.Ignored && Preferences is { CanManage: true } preferences)
+                rules = await preferences.ReadRulesAsync(root, _stopping.Token);
+            if (request != _request) return;
+            _page = result; _loadedFilter = filter; _loadedRoot = root; _rules = rules;
+            _focusResult = focus;
         }
         catch (OperationCanceledException) when (_stopping.IsCancellationRequested) { }
         catch (Exception exception) when (exception is System.Data.Common.DbException or InvalidOperationException or TimeoutException)

@@ -237,29 +237,39 @@ public sealed class LocalSourceFileTests : IDisposable
     }
 
     [Fact]
-    public async Task Enumerator_retains_full_text_only_through_the_thirty_two_mebibyte_boundary()
+    public async Task Enumerator_retains_full_text_only_through_the_two_hundred_mebibyte_boundary()
     {
         var boundary = Path.Combine(_root, "boundary.txt");
         var oversized = Path.Combine(_root, "oversized.txt");
-        await File.WriteAllBytesAsync(boundary, Enumerable.Repeat((byte)'a', 32 * 1024 * 1024).ToArray());
-        await File.WriteAllBytesAsync(oversized, Enumerable.Repeat((byte)'b', (32 * 1024 * 1024) + 1).ToArray());
+        const int limit = 200 * 1024 * 1024;
+        var block = new byte[1024 * 1024];
+        Array.Fill(block, (byte)'a');
+        await using (var stream = File.Create(boundary))
+            for (var offset = 0; offset < limit; offset += block.Length)
+                await stream.WriteAsync(block);
+        await using (var stream = File.Create(oversized))
+        {
+            await stream.WriteAsync(block);
+            stream.SetLength(limit + 1);
+        }
         var configuration = SourceRootConfiguration.Create(
             Path.GetFullPath(_root), "Test root", recursive: false, followLinks: false,
-            maximumFileBytes: (32 * 1024 * 1024) + 1);
+            maximumFileBytes: limit + 1);
 
         var files = await new LocalSourceEnumerator().EnumerateAsync(configuration, CancellationToken.None).ToListAsync();
 
         var retained = Assert.Single(files, value => value.RelativePath == "boundary.txt");
         var deferred = Assert.Single(files, value => value.RelativePath == "oversized.txt");
         Assert.True(retained.HasFullBoundedBuffer);
-        Assert.Equal(32 * 1024 * 1024, retained.ClassificationBuffer.Length);
+        Assert.Equal(limit, retained.ClassificationBuffer.Length);
+        Assert.True(retained.Classification.IsAccepted);
         Assert.False(deferred.HasFullBoundedBuffer);
         Assert.True(deferred.ClassificationBuffer.Length < 1024 * 1024);
         Assert.Equal(SourceClassification.DeferredPolicy, deferred.Classification.Classification);
     }
 
     [Fact]
-    public async Task Enumerator_defers_text_larger_than_the_root_file_limit_even_when_below_the_global_limit()
+    public async Task Enumerator_accepts_text_larger_than_the_legacy_root_limit()
     {
         await File.WriteAllTextAsync(Path.Combine(_root, "over-root-limit.txt"), "12345");
         var configuration = SourceRootConfiguration.Create(
@@ -270,9 +280,9 @@ public sealed class LocalSourceFileTests : IDisposable
             .EnumerateAsync(configuration, CancellationToken.None)
             .ToListAsync());
 
-        Assert.Equal(SourceClassification.DeferredPolicy, file.Classification.Classification);
-        Assert.Null(file.Classification.Text);
-        Assert.False(file.HasFullBoundedBuffer);
+        Assert.Equal(SourceClassification.AcceptedUtf8Text, file.Classification.Classification);
+        Assert.Equal("12345", file.Classification.Text);
+        Assert.True(file.HasFullBoundedBuffer);
     }
 
     [Fact]

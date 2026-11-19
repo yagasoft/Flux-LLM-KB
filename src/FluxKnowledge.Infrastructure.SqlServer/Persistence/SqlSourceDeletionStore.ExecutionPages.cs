@@ -26,6 +26,7 @@ public sealed partial class SqlSourceDeletionStore
             .ExecuteDeleteAsync(ct).ConfigureAwait(false);
         await context.EmbeddingGpuRequests.Where(request=>tasks.Contains(request.MiniTaskId)).ExecuteDeleteAsync(ct).ConfigureAwait(false);
         await context.DocumentOcrRequests.Where(request=>tasks.Contains(request.MiniTaskId)).ExecuteDeleteAsync(ct).ConfigureAwait(false);
+        await context.MediaTranscriptionGpuRequests.Where(request=>tasks.Contains(request.MiniTaskId)).ExecuteDeleteAsync(ct).ConfigureAwait(false);
         await context.GpuMiniTasks.Where(task=>tasks.Contains(task.Id)).ExecuteDeleteAsync(ct).ConfigureAwait(false);
         // A batch can span pages. Preserve its identity/count and batch-wide
         // receipts until the final task leaves; never retire an unselected task.

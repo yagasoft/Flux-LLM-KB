@@ -233,6 +233,40 @@ public sealed class StageWorkerTests
     }
 
     [Fact]
+    public async Task Normalise_indexes_a_native_transcript_as_timed_text()
+    {
+        var transitions = new RecordingTransitionStore();
+        var worker = new NormaliseTextStageWorker(
+            new StubPipelineReader(new string('a', 64), "[00:00:01.000] cafe\u0301\r\n",
+                inputDocumentMetadataJson: """{"schema":"fluxknowledge/media-transcript-v1","cues":[{"startMillis":1000,"endMillis":2000}]}""",
+                inputIsNativeTranscript: true),
+            CreateTransitionService(transitions),
+            new FixedTimeProvider());
+
+        await worker.ExecuteAsync(CreateWork(PipelineStage.Normalise, PipelineOperations.NormaliseText), default);
+
+        var transition = Assert.Single(transitions.Transitions);
+        Assert.Equal("[00:00:01.000] café\n", transition.Artifact.SearchText);
+        Assert.Null(transition.Artifact.DocumentMetadataJson);
+        Assert.Equal(PipelineStage.CanonicalIndex, transition.NextStage);
+    }
+
+    [Fact]
+    public async Task Normalise_requires_the_current_transcript_metadata_schema_for_the_native_route()
+    {
+        var transitions = new RecordingTransitionStore();
+        var worker = new NormaliseTextStageWorker(new StubPipelineReader(new string('a', 64), "text",
+            inputDocumentMetadataJson: """{"schema":"another-version"}""", inputIsNativeTranscript: true),
+            CreateTransitionService(transitions), new FixedTimeProvider());
+
+        var error = await Assert.ThrowsAsync<InvalidOperationException>(() =>
+            worker.ExecuteAsync(CreateWork(PipelineStage.Normalise, PipelineOperations.NormaliseText), default).AsTask());
+
+        Assert.Equal("transcription-metadata-invalid", error.Message);
+        Assert.Empty(transitions.Transitions);
+    }
+
+    [Fact]
     public async Task Normalise_preserves_document_page_provenance_after_text_normalisation()
     {
         var extracted = DocumentOcrProvenance.Merge(
@@ -459,7 +493,8 @@ public sealed class StageWorkerTests
         SourceRevisionId? retainedSourceRevisionId = null,
         string? retainedSourceClassification = null,
         string? retainedSourceExtension = null,
-        string? inputDocumentMetadataJson = null)
+        string? inputDocumentMetadataJson = null,
+        bool inputIsNativeTranscript = false)
         : IPipelineStageReader
     {
         public ValueTask<PipelineStageSource> ReadStageSourceAsync(
@@ -477,7 +512,8 @@ public sealed class StageWorkerTests
                     retainedSourceRevisionId,
                     retainedSourceClassification,
                     retainedSourceExtension,
-                    inputDocumentMetadataJson));
+                    inputDocumentMetadataJson,
+                    inputIsNativeTranscript));
     }
 
     private sealed class StubPdfDocumentExtractor(DocumentExtractionResult result) : IPdfDocumentExtractor

@@ -214,7 +214,9 @@ public sealed partial class SqlSourceDeletionStore(
                     .ConfigureAwait(false);
             var unconfirmedEmbeddingCleanup = await context.EmbeddingGpuRequests.AnyAsync(value => recordIds.Contains(value.PipelineRecordId) &&
                 value.ExecutorInstanceId != null && !value.NativeCleanupConfirmed, cancellationToken).ConfigureAwait(false);
-            if (activeLocalTaskIds.Length > 0 || unconfirmedEmbeddingCleanup)
+            var unconfirmedMediaCleanup = await SqlSourceDeletionOwnership.HasUnconfirmedMediaWorkAsync(context, root.Id,
+                cancellationToken).ConfigureAwait(false);
+            if (activeLocalTaskIds.Length > 0 || unconfirmedEmbeddingCleanup || unconfirmedMediaCleanup)
             {
                 var activeOcrTasks = activeLocalTaskIds.Where(localOcrTaskSet.Contains).ToArray();
                 if (activeOcrTasks.Length > 0 && !(localOcrExecutions is not null && activeOcrTasks.Any(localOcrExecutions.RequestCancellation)))
@@ -781,6 +783,7 @@ public sealed partial class SqlSourceDeletionStore(
             .Where(request => recordIds.Contains(request.PipelineRecordId))
             .Select(request => request.MiniTaskId)
             .Union(context.EmbeddingGpuRequests.Where(request => recordIds.Contains(request.PipelineRecordId)).Select(request => request.MiniTaskId))
+            .Union(context.MediaTranscriptionGpuRequests.Where(request => recordIds.Contains(request.PipelineRecordId)).Select(request => request.MiniTaskId))
             .ToArrayAsync(cancellationToken)
             .ConfigureAwait(false);
         if (await context.EmbeddingGpuRequests.AnyAsync(request => recordIds.Contains(request.PipelineRecordId) &&

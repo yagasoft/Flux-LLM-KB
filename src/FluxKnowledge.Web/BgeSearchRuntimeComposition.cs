@@ -22,19 +22,24 @@ internal static class BgeSearchRuntimeComposition
     // Provisional conservative admission estimate; real peak/latency gates still apply before activation.
     private const long EstimatedGpuBytes = 8L * 1024 * 1024 * 1024;
     private static readonly TimeSpan SearchExecutionTimeout = TimeSpan.FromSeconds(20);
-    internal static void Add(IServiceCollection services, bool enableWindowBackfill)
+    internal static void Add(IServiceCollection services, bool enableWindowBackfill,
+        MediaTranscriptionGpuRuntime? transcription = null)
     {
-        var policy = new GpuWorkloadPolicy([
+        var profiles = new List<GpuWorkloadProfile>
+        {
             new(PaddleOcrVlmRuntimeContract.ModelRuntimeKey, PaddleOcrVlmRuntimeContract.SettingsFingerprint, GpuWorkloadKind.Ocr),
             new(BgeOfflineModels.GpuRuntimeKey, BgeOfflineModels.GpuSettingsFingerprint, GpuWorkloadKind.Retrieval),
-            new(BgeExpandedGpuRankBackend.Profile.RuntimeKey, BgeExpandedGpuRankBackend.Profile.SettingsFingerprint, GpuWorkloadKind.Retrieval)]);
+            new(BgeExpandedGpuRankBackend.Profile.RuntimeKey, BgeExpandedGpuRankBackend.Profile.SettingsFingerprint, GpuWorkloadKind.Retrieval)
+        };
+        if (transcription is not null) profiles.Add(transcription.WorkloadProfile);
+        var policy = new GpuWorkloadPolicy(profiles);
         var runtime = new EmbeddingGpuRuntime(BgeOfflineModels.GpuRuntimeKey, BgeOfflineModels.GpuSettingsFingerprint,
             new(BgeOfflineModels.EmbeddingFingerprint, 1024), EstimatedGpuBytes);
         services.AddSingleton(runtime);
         services.Replace(ServiceDescriptor.Singleton(new GpuSchedulerOptions(1, EstimatedGpuBytes,
             TimeSpan.FromMinutes(5), TimeSpan.FromMinutes(1), TimeSpan.FromMinutes(10), policy)));
         services.Replace(ServiceDescriptor.Singleton<IGpuAdmissionGate>(new SharedGpuAdmissionGate(policy,
-            EmbeddingGpuExecutor.Name, EstimatedGpuBytes)));
+            EmbeddingGpuExecutor.Name, EstimatedGpuBytes, transcription)));
         services.TryAddSingleton(_ => CreateModelStores());
         services.AddSingleton<IBgeGpuModelFactory, BgeGpuModelFactory>();
         services.AddSingleton<BgeGpuInferenceSession>();

@@ -272,6 +272,9 @@ public sealed class WebHostCompositionTests : IDisposable
         Assert.Equal(TimeSpan.FromSeconds(20), executionTimeout?.GetValue(interactive));
         Assert.Contains(provider.GetServices<IGpuExecutorAdapter>(), value => value is EmbeddingGpuExecutor);
         Assert.Contains(provider.GetServices<IGpuExecutorAdapter>(), value => value is PaddleOcrVlmExecutorAdapter);
+        Assert.Contains(provider.GetServices<IGpuExecutorAdapter>(), value => value is MediaTranscriptionGpuExecutor);
+        Assert.DoesNotContain(scope.ServiceProvider.GetRequiredService<OutboxWorkerRegistration>().Operations,
+            operation => operation == MediaTranscriptionGpuContracts.Operation);
         Assert.IsType<SqlEmbeddingGpuRequestStore>(scope.ServiceProvider.GetRequiredService<IEmbeddingGpuHandoff>());
         Assert.IsType<ExpandedPassageRetrieval>(scope.ServiceProvider.GetRequiredService<IHybridPassageRetrieval>());
         Assert.IsType<HybridPassageRetrievalEngine>(scope.ServiceProvider.GetRequiredService<HybridPassageRetrievalEngine>());
@@ -410,6 +413,9 @@ public sealed class WebHostCompositionTests : IDisposable
         });
         using var scope = provider.CreateScope();
         Assert.IsType<PaddleOcrVlmAdmissionGate>(provider.GetRequiredService<IGpuAdmissionGate>());
+        Assert.Contains(provider.GetServices<IGpuExecutorAdapter>(), adapter => adapter is MediaTranscriptionGpuExecutor);
+        Assert.DoesNotContain(scope.ServiceProvider.GetRequiredService<OutboxWorkerRegistration>().Operations,
+            operation => operation == MediaTranscriptionGpuContracts.Operation);
         Assert.IsType<PaddleOcrVlmModelGate>(provider.GetRequiredService<PaddleOcrVlmModelGate>());
         Assert.IsType<PaddleOcrVlmLocalExecutor>(scope.ServiceProvider.GetRequiredService<IDocumentOcrExecutor>());
         Assert.IsType<SqlDocumentOcrStore>(scope.ServiceProvider.GetRequiredService<IDocumentOcrHandoff>());

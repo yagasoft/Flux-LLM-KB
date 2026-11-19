@@ -90,8 +90,9 @@ including Deleting roots, without repeating a correlated assessment for each fil
 ZIP and TAR processing enforce archive bounds and member path rules. Office Open
 XML extraction produces one logical UTF-8 result for the original DOCX/XLSX/PPTX.
 Document package members are not separately published corpus documents. Ordinary
-retained UTF-8 is limited to 32 MiB; the bounded Office extracted-text result can
-reach 200 MiB. OOXML v4 permits 128 MiB XML parts and streams XML without an
+retained physical UTF-8 and the bounded Office extracted-text result can reach
+200 MiB. Other derived text retains its existing 32 MiB read and registration
+limit. OOXML v4 permits 128 MiB XML parts and streams XML without an
 element-count ceiling; the separately versioned Visio parser keeps its 64 MiB
 part and two-million-element budgets. Total XML expansion remains 512 MiB with a
 finite depth limit; compression ratios apply to XML opened for extraction, not unopened
@@ -99,6 +100,32 @@ binary media. ZIP expansion permits two nested ZIP levels with one cumulative
 entry and expansion budget. Media metadata uses a protected retained
 stream up to 1 GiB, with a separate 96 MiB parser-read budget; it does not decode
 or publish the media payload.
+
+Native transcription uses a separate Extract job and the ordinary SQL outbox.
+The same bounded registration checks apply to new observations and to expressly
+named catch-up revision IDs. Source roots opt in through
+`MediaTranscription:SourceRootIds` with a UTC `AfterUtc` and up to 16
+`CatchUpRevisionIds`. The shared GPU and source-worker configuration is
+required. The default configuration has no opt-in roots. Discovery verifies
+the current physical and retained file and holds ambiguous adjacent transcript
+candidates for review.
+
+The GPU adapter admits one task in the existing background video lane. The
+native child starts only after durable permission and Windows job containment.
+Settlement requires exact process cleanup evidence. The worker applies the
+Egyptian Arabic and English code-switching profile when language sampling
+supports Arabic or Arabic and English. The transcript is flushed to a private
+pending file before the GPU job settles. The original extraction job then saves
+a UTF-8 file named `<recording name>.transcript.txt` beside the recording.
+The normal source scanner classifies and indexes it as text. SQL retains a
+receipt and the ordinary search index. The recording and transcript each have
+their own status in the file drawer.
+
+Published catch-up results are eligible for conversion only for the configured
+exact revision IDs. The conversion keeps the previous publication until it
+verifies ordinary extraction and passage coverage through the last cue. It
+then withdraws the former transcript publication and preserves the native
+cleanup receipt, language evidence and cue timing.
 
 OOXML v4 resolves extension-default content types, package-rooted internal
 relationships and valid empty directory markers without following external
@@ -251,7 +278,9 @@ Actual read deltas commit atomically with successful receipts. Abandoned unfinis
 attempts leave a sticky lower-bound measurement flag, independently of whether
 the cycle's integrity receipts eventually complete successfully.
 
-New roots default to 32 MiB strict UTF-8 text and inert source-text indexing.
+All roots use the 200 MiB strict UTF-8 text limit. Existing stored file-size values
+are retained for historical configuration evidence. Native creation accepts the
+legacy file-size field for compatibility and applies the app's limit.
 Explicit root restrictions remain authoritative. The additional text extensions
 are RDL, INI, HTML, NDJSON, VTT and URL; content is indexed as text and never
 executed or followed. Applying revised defaults to an existing root is explicit.
@@ -655,11 +684,10 @@ epoch, without an old-passage or concurrent-model migration system.
 The selected pair is BGE-M3 and BGE-reranker-v2-m3, with GPU execution
 through the existing scheduler and optional validated CPU placement. Interactive
 ownership and runtime admission retain batch ownership, trusted release and
-recovery. The GPU path unloads models after each request/batch, and the
-scheduler guarantees an OCR turn after at most three new non-OCR
-retrieval/embedding admissions while OCR waits, without interrupting an active
-page. Identify OCR by validated runtime identity and preserve existing lanes;
-document OCR currently shares `DocumentIndexing` with other work. Keeping models
+recovery. The GPU path unloads models after each request or batch. An eligible
+interactive search takes the next free slot. Active OCR pages finish, and the
+existing background lane order and OCR FIFO apply when search has no eligible
+request. Document OCR currently shares `DocumentIndexing` with other work. Keeping models
 loaded on the GPU between requests is a separate enhancement requiring measured
 loading, memory and full-search benefit before retention-specific scheduler
 changes. The CPU fallback keeps verified model sessions resident in RAM.
@@ -727,7 +755,7 @@ The implementation has a locally verified complete-passage path from
 synthetic ingress through SQL/USearch publication to REST search and citation
 reading, including separate context headers and evidence v2 corpus epochs.
 The shared scheduler core also supports exclusive interactive ownership,
-bounded admission and the durable OCR turn exception. Both slices passed
+bounded admission and interactive search priority. The preceding baseline passed
 independent review. The combined engine, native adapter and rebuild flow are
 deployed. The corrected 35-input rebuild completed with 3,596 passages and the
 validation hold was released after healthy startup recovery. Background GPU
@@ -1110,7 +1138,7 @@ uncertainty, process recovery and source withdrawal checks cover this path.
 
 `Search:HybridPassagesEnabled` selects the shared runtime only when the
 complete existing local OCR/GPU runtime is enabled. It retains the existing physical
-slot, durable recovery loop and OCR turn policy. Singleton adapters call scoped
+slot, durable recovery loop and workload priority. Singleton adapters call scoped
 lifecycle services through fresh scopes. Model stores use pinned verified paths
 under `J:\Models`; DI construction loads no weights. Each GPU batch/request
 unloads its embedding session before any reranker session opens; the separate
@@ -1330,10 +1358,9 @@ writes or pending transactions reject that sample. Immutable evidence and graph
 deletion rely on their existing atomic versioned companion writes; this mode is
 not snapshot isolation for arbitrary direct SQL. The shared cache does not make
 its rejected samples usable. Both modes use the same Overview budget.
-Per-root text size limits are read as scalars inside the Overview's consistency
-boundary. The bulk current-activity query applies the exact eligibility proof,
-and the projection applies the captured limit to each matching file. This keeps the root configuration histogram out of the bulk activity plan.
-File drilldowns retain their independent two-second deadline.
+The bulk current-activity query applies the exact eligibility proof. The
+projection uses the shared text limit for each matching file. File drilldowns
+retain their independent five-second deadline.
 
 Attention detail remains independently read-only and paged in batches of 25,
 with its own loaded time, source scope and existing conservative fence.

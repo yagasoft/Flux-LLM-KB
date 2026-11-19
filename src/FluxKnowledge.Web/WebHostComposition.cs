@@ -29,6 +29,7 @@ using FluxKnowledge.Integrations.Files;
 using FluxKnowledge.Integrations.Windows;
 using FluxKnowledge.Integrations.Documents;
 using FluxKnowledge.Integrations.Models;
+using FluxKnowledge.Integrations.Media;
 using FluxKnowledge.Integrations.Outlook;
 using FluxKnowledge.Web.Components.Status;
 using FluxKnowledge.Web.Components.Sources;
@@ -218,6 +219,8 @@ public static class WebHostComposition
             allowedHostedServiceTypes.Add(typeof(GpuExecutorDispatchRecoveryService));
             allowedHostedServiceTypes.Add(typeof(PaddleOcrVlmCompletionRecoveryService));
         }
+        if (MediaTranscriptionComposition.ReadOptions(configuration).SourceRootIds.Count > 0)
+            allowedHostedServiceTypes.Add(typeof(MediaTranscriptionDiscoveryService));
         var hostedServiceTypes = services
             .Where(descriptor => descriptor.ServiceType == typeof(IHostedService))
             .Select(HostedServiceType)
@@ -590,6 +593,7 @@ public static class WebHostComposition
         services.AddScoped<LocalOperatorConnectionContext>();
         services.AddScoped<ILocalOperatorPolicy, LocalOperatorPolicy>();
         services.AddScoped<GuidedRecoveryActions>();
+        services.AddScoped<IFileAttentionPreferences, FileAttentionPreferences>();
         services.AddScoped<OperatorActionPageState>();
         services.AddScoped<RetainedRecoveryNativeCommands>();
         var localOcrEnabled = nativeRuntimeOptions?.LocalOcrEnabled == true;
@@ -601,14 +605,22 @@ public static class WebHostComposition
         var hybridSetting = configuration["Search:HybridPassagesEnabled"];
         if (hybridSetting is not null && !bool.TryParse(hybridSetting, out _))
             throw new InvalidOperationException("hybrid-search-setting-invalid");
-        if (bool.TryParse(hybridSetting, out var hybridEnabled) && hybridEnabled)
+        var hasHybridSearch = bool.TryParse(hybridSetting, out var hybridEnabled) && hybridEnabled;
+        var transcription = MediaTranscriptionComposition.ReadOptions(configuration);
+        var transcriptionEnabled = transcription.SourceRootIds.Count > 0;
+        if (transcriptionEnabled && (!workersEnabled || !hasHybridSearch || !localOcrEnabled))
+            throw new InvalidOperationException("media-transcription-requires-the-shared-gpu-and-source-workers");
+        if (hasHybridSearch)
         {
             // Reuse the provisioned physical slot, OCR adapter and recovery graph.
             if (!localOcrEnabled) throw new InvalidOperationException("hybrid-search-requires-shared-ocr-runtime");
-            BgeSearchRuntimeComposition.Add(services, enableWindowBackfill: strictProductionPaths);
+            BgeSearchRuntimeComposition.Add(services, enableWindowBackfill: strictProductionPaths,
+                transcriptionEnabled ? MediaTranscriptionLocalRuntime.Profile : null);
         }
         if (localOcrEnabled)
         {
+            // Recover previously admitted work whenever the physical slot remains in service.
+            MediaTranscriptionComposition.Add(services, transcription);
             services.AddSingleton<IHostedService, PaddleOcrVlmCompletionRecoveryService>();
         }
         services.AddSingleton(OverviewReadOptions.FromConfiguration(configuration));

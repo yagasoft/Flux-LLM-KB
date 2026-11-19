@@ -18,7 +18,8 @@ establish successful extraction.
 | JPEG and PNG | Provisioned single-frame English OCR with encoded-orientation handling. | 64 MiB, 25 megapixels and a 6,000-pixel maximum edge. |
 | VSDX | Interactive Visio extraction through the logged-in companion. | Installed Visio required; refuses an existing user session; one logical document with page/shape provenance. |
 | Binary Office DOC, XLS and PPT | Retained with an explicit parser-unavailable state. | No supported binary Office text parser is currently registered. |
-| Other recognised image, audio and video formats | Bounded metadata extraction where a capability is registered; content extraction may remain deferred. | No general speech transcription, video understanding or image-captioning capability is promised. |
+| MP4, M4V, MOV, WAV and MP3 | Metadata indexing and, for explicitly configured filesystem roots, separately queued offline speech transcription. | Requires the pinned local runtime and exclusive shared GPU admission. Up to 1 GiB, 120 minutes of decoded audio and 20 minutes of worker execution. A same-name adjacent transcript candidate holds automatic transcription for review. Machine-generated transcripts need review. |
+| Other recognised image, audio and video formats | Bounded metadata extraction where a capability is registered. | Additional processing depends on the configured capability. |
 | Unknown, malformed, protected or policy-denied content | Named refusal or deferred state. | No silent coercion into text or unrestricted external parser fallback. |
 
 English OCR has known repeated-text fidelity limits. A page with both native

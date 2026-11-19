@@ -61,6 +61,65 @@ public sealed class SharedGpuOccupiedCapacityTests(NativeSqlServerFixture fixtur
     }
 
     [NativeSqlServerFact]
+    public async Task Media_transcription_is_single_item_and_holds_the_shared_slot_until_confirmed_release()
+    {
+        var runtime = new MediaTranscriptionGpuRuntime("synthetic-speech", "fixed-routing-v1", "owned-speech", 3072);
+        var policy = new GpuWorkloadPolicy([.. Policy.Profiles, runtime.WorkloadProfile]);
+        var gate = new SharedGpuAdmissionGate(policy, "retrieval-background", 4096, runtime);
+        var options = new GpuSchedulerOptions(8, 8192, TimeSpan.FromMinutes(5), TimeSpan.FromMinutes(1), TimeSpan.FromMinutes(10), policy);
+        var setup = new SqlGpuAdmissionTests(fixture);
+        var (factory, first, second) = await CreateAsync();
+        var firstSpeech = await setup.AddReadyAsync(factory, GpuPriorityLane.VideoOrUnknown, runtime.ModelRuntimeKey, runtime.SettingsFingerprint, runtime.EstimatedBytes);
+        var secondSpeech = await setup.AddReadyAsync(factory, GpuPriorityLane.VideoOrUnknown, runtime.ModelRuntimeKey, runtime.SettingsFingerprint, runtime.EstimatedBytes);
+        var store = new SqlGpuSchedulerStore(factory, sourceAdmission: new FixtureSourceAdmission(factory));
+
+        async Task<GpuExecutorBatchHandle> ActiveAsync()
+        {
+            await using var db = await factory.CreateDbContextAsync();
+            var slot = await db.GpuCapacitySlots.SingleAsync();
+            var dispatch = await db.GpuExecutorDispatches.SingleAsync(value => value.BatchId == slot.ActiveBatchId);
+            return new(dispatch.BatchId, dispatch.CapacitySlotKey, dispatch.ExecutorKey, dispatch.AdmissionGeneration, dispatch.DispatchId);
+        }
+
+        ValueTask<GpuSchedulerAdmissionRoundResult> ScheduleAsync() => store.RunAdmissionRoundAsync(Guid.NewGuid(),
+            GpuSchedulerWakeReason.WorkReady, options, gate.DecideAsync, CancellationToken.None);
+
+        Assert.Equal(GpuAdmissionDisposition.Admit, (await ScheduleAsync()).Disposition);
+        var retrieval = await ActiveAsync();
+        Assert.Equal("retrieval-background", retrieval.ExecutorKey);
+        Assert.Equal(GpuAdmissionDisposition.Busy, (await ScheduleAsync()).Disposition);
+        Assert.True((await store.AcknowledgeAsync(new(Guid.NewGuid(), retrieval), CancellationToken.None)).Accepted);
+        foreach (var task in new[] { first, second })
+        {
+            Assert.True((await store.RecordReceiptAsync(new(Guid.NewGuid(), retrieval, task, GpuMiniTaskBoundaryDisposition.Completed,
+                null, GpuExecutorEvidenceClass.TaskOutcomeConfirmed), CancellationToken.None)).Accepted);
+        }
+        Assert.True((await store.ApplyBatchCallbackAsync(Guid.NewGuid(), new(retrieval, GpuBatchCallbackKind.Completed,
+            [new(first, GpuMiniTaskBoundaryDisposition.Completed), new(second, GpuMiniTaskBoundaryDisposition.Completed)], true), CancellationToken.None)).Accepted);
+
+        Assert.Equal(GpuAdmissionDisposition.Admit, (await ScheduleAsync()).Disposition);
+        var speech = await ActiveAsync();
+        Assert.Equal(retrieval.CapacitySlotKey, speech.CapacitySlotKey);
+        Assert.Equal("owned-speech", speech.ExecutorKey);
+        await using (var verify = await factory.CreateDbContextAsync())
+        {
+            Assert.Equal(1, (await verify.GpuBatches.SingleAsync(value => value.Id == speech.BatchId)).ItemCount);
+            Assert.Equal((int)GpuMiniTaskExecutionState.Active, (await verify.GpuMiniTasks.SingleAsync(value => value.Id == firstSpeech)).ExecutionState);
+            Assert.Equal((int)GpuMiniTaskExecutionState.Ready, (await verify.GpuMiniTasks.SingleAsync(value => value.Id == secondSpeech)).ExecutionState);
+        }
+
+        await setup.AddReadyAsync(factory, GpuPriorityLane.DocumentIndexing, "synthetic-retrieval", "fixed-search-settings", 1024);
+        Assert.True((await store.AcknowledgeAsync(new(Guid.NewGuid(), speech), CancellationToken.None)).Accepted);
+        Assert.True((await store.RecordReceiptAsync(new(Guid.NewGuid(), speech, firstSpeech, GpuMiniTaskBoundaryDisposition.Completed,
+            new byte[32], GpuExecutorEvidenceClass.TaskOutcomeConfirmed), CancellationToken.None)).Accepted);
+        Assert.Equal(GpuAdmissionDisposition.Busy, (await ScheduleAsync()).Disposition);
+        Assert.True((await store.ApplyBatchCallbackAsync(Guid.NewGuid(), new(speech, GpuBatchCallbackKind.Completed,
+            [new(firstSpeech, GpuMiniTaskBoundaryDisposition.Completed)], true), CancellationToken.None)).Accepted);
+        Assert.Equal(GpuAdmissionDisposition.Admit, (await ScheduleAsync()).Disposition);
+        Assert.Equal("retrieval-background", (await ActiveAsync()).ExecutorKey);
+    }
+
+    [NativeSqlServerFact]
     public async Task Concurrent_production_gate_rounds_keep_one_reservation_and_one_ready_task()
     {
         var (factory, _, _) = await CreateAsync();

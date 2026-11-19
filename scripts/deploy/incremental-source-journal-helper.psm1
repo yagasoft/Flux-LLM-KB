@@ -186,6 +186,47 @@ function Restore-SourceJournalHelperPolicy($State){
     Remove-Item -LiteralPath $State.Policy.Path -Force -ErrorAction Stop
     $State.Policy.RollbackVerified=$true
 }
+function Move-SourceJournalHelperPredecessor($State,$Ports) {
+    # Directory.Move is a same-volume rename to this exact name. It cannot merge
+    # the predecessor into an existing directory or fall back to a copy.
+    $timer=[Diagnostics.Stopwatch]::StartNew()
+    $delays=@(500,1000,2000)
+    for ($attempt=0; ; $attempt++) {
+        try {
+            [IO.Directory]::Move($State.PayloadRoot,$State.PreviousRoot)
+            return
+        } catch {
+            $failure=$_.Exception.GetBaseException()
+            # HRESULT_FROM_WIN32(ERROR_SHARING_VIOLATION / ERROR_LOCK_VIOLATION).
+            if ($failure -isnot [IO.IOException] -or $failure.HResult -notin @(-2147024864,-2147024863)) { throw }
+            $nativeCode=$failure.HResult -band 65535
+            if ($attempt -ge $delays.Count -or $timer.Elapsed.TotalSeconds -ge 30) {
+                throw [IO.IOException]::new("journal-helper-predecessor-rename-lock: win32=$nativeCode attempts=$($attempt+1) elapsed_ms=$($timer.ElapsedMilliseconds)",$failure)
+            }
+        }
+        Start-Sleep -Milliseconds $delays[$attempt]
+        # Do not stop or restart anything to clear a lock. The caller's stopped
+        # application/hold proof, native exit proof and task and policy bindings
+        # must still hold for exactly the two reviewed directory payloads.
+        &$Ports.AssertApplicationStopped
+        &$Ports.AssertExited
+        Assert-SourceJournalHelperBindings $State $Ports
+        $task=&$Ports.ReadTask
+        if ($task.Enabled -or $task.Running) { throw 'journal-helper-rename-stopped-task-changed' }
+        $parent=[IO.Path]::GetDirectoryName($State.PreviousRoot)
+        $lease=[FluxSourceAccessInstallFile]::OpenPrivateDirectory($parent)
+        try {
+            if (@([IO.Directory]::EnumerateFileSystemEntries($parent,[IO.Path]::GetFileName($State.PreviousRoot))).Count -or
+                (Get-SourceJournalHelperPayloadManifest $State.PayloadRoot).Sha256 -cne $State.OriginalPayloadSha256 -or
+                (Get-SourceJournalHelperPayloadManifest $State.CandidateRoot).Sha256 -cne $State.CandidatePayloadSha256) {
+                throw 'journal-helper-predecessor-rename-evidence-changed'
+            }
+        } finally { $lease.Dispose() }
+        if ($timer.Elapsed.TotalSeconds -ge 30) {
+            throw [IO.IOException]::new("journal-helper-predecessor-rename-deadline: win32=$nativeCode attempts=$($attempt+1) elapsed_ms=$($timer.ElapsedMilliseconds)",$failure)
+        }
+    }
+}
 function Invoke-SourceJournalHelperUpdate {
     param([Parameter(Mandatory)][hashtable]$State,[Parameter(Mandatory)][hashtable]$Ports)
     foreach($port in @('ReadTask','AssertApplicationStopped','DisableTask','StopTask','AssertExited','EnableTask','StartTask','Probe')){
@@ -203,7 +244,7 @@ function Invoke-SourceJournalHelperUpdate {
     try{
         Stop-SourceJournalHelperForUpdate $State $Ports
         Assert-SourceJournalHelperBindings $State $Ports
-        Move-Item -LiteralPath $State.PayloadRoot -Destination $State.PreviousRoot -ErrorAction Stop
+        Move-SourceJournalHelperPredecessor $State $Ports
         $State.OldPayloadMoved=$true
         Move-Item -LiteralPath $State.CandidateRoot -Destination $State.PayloadRoot -ErrorAction Stop
         $State.CandidatePlaced=$true

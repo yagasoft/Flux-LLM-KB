@@ -1,5 +1,7 @@
 [CmdletBinding()]
-param([string]$SourceRoot=(Split-Path -Parent (Split-Path -Parent $PSScriptRoot)),[switch]$Outlook,[switch]$CodexWorkspace)
+param([string]$SourceRoot=(Split-Path -Parent (Split-Path -Parent $PSScriptRoot)),[switch]$Outlook,[switch]$CodexWorkspace,[switch]$MediaTranscription)
+$ApplyMediaTranscriptionGpuMigration=$MediaTranscription
+$mediaConfigurationChange=$null
 $ErrorActionPreference='Stop';Set-StrictMode -Version Latest
 $ApplyOutlookWatchedSourceMigration=$Outlook
 $ApplyCodexWorkspaceNotesMigration=$CodexWorkspace
@@ -18,14 +20,64 @@ function Load([string]$Name){
  . ([scriptblock]::Create('function script:'+$Name+' '+$node[0].Body.Extent.Text))
 }
 Load 'Assert-PassageWindowEligibilityUpdateOptions'
-$mode = if ($CodexWorkspace) { 'ApplyCodexWorkspaceNotesMigration' } elseif ($Outlook) { 'ApplyOutlookWatchedSourceMigration' } else { 'ApplyPassageWindowEligibilityMigration' }
+$mode = if ($MediaTranscription) { 'ApplyMediaTranscriptionGpuMigration' } elseif ($CodexWorkspace) { 'ApplyCodexWorkspaceNotesMigration' } elseif ($Outlook) { 'ApplyOutlookWatchedSourceMigration' } else { 'ApplyPassageWindowEligibilityMigration' }
 $good=@{$mode=$true;ExpectedSourceJournalDatabaseIdentity='owned'}
+if ($MediaTranscription) {
+    $unbound=$good.Clone()
+    foreach ($operation in @('PlanOnly','Apply')) {
+        $unbound[$operation]=$true
+        $unbound.ReviewedSourceJournalPayloads=@('Web=reviewed','Cli=reviewed','OutlookHost=reviewed')
+        Refuse { Assert-PassageWindowEligibilityUpdateOptions $unbound }
+        $unbound.Remove($operation)
+    }
+    $good.MediaTranscriptionOptionsPath='fixture.json'
+    $good.ExpectedMediaTranscriptionOptionsSha256='A'*64
+    $bound=$good.Clone()
+    $bound.Apply=$true
+    $bound.ReviewedSourceJournalPayloads=@('Web=reviewed','Cli=reviewed','OutlookHost=reviewed')
+    Refuse { Assert-PassageWindowEligibilityUpdateOptions $bound }
+    $bound.ExpectedMediaConfigurationBeforeSha256='B'*64
+    Refuse { Assert-PassageWindowEligibilityUpdateOptions $bound }
+    $bound.ExpectedMediaConfigurationAfterSha256='C'*64
+    Assert-PassageWindowEligibilityUpdateOptions $bound
+    foreach ($operation in @($good,$bound)) {
+        $continuation=$operation.Clone()
+        $continuation.ContinueHeldMediaTranscriptionRelease='20261119T000000Z-aaaaaaaaaaaa'
+        Refuse { Assert-PassageWindowEligibilityUpdateOptions $continuation }
+        $continuation.ExpectedUnattemptedPassageWindowBindingSha256='D'*64
+        Assert-PassageWindowEligibilityUpdateOptions $continuation
+        $continuation.ContinueHeldMediaTranscriptionRelease='../foreign'
+        Refuse { Assert-PassageWindowEligibilityUpdateOptions $continuation }
+    }
+    $bound.ExpectedMediaConfigurationBeforeSha256='invalid'
+    Refuse { Assert-PassageWindowEligibilityUpdateOptions $bound }
+}
 Assert-PassageWindowEligibilityUpdateOptions $good
-foreach($otherMode in @('ApplyCodexWorkspaceNotesMigration','ApplyOutlookWatchedSourceMigration','ApplyPassageWindowEligibilityMigration') | Where-Object { $_ -ne $mode }){
+foreach($otherMode in @('ApplyMediaTranscriptionGpuMigration','ApplyCodexWorkspaceNotesMigration','ApplyOutlookWatchedSourceMigration','ApplyPassageWindowEligibilityMigration') | Where-Object { $_ -ne $mode }){
  $bad=$good.Clone();$bad[$otherMode]=$true;Refuse {Assert-PassageWindowEligibilityUpdateOptions $bad}
 }
 foreach($flag in @('ApplyMigrations','ApplyVectorPublicationMetadataMigration','RecoverStoppedPool','EnableDashboardSnapshots','DisableSourceAccessRecovery','ApplyIncrementalSourceScanning')){
  $bad=$good.Clone();$bad[$flag]=$true;Refuse {Assert-PassageWindowEligibilityUpdateOptions $bad}
+}
+if ($MediaTranscription) {
+    Load 'Assert-IncrementalIisPreflight'
+    $ApplyOcrLifecycleRecovery=$ApplyResumableSourceDeletionCleanupMigration=$RecoverStoppedPool=$ApplySegmentedIndexProjection=$false
+    $ResumeHybridRebuildRelease=$ResumeHybridPatchRelease=''
+    $SiteName='FluxKnowledge'
+    $CanonicalDeployRoot=$CanonicalRecoveryRoot=$SourceRoot
+    $script:stoppedProofs=0
+    function Get-Website { @{physicalPath=$CanonicalDeployRoot;applicationPool='FluxKnowledge';State='Started'} }
+    function Get-WebAppPoolState { @{Value='Stopped'} }
+    function Get-WebBinding { @{bindingInformation='127.0.0.1:5137:'} }
+    function Assert-CanonicalPath {}
+    function Assert-NotReparsePoint {}
+    function Test-ApplicationPayload {}
+    function Assert-StoppedPoolRecoveryBaseline { $script:stoppedProofs++ }
+    $ContinueHeldMediaTranscriptionRelease=''
+    Refuse { Assert-IncrementalIisPreflight }
+    $ContinueHeldMediaTranscriptionRelease='20261119T000000Z-aaaaaaaaaaaa'
+    Assert-IncrementalIisPreflight
+    Check ($script:stoppedProofs -eq 1) 'Held continuation did not prove the stopped pool.'
 }
 Load 'Invoke-PassageWindowEligibilityStoppedAttempt'
 $script:attempts=0;$script:reads=0;$sourceJournalHelperState=@{Completed=$false}
@@ -63,13 +115,13 @@ Load 'Assert-PassageWindowEligibilityActivation'
 function Get-DeploymentSqlConnectionString {'owned-web'}
 function Get-RepositoryRecoveryCompanionConnectionString {'owned-companion'}
 function Get-PassageWindowEligibilityDatabaseState {
- param($ConnectionString,[switch]$Outlook,[switch]$CodexWorkspace)
- Check ($Outlook -eq $ApplyOutlookWatchedSourceMigration -and $CodexWorkspace -eq $ApplyCodexWorkspaceNotesMigration) 'Database observation used the wrong migration mode.'
+ param($ConnectionString,[switch]$Outlook,[switch]$CodexWorkspace,[switch]$MediaTranscription)
+ Check ($MediaTranscription -eq $ApplyMediaTranscriptionGpuMigration -and $Outlook -eq $ApplyOutlookWatchedSourceMigration -and $CodexWorkspace -eq $ApplyCodexWorkspaceNotesMigration) 'Database observation used the wrong migration mode.'
  $ConnectionString
 }
 function Get-PassageWindowEligibilityStateKind {
- param($DatabaseState,$ExpectedDatabaseIdentity,[switch]$Outlook,[switch]$CodexWorkspace)
- Check ($Outlook -eq $ApplyOutlookWatchedSourceMigration -and $CodexWorkspace -eq $ApplyCodexWorkspaceNotesMigration -and $DatabaseState -ceq 'owned-companion') 'Companion validation used the wrong observation or migration mode.'
+ param($DatabaseState,$ExpectedDatabaseIdentity,[switch]$Outlook,[switch]$CodexWorkspace,[switch]$MediaTranscription)
+ Check ($MediaTranscription -eq $ApplyMediaTranscriptionGpuMigration -and $Outlook -eq $ApplyOutlookWatchedSourceMigration -and $CodexWorkspace -eq $ApplyCodexWorkspaceNotesMigration -and $DatabaseState -ceq 'owned-companion') 'Companion validation used the wrong observation or migration mode.'
  Record 'exact-successor';'New'
 }
 function Confirm-PassageWindowEligibilityMigrationOutcome {

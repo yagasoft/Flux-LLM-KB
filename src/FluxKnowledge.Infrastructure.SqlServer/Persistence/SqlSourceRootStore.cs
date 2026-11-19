@@ -134,7 +134,7 @@ public sealed class SqlSourceRootStore(
             IncludePatternsJson = configuration.IncludePatternsJson,
             ExcludePatternsJson = configuration.ExcludePatternsJson,
             FollowLinks = request.FollowLinks,
-            MaximumFileBytes = request.MaximumFileBytes,
+            MaximumFileBytes = configuration.MaximumFileBytes,
             AllowedClassificationsJson = configuration.AllowedClassificationsJson,
             CrawlMode = (int)request.DiscoveryMode,
             ReconciliationCadenceSeconds = checked((long)request.ReconciliationCadence.TotalSeconds),

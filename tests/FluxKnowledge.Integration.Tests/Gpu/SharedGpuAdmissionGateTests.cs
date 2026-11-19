@@ -35,6 +35,55 @@ public sealed class SharedGpuAdmissionGateTests
     }
 
     [Fact]
+    public async Task Media_transcription_requires_the_exact_opted_in_runtime_and_one_background_item()
+    {
+        var runtime = new MediaTranscriptionGpuRuntime("local-asr-bundle-v1", "language-routing-v1",
+            "owned-media-transcription", 3072);
+        var gate = new SharedGpuAdmissionGate(new GpuWorkloadPolicy([.. Policy.Profiles, runtime.WorkloadProfile]),
+            "retrieval-background", 4096, runtime);
+        var candidate = new GpuBatchCandidate(GpuPriorityLane.VideoOrUnknown, runtime.ModelRuntimeKey,
+            runtime.SettingsFingerprint, 1, runtime.EstimatedBytes);
+        var admitted = await gate.DecideAsync(candidate, CancellationToken.None);
+        Assert.Equal(GpuAdmissionDisposition.Admit, admitted.Disposition);
+        Assert.Equal("owned-media-transcription", admitted.ExecutorKey);
+        Assert.Equal(PaddleOcrVlmRuntimeContract.CapacitySlotKey, admitted.CapacitySlotKey);
+        Assert.Equal(PaddleOcrVlmRuntimeContract.CapacityOwnerKey, admitted.OwnerKey);
+
+        var disabled = new SharedGpuAdmissionGate(Policy, "retrieval-background", 4096);
+        Assert.Equal(GpuAdmissionDisposition.Busy, (await disabled.DecideAsync(candidate, CancellationToken.None)).Disposition);
+        var invalid = new[]
+        {
+            candidate with { ModelRuntimeKey = "different-model" },
+            candidate with { SettingsFingerprint = "different-routing" },
+            candidate with { PriorityLane = GpuPriorityLane.InteractiveRetrieval },
+            candidate with { PriorityLane = GpuPriorityLane.DocumentIndexing },
+            candidate with { ItemCount = 2 },
+            candidate with { EstimatedBytes = 1 },
+            candidate with { EstimatedBytes = 3073 },
+            candidate with { RequiredExecutorKey = runtime.ExecutorKey }
+        };
+        foreach (var value in invalid)
+            Assert.Equal(GpuAdmissionDisposition.Busy, (await gate.DecideAsync(value, CancellationToken.None)).Disposition);
+    }
+
+    [Fact]
+    public void Media_transcription_configuration_refuses_inconsistent_or_colliding_ownership()
+    {
+        var runtime = new MediaTranscriptionGpuRuntime("local-asr-bundle-v1", "language-routing-v1",
+            "owned-media-transcription", 3072);
+        var policy = new GpuWorkloadPolicy([.. Policy.Profiles, runtime.WorkloadProfile]);
+        Assert.Throws<ArgumentException>(() => new SharedGpuAdmissionGate(policy, "retrieval-background", 4096));
+        Assert.Throws<ArgumentException>(() => new SharedGpuAdmissionGate(Policy, "retrieval-background", 4096, runtime));
+        var otherRuntime = new MediaTranscriptionGpuRuntime(runtime.ModelRuntimeKey, "wrong-settings", runtime.ExecutorKey, runtime.EstimatedBytes);
+        Assert.Throws<ArgumentException>(() => new SharedGpuAdmissionGate(policy, "retrieval-background", 4096, otherRuntime));
+        foreach (var reserved in new[] { PaddleOcrVlmRuntimeContract.ExecutorKey, "retrieval-background", $"retrieval-gpu:{Guid.NewGuid():N}" })
+        {
+            var collision = new MediaTranscriptionGpuRuntime(runtime.ModelRuntimeKey, runtime.SettingsFingerprint, reserved, runtime.EstimatedBytes);
+            Assert.Throws<ArgumentException>(() => new SharedGpuAdmissionGate(policy, "retrieval-background", 4096, collision));
+        }
+    }
+
+    [Fact]
     public async Task Unknown_profiles_wrong_owner_family_and_oversized_batches_fail_closed()
     {
         var gate = new SharedGpuAdmissionGate(Policy, "retrieval-background", 4096);

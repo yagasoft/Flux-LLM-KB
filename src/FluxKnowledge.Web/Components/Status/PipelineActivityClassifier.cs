@@ -14,7 +14,8 @@ public sealed record PipelineJobEvidence(
     bool IsDue = true,
     string? Reason = null,
     bool HasWaitingGpu = false,
-    bool HasPendingDispatch = true);
+    bool HasPendingDispatch = true,
+    int RemovalCleanupBlocker = 0);
 
 public sealed record PipelineJobClassification(PipelineWorkState State, string Reason);
 
@@ -25,6 +26,10 @@ public static class PipelineActivityClassifier
         ArgumentNullException.ThrowIfNull(evidence);
         if (evidence.HasActiveGpu || evidence.PublicState == PublicJobState.WorkerProcessing && evidence.HasWorkerLease)
             return new(PipelineWorkState.Running, evidence.IsHistorical ? "Processing a previous revision." : "Execution ownership confirmed.");
+        if (evidence.RemovalCleanupBlocker == 1)
+            return new(PipelineWorkState.Attention, "Worker cleanup is unconfirmed after source removal.");
+        if (evidence.RemovalCleanupBlocker == 2)
+            return new(PipelineWorkState.Attention, "GPU cleanup is unconfirmed after source removal.");
         if (evidence.IsHistorical)
             return new(PipelineWorkState.Historical, "Previous or withdrawn source binding; prior outcome retained.");
         if (evidence.PublicState == PublicJobState.Failed)

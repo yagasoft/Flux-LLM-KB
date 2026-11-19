@@ -321,19 +321,17 @@ public sealed class RetainedTextPipelineIntegrationTests(NativeSqlServerFixture 
     }
 
     [NativeSqlServerFact]
-    public async Task Retained_reader_rejects_artifacts_larger_than_the_32_mib_text_limit_before_reading_them()
+    public async Task Retained_reader_rejects_physical_text_above_200_mib_before_reading_it()
     {
-        const int maximumTextBytes = 32 * 1024 * 1024;
-        var bytes = new byte[maximumTextBytes + 1];
-        Array.Fill(bytes, (byte)'x');
-        var hash = Convert.ToHexStringLower(SHA256.HashData(bytes));
+        const int length = 200 * 1024 * 1024 + 1;
+        var hash = new string('f', 64);
         var root = Path.Combine(Path.GetTempPath(), $"flux-retained-{Guid.NewGuid():N}");
         var relative = Path.Combine("sha256", hash[..2], $"{hash}.bin");
         Directory.CreateDirectory(Path.Combine(root, "sha256", hash[..2]));
-        await File.WriteAllBytesAsync(Path.Combine(root, relative), bytes);
+        using (var stream = File.Create(Path.Combine(root, relative))) stream.SetLength(length);
         try
         {
-            var revisionId = await SeedRevisionAsync(hash, bytes.Length, relative);
+            var revisionId = await SeedRevisionAsync(hash, length, relative);
             using var reader = new SqlRetainedSourceReader(new ContextFactory(_fixture.ConnectionString), root);
             await Assert.ThrowsAsync<InvalidDataException>(() => reader
                 .ReadUtf8Async(new SourceRevisionId(revisionId), CancellationToken.None).AsTask());
@@ -348,11 +346,12 @@ public sealed class RetainedTextPipelineIntegrationTests(NativeSqlServerFixture 
     }
 
     [NativeSqlServerTheory]
+    [InlineData(0)]
     [InlineData(1)]
     [InlineData(2)]
     [InlineData(3)]
     [InlineData(4)]
-    public async Task Retained_reader_accepts_text_above_32_mib_only_for_the_single_completed_ooxml_child(int processorGeneration)
+    public async Task Retained_reader_accepts_text_above_32_mib_for_physical_inputs_and_exact_ooxml_children(int processorGeneration)
     {
         const int byteLength = 32 * 1024 * 1024 + 1;
         var bytes = Enumerable.Repeat((byte)'x', byteLength).ToArray();
@@ -364,7 +363,8 @@ public sealed class RetainedTextPipelineIntegrationTests(NativeSqlServerFixture 
         try
         {
             var revisionId = await SeedRevisionAsync(hash, bytes.Length, relative);
-            await BindCompletedOoxmlChildAsync(revisionId, hash, processorGeneration: processorGeneration);
+            if (processorGeneration != 0)
+                await BindCompletedOoxmlChildAsync(revisionId, hash, processorGeneration: processorGeneration);
 
             using var reader = new SqlRetainedSourceReader(new ContextFactory(_fixture.ConnectionString), root);
             var source = await reader.ReadUtf8Async(new SourceRevisionId(revisionId), CancellationToken.None);

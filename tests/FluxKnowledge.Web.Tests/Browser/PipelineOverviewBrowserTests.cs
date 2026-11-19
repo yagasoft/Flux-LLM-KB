@@ -1,4 +1,5 @@
 using System.Collections.Concurrent;
+using System.Diagnostics;
 using FluxKnowledge.Application.Contracts;
 using FluxKnowledge.Web.Components.Status;
 using Microsoft.Extensions.DependencyInjection;
@@ -7,12 +8,51 @@ using Microsoft.Extensions.Hosting;
 using Microsoft.Extensions.Logging;
 using Microsoft.Playwright;
 using Xunit;
+using Xunit.Abstractions;
 
 namespace FluxKnowledge.Web.Tests.Browser;
 
 [Trait("Category", "Browser")]
-public sealed class PipelineOverviewBrowserTests
+public sealed class PipelineOverviewBrowserTests(ITestOutputHelper output)
 {
+    [BrowserFact]
+    public async Task An_open_overview_updates_its_displayed_sample_after_a_background_source_event()
+    {
+        var reader = new ControlledOverviewReader();
+        var events = new StatusEventFeed();
+        var root = BrowserTestRoots.Create($"FluxSourceEvent_{Guid.NewGuid():N}");
+        Directory.CreateDirectory(root);
+        try
+        {
+            await using var host = await PhaseOneVerticalSliceBrowserTests.BrowserHost.StartAsync(
+                "Server=unreachable.invalid;Database=unreachable;Integrated Security=true;Encrypt=true;TrustServerCertificate=true",
+                root, Path.Combine(root, "indexes"), services =>
+                {
+                    services.RemoveAll<IHostedService>();
+                    services.RemoveAll<IProjectionReader>();
+                    services.AddSingleton<IProjectionReader>(reader);
+                    services.RemoveAll<StatusEventFeed>();
+                    services.AddSingleton(events);
+                });
+            using var playwright = await Playwright.CreateAsync();
+            await using var browser = await playwright.Chromium.LaunchAsync(BrowserLaunchOptions.Create());
+            await using var page = await browser.NewPageAsync();
+            await page.GotoAsync(host.BaseAddress.AbsoluteUri, new() { WaitUntil = WaitUntilState.NetworkIdle });
+            var sample = page.Locator(".pipeline-overview > .status-freshness time");
+            await Assertions.Expect(sample).ToBeVisibleAsync();
+            var initialSample = Assert.IsType<string>(await sample.GetAttributeAsync("datetime"));
+            Assert.Equal(2, await page.Locator(".source-progress-card").CountAsync());
+
+            reader.RemoveFirstRoot = true;
+            var elapsed = Stopwatch.StartNew();
+            await events.PublishAsync(new StatusChanged(null, "source", DateTimeOffset.UtcNow), default);
+            await Assertions.Expect(sample).Not.ToHaveAttributeAsync("datetime", initialSample, new() { Timeout = 5_000 });
+            await Assertions.Expect(page.Locator(".source-progress-card")).ToHaveCountAsync(1);
+            output.WriteLine($"Background source event to displayed sample: {elapsed.Elapsed.TotalMilliseconds:F0} ms.");
+        }
+        finally { if (Directory.Exists(root)) Directory.Delete(root, true); }
+    }
+
     [BrowserFact]
     public async Task A_current_issue_opens_its_source_files_and_restores_keyboard_focus_when_closed()
     {
@@ -43,12 +83,79 @@ public sealed class PipelineOverviewBrowserTests
                 await Assertions.Expect(page.Locator("#affected-files-heading")).ToBeFocusedAsync();
                 await Assertions.Expect(needsAttention.GetByText("report.pdf", new() { Exact = true })).ToBeVisibleAsync();
                 Assert.Equal(ControlledOverviewReader.SecondRoot, reader.LastFileScope);
+                var reasons = needsAttention.GetByRole(AriaRole.Group, new() { Name = "Filter by reason" });
+                await Assertions.Expect(reasons.GetByRole(AriaRole.Button, new() { Name = "Unavailable locally (1)" }))
+                    .ToHaveAttributeAsync("aria-pressed", "true");
+                await reasons.GetByRole(AriaRole.Button, new() { Name = "Document is corrupt (2)" }).ClickAsync();
+                await Assertions.Expect(reasons.GetByRole(AriaRole.Button, new() { Name = "Document is corrupt (2)" }))
+                    .ToHaveAttributeAsync("aria-pressed", "true");
+                Assert.Equal("pdf-document-invalid", reader.LastFileFilter?.Reason);
+                await reasons.GetByRole(AriaRole.Button, new() { Name = "All reasons (3)" }).ClickAsync();
+                await Assertions.Expect(reasons.GetByRole(AriaRole.Button, new() { Name = "All reasons (3)" }))
+                    .ToHaveAttributeAsync("aria-pressed", "true");
+                Assert.Null(reader.LastFileFilter?.Reason);
                 await ScreenshotAsync(page, $"action-inspector-{width}.png");
                 Assert.True(await page.EvaluateAsync<bool>("document.documentElement.scrollWidth <= window.innerWidth"));
                 await needsAttention.GetByRole(AriaRole.Button, new() { Name = "Close file details" }).PressAsync("Enter");
                 await Assertions.Expect(page.Locator("#attention-heading")).ToBeFocusedAsync();
                 await Assertions.Expect(page.Locator("#affected-files-heading")).ToBeHiddenAsync();
             }
+        }
+        finally { if (Directory.Exists(root)) Directory.Delete(root, true); }
+    }
+
+    [BrowserFact]
+    public async Task File_and_category_preferences_update_attention_and_can_be_removed()
+    {
+        var preferences = new TestFileAttentionPreferences();
+        var reader = new ControlledOverviewReader { ShowUnavailableFile = true, FilePreferences = preferences };
+        var root = BrowserTestRoots.Create($"FluxFilePreferences_{Guid.NewGuid():N}");
+        Directory.CreateDirectory(root);
+        try
+        {
+            await using var host = await PhaseOneVerticalSliceBrowserTests.BrowserHost.StartAsync(
+                "Server=unreachable.invalid;Database=unreachable;Integrated Security=true;Encrypt=true;TrustServerCertificate=true",
+                root, Path.Combine(root, "indexes"), services =>
+                {
+                    services.RemoveAll<IHostedService>();
+                    services.RemoveAll<IProjectionReader>();
+                    services.AddSingleton<IProjectionReader>(reader);
+                    services.RemoveAll<IFileAttentionPreferences>();
+                    services.AddSingleton<IFileAttentionPreferences>(preferences);
+                });
+            using var playwright = await Playwright.CreateAsync();
+            await using var browser = await playwright.Chromium.LaunchAsync(BrowserLaunchOptions.Create());
+            await using var page = await browser.NewPageAsync(new() { ViewportSize = new() { Width = 390, Height = 844 } });
+            await page.GotoAsync(host.BaseAddress.AbsoluteUri, new() { WaitUntil = WaitUntilState.NetworkIdle });
+            var attention = page.Locator("#pipeline-attention");
+            var review = attention.GetByRole(AriaRole.Button, new() { Name = "Review files", Exact = true });
+            var ignored = attention.GetByRole(AriaRole.Button, new() { Name = "Ignored files and rules" });
+            await review.ClickAsync();
+            await attention.GetByRole(AriaRole.Button, new() { Name = "Ignore file", Exact = true }).ClickAsync();
+            await Assertions.Expect(review).ToHaveCountAsync(0);
+            await Assertions.Expect(ignored).ToHaveTextAsync("Ignored files and rules (1)");
+            await ignored.ClickAsync();
+            await attention.GetByRole(AriaRole.Button, new() { Name = "Unignore file" }).ClickAsync();
+            await Assertions.Expect(review).ToBeVisibleAsync();
+
+            await review.ClickAsync();
+            await attention.GetByRole(AriaRole.Button, new() { Name = "Ignore binary file issues" }).ClickAsync();
+            var preview = attention.GetByRole(AriaRole.Group, new() { Name = "Confirm ignore rule" });
+            await Assertions.Expect(preview).ToContainTextAsync("Applies to Acceptance source");
+            Assert.Empty(preferences.Rules);
+            await preview.GetByRole(AriaRole.Button, new() { Name = "Ignore category" }).ClickAsync();
+            await Assertions.Expect(review).ToHaveCountAsync(0);
+            await ignored.ClickAsync();
+            await Assertions.Expect(attention.GetByText("Ignored by a rule")).ToBeVisibleAsync();
+            await attention.GetByRole(AriaRole.Button, new() { Name = "Remove rule" }).ClickAsync();
+            await Assertions.Expect(review).ToBeVisibleAsync();
+            Assert.Empty(preferences.Rules);
+            await attention.GetByRole(AriaRole.Button, new() { Name = "Add binary file rule" }).ClickAsync();
+            await Assertions.Expect(preview).ToContainTextAsync("Applies to all configured sources");
+            await preview.GetByRole(AriaRole.Button, new() { Name = "Cancel" }).ClickAsync();
+            await Assertions.Expect(preview).ToHaveCountAsync(0);
+            await ScreenshotAsync(page, "file-preferences-narrow.png");
+            Assert.True(await page.EvaluateAsync<bool>("document.documentElement.scrollWidth <= window.innerWidth"));
         }
         finally { if (Directory.Exists(root)) Directory.Delete(root, true); }
     }
@@ -396,7 +503,9 @@ public sealed class PipelineOverviewBrowserTests
         public string FirstRootLifecycle { get; set; } = "Enabled";
         public SourceJournalHealth? JournalHealth { get; set; }
         public bool ShowUnavailableFile { get; set; }
+        public TestFileAttentionPreferences? FilePreferences { get; set; }
         public Guid? LastFileScope { get; private set; }
+        public PipelineFileFilter? LastFileFilter { get; private set; }
         private TaskCompletionSource<PipelineAttentionPage>? _delayedAttention;
         private TaskCompletionSource _attentionStarted = new(TaskCreationOptions.RunContinuationsAsynchronously);
         public Task AttentionStarted => _attentionStarted.Task;
@@ -428,6 +537,11 @@ public sealed class PipelineOverviewBrowserTests
                 FileCauses = [new(SecondRoot, "Blocked", "SourceContentNotAvailableLocally",
                     "Make this file available in the sync client, then reconcile metadata.", 1)]
             } };
+            if (FilePreferences is { } preferences) projection = projection with { Activity = projection.Activity with
+            {
+                FileCauses = preferences.IsIgnored ? [] : projection.Activity.FileCauses,
+                FileAttention = [new(SecondRoot, preferences.IsIgnored ? 0 : 1, 0, 0, 0, preferences.IsIgnored ? 1 : 0)]
+            } };
             if (InconsistentReads) projection = projection with { Activity = projection.Activity with { IsConsistent = false } };
             return ValueTask.FromResult(RemoveFirstRoot ? projection with { Activity = projection.Activity with
             {
@@ -452,13 +566,54 @@ public sealed class PipelineOverviewBrowserTests
         public ValueTask<PipelineFilePage> ReadPipelineFilesAsync(PipelineFileFilter filter, Guid? sourceRootId, int page, CancellationToken ct)
         {
             LastFileScope = sourceRootId;
-            return ValueTask.FromResult(new PipelineFilePage(1, 0, 25, DateTimeOffset.UtcNow,
-                [new(SecondRoot, Guid.NewGuid(), "Acceptance source", "C:\\acceptance-source\\report.pdf", null,
+            LastFileFilter = filter;
+            var isIgnored = FilePreferences?.IsIgnored == true;
+            var includeFile = FilePreferences is null || (filter.Attention == PipelineFileAttentionScope.Ignored) == isIgnored;
+            var items = !includeFile ? Array.Empty<PipelineFileItem>() :
+                [new(SecondRoot, TestFileAttentionPreferences.Revision, "Acceptance source", "C:\\acceptance-source\\report.pdf", null,
                     "Blocked", "Extract", "Blocked", "SourceContentNotAvailableLocally",
-                    "Make this file available locally, then reconcile metadata.", [], [])]));
+                    "Make this file available locally, then reconcile metadata.", [], [])
+                    { CanIgnore = true, IsBinaryIssue = true, IsIgnored = isIgnored,
+                        IsIndividuallyIgnored = FilePreferences?.FileIgnored == true }];
+            return ValueTask.FromResult(new PipelineFilePage(items.Length, 0, 25, DateTimeOffset.UtcNow, items) { HasBinaryIssues = includeFile, Reasons =
+                FilePreferences is null
+                    ? [new("SourceContentNotAvailableLocally", "Unavailable locally", 1), new("pdf-document-invalid", "Document is corrupt", 2)]
+                    : includeFile ? [new("SourceContentNotAvailableLocally", "Unavailable locally", 1, "SourceContentNotAvailableLocally")] : [] });
         }
         public ValueTask<IReadOnlyList<PipelineRecordProjection>> ReadPipelineRecordsAsync(CancellationToken ct) => ValueTask.FromResult<IReadOnlyList<PipelineRecordProjection>>([]);
         public ValueTask<PipelineRecordProjection?> ReadPipelineRecordAsync(Guid id, CancellationToken ct) => ValueTask.FromResult<PipelineRecordProjection?>(null);
+    }
+
+    internal sealed class TestFileAttentionPreferences : IFileAttentionPreferences
+    {
+        public static readonly Guid Revision = Guid.Parse("33333333-3333-3333-3333-333333333333");
+        public bool CanManage => true;
+        public bool FileIgnored { get; private set; }
+        public List<PipelineAttentionRule> Rules { get; } = [];
+        public bool IsIgnored => FileIgnored || Rules.Count > 0;
+        public ValueTask SetFileIgnoredAsync(Guid sourceRootId, Guid sourceRevisionId, bool ignored, string? expectedVersion, CancellationToken cancellationToken)
+        {
+            Assert.Equal(ControlledOverviewReader.SecondRoot, sourceRootId);
+            Assert.Equal(Revision, sourceRevisionId);
+            FileIgnored = ignored;
+            return ValueTask.CompletedTask;
+        }
+        public ValueTask SetRuleIgnoredAsync(Guid? sourceRootId, PipelineAttentionRuleKind kind, string? reason, bool ignored,
+            string? expectedVersion, CancellationToken cancellationToken)
+        {
+            Assert.Equal(ControlledOverviewReader.SecondRoot, sourceRootId);
+            Assert.Equal(PipelineAttentionRuleKind.Binary, kind);
+            Assert.Null(reason);
+            if (ignored) Rules.Add(new(sourceRootId, kind, null, "Binary file issues", "test-rule-version"));
+            else
+            {
+                Assert.Equal("test-rule-version", expectedVersion);
+                Rules.Clear();
+            }
+            return ValueTask.CompletedTask;
+        }
+        public ValueTask<IReadOnlyList<PipelineAttentionRule>> ReadRulesAsync(Guid? sourceRootId, CancellationToken cancellationToken) =>
+            ValueTask.FromResult<IReadOnlyList<PipelineAttentionRule>>(Rules.ToArray());
     }
 
     private sealed class AttentionLogCapture : ILoggerProvider

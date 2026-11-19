@@ -12,7 +12,7 @@ internal static class OwnedOcrProcessSupervisor
     internal const string StartMessage = "fluxknowledge-ocr-go-v1";
 
     internal static async ValueTask<OwnedOcrProcessOutcome> RunAsync(ProcessStartInfo start,
-        DocumentOcrExecutionContext execution, CancellationToken cancellationToken)
+        DocumentOcrExecutionContext execution, CancellationToken cancellationToken, string startMessage = StartMessage)
     {
         var lease = execution.Lease;
         lease.Validate();
@@ -40,7 +40,7 @@ internal static class OwnedOcrProcessSupervisor
             if (!permission.Accepted) failure = permission.ReasonCode;
             else
             {
-                await process.StandardInput.WriteLineAsync(StartMessage.AsMemory(), cancellationToken).ConfigureAwait(false);
+                await process.StandardInput.WriteLineAsync(startMessage.AsMemory(), cancellationToken).ConfigureAwait(false);
                 await process.StandardInput.FlushAsync(cancellationToken).ConfigureAwait(false);
                 process.StandardInput.Close();
                 var remaining = lease.DeadlineAtUtc - DateTimeOffset.UtcNow;

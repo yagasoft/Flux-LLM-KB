@@ -154,6 +154,15 @@ function Move-IncrementalStoppedRecoveryHold {
     if($ReleaseId -cnotmatch '^\d{8}T\d{6}Z-[a-f0-9]{12}$' -or $ReleaseId -ceq $Binding.PriorReleaseId){throw 'stopped-release-new-owner-invalid'}
     if(Test-Path -LiteralPath $StatePath){throw 'stopped-release-transfer-reconciliation-required'}
     Assert-IncrementalStoppedRecoveryBinding $Binding
+    Write-IncrementalStoppedRecoveryHoldTransfer -Binding $Binding -ReleaseId $ReleaseId -StatePath $StatePath
+}
+
+# The caller has proved the stopped predecessor under the incremental deployment mutex.
+function Write-IncrementalStoppedRecoveryHoldTransfer {
+    param([hashtable]$Binding,[string]$ReleaseId,[string]$StatePath)
+    if($ReleaseId -cnotmatch '^\d{8}T\d{6}Z-[a-f0-9]{12}$' -or $ReleaseId -ceq $Binding.PriorReleaseId){throw 'stopped-release-new-owner-invalid'}
+    if(Test-Path -LiteralPath $StatePath){throw 'stopped-release-transfer-reconciliation-required'}
+    Assert-HybridDeploymentHoldOwner -Path $ValidationHoldPath -ReleaseId $Binding.PriorReleaseId
     $state=@{Version=1;Purpose='incremental-stopped-release-transfer';BindingSha256=$Binding.ReceiptSha256;
         PriorReleaseId=$Binding.PriorReleaseId;ReleaseId=$ReleaseId;HoldTransferIntentUtc=[datetime]::UtcNow.ToString('O');HoldTransferred=$false}
     Write-SegmentedUpdateJson $StatePath $state

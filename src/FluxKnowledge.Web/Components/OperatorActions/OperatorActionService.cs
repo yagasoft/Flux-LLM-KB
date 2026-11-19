@@ -32,6 +32,7 @@ public sealed class OperatorActionService(
 
 public interface ILocalOperatorPolicy
 {
+    bool CanManage => false;
     ValueTask EnsureMutationAllowedAsync(CancellationToken cancellationToken);
 }
 
@@ -43,10 +44,11 @@ public sealed class LocalOperatorConnectionContext(IHttpContextAccessor accessor
 
 public sealed class LocalOperatorPolicy(LocalOperatorConnectionContext connection) : ILocalOperatorPolicy
 {
+    public bool CanManage => connection.IsDirectLoopback;
     public ValueTask EnsureMutationAllowedAsync(CancellationToken cancellationToken)
     {
         cancellationToken.ThrowIfCancellationRequested();
-        return connection.IsDirectLoopback
+        return CanManage
             ? ValueTask.CompletedTask
             : ValueTask.FromException(new UnauthorizedAccessException("A direct loopback connection is required for operator actions."));
     }

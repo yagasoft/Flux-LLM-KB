@@ -60,7 +60,7 @@ public sealed class SqlOutlookCaptureStore(IDbContextFactory<FluxKnowledgeDbCont
                     IncludePatternsJson = "[]",
                     ExcludePatternsJson = "[]",
                     FollowLinks = false,
-                    MaximumFileBytes = 64L * 1024 * 1024,
+                    MaximumFileBytes = SourcePolicyDefaults.MaximumTextBytes,
                     AllowedClassificationsJson = "[]",
                     CrawlMode = 0,
                     ReconciliationCadenceSeconds = 86400,

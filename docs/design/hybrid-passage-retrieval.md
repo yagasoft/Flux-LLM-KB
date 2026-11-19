@@ -337,7 +337,7 @@ does not integrate search.
 - An active OCR page finishes normally. Background embedding batches start at
   four passages, with token/byte bounds and yielding between batches. Use existing
   status reporting for queue age, execution/loading/cleanup times and uncertain
-  capacity; add the OCR turn counter/reason without a new scheduling subsystem.
+  capacity.
 - Start with two admitted/waiting interactive requests machine-wide, a two-second
   admission wait and ten-second overall search deadline. These are provisional
   limits, separate from the proposed two-second healthy full-search p95 target.
@@ -352,48 +352,17 @@ late outputs cannot change the response. On shutdown, observe native execution
 and reconcile ownership. Apply DirectML's sequential-session requirements.
 The scheduler extension is a concurrency review gate, not a new scheduler.
 
-### OCR turns during sustained search traffic
+### Workload priority during sustained search traffic
 
-Use one bounded exception in the existing admission selector, initially
-`MaxSearchBatchesBeforeOcr = 3`. Preserve existing lane assignments: document OCR
-currently enters `DocumentIndexing`, also used for background embeddings. Identify
-OCR by its validated allowlisted runtime/workload identity, never by assuming
-that all OCR uses `ImageOcr` or all `DocumentIndexing` work is embedding work.
-While a valid OCR mini-task is waiting, admit at most three new **non-OCR**
-retrieval/embedding batches in total. At the next proven capacity release, select
-one oldest eligible OCR page across its existing applicable lanes by created
-sequence/ID before another retrieval/embedding batch. This is the sole exception
-to normal lane priority and FIFO selection; FIFO among OCR waiters is preserved.
-If no retrieval/embedding work is ready, admit OCR immediately. Finish that
-page without search-driven cancellation, then resume normal selection with a
-fresh allowance. A background batch contains at most four passages; a foreground
-batch contains one request, not an accumulating stream of searches.
+An eligible interactive request wins the next idle GPU slot. Native work
+already executing under a valid reservation finishes normally. Background
+work retains its existing lane order; OCR retains FIFO across eligible OCR
+lanes after an OCR task reaches the head. Background embedding batches yield
+after at most four passages. Interactive requests retain their admission
+deadline and declared CPU or lexical fallback behaviour.
 
-Keep one counter for this physical slot in the existing durable scheduler state.
-Increment only with a committed non-OCR retrieval/embedding admission while OCR
-is waiting; update it atomically with reservation and operation receipt. Duplicate admission
-replay, app restart, client timeout or a busy/deferred decision must not reset or
-double-count it. Reset on committed OCR admission, or when no valid OCR waiter
-remains. A waiter deferred only for capacity still preserves the allowance;
-source cancellation, deletion or loss of job eligibility removes that waiter.
-Re-evaluate validity under the same admission transaction. Do not reserve an OCR
-slot for an invalid or cancelled source.
-
-If the owed OCR turn cannot yet be admitted, honour its existing deferral/wake
-and recovery mechanisms without granting further retrieval/embedding bypasses.
-Expose the blocked reason. Once all OCR waiters lose eligibility, normal work
-can proceed. New interactive requests retain their bounded queue/deadline and
-may return declared lexical/fused fallback while OCR is owed or executing.
-
-Thus a head OCR page can be overtaken by the remainder of the currently running
-batch plus at most three newly admitted retrieval/embedding batches. Later OCR
-pages also wait for earlier pages in FIFO order. This is an admission bound, not a
-hard seconds guarantee: queue wait includes actual model loading, execution,
-cleanup, OCR capacity deferrals and dispatch delay. A request deadline never
-proves that native work stopped. Measure OCR wait p50/p95/max and throughput
-under sustained search plus indexing, together with search latency and degraded
-rate. Stuck/uncertain ownership is an operational failure, not a fairness pass;
-use existing recovery and never evict an active OCR page to meet a target.
+Continuous eligible searches can delay background work. Measure search latency,
+background queue wait and throughput, and capacity cleanup under concurrent load.
 
 ### Conditional enhancement: retaining models between requests
 
@@ -413,8 +382,8 @@ alone is insufficient. If the baseline meets targets, omit this enhancement.
 
 Before committing to retention-specific scheduler changes, record the evidence,
 benefit and cost, then separately design and independently review the minimum
-ownership/release/recovery extension. It must preserve the OCR turn allowance:
-a compatible warm request cannot bypass an owed OCR turn. Model retention must
+ownership, release and recovery extension. A compatible warm request follows
+the same workload priority. Model retention must
 never make a physically occupied slot appear available. A failed latency gate
 does not automatically authorise adding these states or weakening release proof.
 
@@ -572,8 +541,8 @@ Proposed acceptance gates, frozen before implementation evaluation:
 - Healthy full-pipeline end-to-end p95 <=2 seconds on the target host, measured
   through real interfaces including the baseline's per-request model loading and
   cleanup. Measure first process start, two simultaneous callers, background
-  indexing and sustained search concurrent with OCR. Prove the three-batch OCR
-  turn bound, including the actual `DocumentIndexing` OCR handoff, restarts,
+  indexing and sustained search concurrent with OCR. Verify next-slot search
+  priority and non-interruption of the active workload, using the actual `DocumentIndexing` OCR handoff, restarts,
   cancellation and capacity deferrals, and report
   OCR wait p50/p95/max and throughput. Fallback rate is reported; degraded calls
   cannot make the healthy-path latency gate pass. A missed latency target leads

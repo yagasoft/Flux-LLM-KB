@@ -17,12 +17,13 @@ public sealed partial class SqlProjectionReader
         ArgumentNullException.ThrowIfNull(filter);
         if (filter.Category is not ("all" or "Published" or "Pending" or "Blocked" or "Failed" or "Deferred" or "MetadataOnly" or "NoText" or "Unconfirmed"))
             throw new ArgumentException("Unknown file category.", nameof(filter));
-        using var budget = CancellationTokenSource.CreateLinkedTokenSource(cancellationToken);
-        budget.CancelAfter(TimeSpan.FromSeconds(2));
+        if (!Enum.IsDefined(filter.Attention)) throw new ArgumentException("Unknown attention scope.", nameof(filter));
+        using var deadline = new CancellationTokenSource(OverviewReadOptions.ReadBudget, _clock);
+        using var budget = CancellationTokenSource.CreateLinkedTokenSource(cancellationToken, deadline.Token);
         try
         {
             await using var execution = await contextFactory.CreateDbContextAsync(budget.Token).ConfigureAwait(false);
-            return await execution.Database.CreateExecutionStrategy().ExecuteAsync(async token =>
+            var result = await execution.Database.CreateExecutionStrategy().ExecuteAsync(async token =>
             {
                 await using var context = await contextFactory.CreateDbContextAsync(token).ConfigureAwait(false);
                 await using var transaction = ReadOptions.UseSnapshotIsolation
@@ -40,34 +41,65 @@ public sealed partial class SqlProjectionReader
                     sources.Values.SelectMany(s => s.SelectedBranches).Distinct().ToArray(), token).ConfigureAwait(false);
                 var now = _clock.GetUtcNow();
                 var admission = validationHold?.ReadAdmissionState() ?? new(false, null);
-                var evidence = await SqlGpuActivityReadEvidence.ReadAsync(context, token).ConfigureAwait(false);
+                // Job rows for confirmed removed inputs are historical and
+                // excluded by PipelineFileSample. Keep removal applicability
+                // without collecting cleanup blockers for those hidden rows.
+                var evidence = await SqlGpuActivityReadEvidence.ReadAsync(context, token, SqlGpuActivityReadPurpose.Files).ConfigureAwait(false);
                 await branches.MaterializeGpuFactsAsync(now, evidence, token).ConfigureAwait(false);
                 if (ReadOptions.UseSnapshotIsolation)
                     await branches.MaterializeJobFactsAsync(now, admission, evidence, token).ConfigureAwait(false);
                 var samples = await PipelineFileSample.ReadAsync(context, sources,
                     SqlPipelineActivityQuery.Jobs(context, now, admission, branches, evidence), names,
                     roots.ToDictionary(r => r.Id, r => ((FluxKnowledge.Domain.Sources.SourceRootState)r.State).ToString()), now, evidence, token).ConfigureAwait(false);
-                var matches = samples.Select(s => s.File).Where(f =>
-                    (filter.Category == "all" || f.Category == filter.Category) &&
-                    (filter.Stage is null || f.Stage == filter.Stage) &&
-                    (filter.Reason is null || f.Reason == filter.Reason) &&
-                    (filter.State is null || f.State == filter.State))
+                var scope = samples.Where(sample =>
+                {
+                    var file = sample.File;
+                    return filter.Attention switch
+                    {
+                        PipelineFileAttentionScope.Current => FileAttentionIssue.IsCurrent(file) && !file.IsIgnored,
+                        PipelineFileAttentionScope.Ignored => file.IsIgnored,
+                        _ => true
+                    };
+                }).Where(sample =>
+                {
+                    var f = sample.File;
+                    return (filter.Category == "all" || f.Category == filter.Category) &&
+                        (filter.Stage is null || f.Stage == filter.Stage) &&
+                        (filter.State is null || f.State == filter.State);
+                }).ToArray();
+                var reasons = FileAttentionIssue.GroupReasons(scope);
+                var matches = scope.Select(sample => sample.File).Where(file => filter.Reason is null || file.Reason == filter.Reason)
                     .OrderBy(f => f.FullPath, StringComparer.Ordinal).ThenBy(f => f.SourceRevisionId).ToArray();
                 const int pageSize = 25;
                 page = Math.Clamp(page, 0, Math.Max(0, (matches.Length - 1) / pageSize));
                 var items = matches.Skip(page * pageSize).Take(pageSize).ToArray();
                 var progress = await ReadEmbeddingProgressAsync(context, items, token).ConfigureAwait(false);
-                items = items.Select(f => f with { Embedding = f.Jobs.Where(j => j.Stage == "Embed")
+                var transcription = await MediaTranscriptionFileReader.ReadAsync(context,
+                    items.Where(file => Path.GetExtension(file.FullPath).ToLowerInvariant() is ".mp4" or ".m4v" or ".mov" or ".mp3" or ".wav")
+                        .Select(file => file.SourceRevisionId).ToArray(), token).ConfigureAwait(false);
+                items = items.Select(f => f with { Transcription = transcription.GetValueOrDefault(f.SourceRevisionId),
+                    Embedding = f.Jobs.Where(j => j.Stage == "Embed")
                     .Select(j => progress.GetValueOrDefault(j.Id) ?? new(j.Id, null, null, null, "Compatible checkpoint evidence unavailable.")).ToArray() }).ToArray();
                 var after = ReadOptions.UseSnapshotIsolation ? before
                     : await SqlPipelineActivityQuery.ReadFenceAsync(context, token).ConfigureAwait(false);
                 await branches.CompleteAsync(token).ConfigureAwait(false);
                 if (!before.Accepts(after)) throw new InvalidOperationException("Status changed during the file read.");
                 if (transaction is not null) await transaction.CommitAsync(token).ConfigureAwait(false);
-                return new PipelineFilePage(matches.Length, page, pageSize, now, items);
+                return new PipelineFilePage(matches.Length, page, pageSize, now, items)
+                {
+                    Reasons = reasons,
+                    HasBinaryIssues = matches.Any(file => file.IsBinaryIssue)
+                };
             }, budget.Token).ConfigureAwait(false);
+            budget.Token.ThrowIfCancellationRequested();
+            return result;
         }
-        catch (OperationCanceledException exception) when (!cancellationToken.IsCancellationRequested && budget.IsCancellationRequested)
+        catch (OperationCanceledException exception) when (!cancellationToken.IsCancellationRequested && deadline.IsCancellationRequested)
+        {
+            throw new OverviewReadBudgetExceededException(exception);
+        }
+        catch (SqlException exception) when (!cancellationToken.IsCancellationRequested && deadline.IsCancellationRequested &&
+            OverviewReadBudgetExceededException.HasCommandCancellationErrors(exception))
         {
             throw new OverviewReadBudgetExceededException(exception);
         }

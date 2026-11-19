@@ -36,7 +36,8 @@ public sealed class NativeCorpusActionMatrixTests(NativeSqlServerFixture fixture
         Assert.Equal(first.OperationId, replay.OperationId);
         await using var db = await SqlTestData.CreateFactory(_fixture).CreateDbContextAsync();
         var root = await db.SourceRootConfigurations.SingleAsync(value => value.Id == rootId);
-        Assert.Equal(SourcePolicyDefaults.MaximumTextBytes, root.MaximumFileBytes);
+        Assert.Equal(1024, root.MaximumFileBytes);
+        Assert.Equal(SourcePolicyDefaults.MaximumTextBytes, SqlSourceRemovalReconciler.Restore(root).MaximumFileBytes);
         Assert.Contains("text/x-source-code", root.AllowedClassificationsJson, StringComparison.Ordinal);
         Assert.Empty(await db.SourceScanRequests.Where(value => value.SourceRootId == rootId).ToArrayAsync());
     }
