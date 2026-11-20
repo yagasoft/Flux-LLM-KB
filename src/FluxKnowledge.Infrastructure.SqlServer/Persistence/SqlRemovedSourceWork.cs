@@ -146,18 +146,27 @@ internal static class SqlRemovedSourceWork
 
     internal static string NeverAdmitted(string task) => $"({task}.AdmissionGeneration = 0 AND {task}.BatchId IS NULL)";
 
+    private const string RemovedReleases = """
+        OPENJSON(@removedSourceGpuReleases) WITH (
+            TaskId uniqueidentifier '$.TaskId', BatchId uniqueidentifier '$.BatchId',
+            AdmissionGeneration bigint '$.AdmissionGeneration', DispatchId uniqueidentifier '$.DispatchId',
+            ExecutorKey nvarchar(256) '$.ExecutorKey', CapacitySlotKey nvarchar(256) '$.CapacitySlotKey',
+            SingleTaskCompletion bit '$.SingleTaskCompletion')
+        """;
+
+    private static string ReleaseBindsTask(string task) => $"""
+        releaseProof.TaskId = {task}.Id AND releaseProof.BatchId = {task}.BatchId
+          AND releaseProof.AdmissionGeneration = {task}.AdmissionGeneration
+        """;
+
     // A terminal outcome and a released native reservation are separate facts.
     private static string ReleasedBatch(string task, string requestDispatch, bool readEvidence, string? executor = null)
     {
         var executorSql = executor is null ? $"{task}.RequiredExecutorKey" : $"N'{executor}'";
         return readEvidence
         ? $$"""
-        EXISTS (SELECT 1 FROM OPENJSON(@removedSourceGpuReleases) WITH (
-            TaskId uniqueidentifier '$.TaskId', BatchId uniqueidentifier '$.BatchId',
-            AdmissionGeneration bigint '$.AdmissionGeneration', DispatchId uniqueidentifier '$.DispatchId',
-            ExecutorKey nvarchar(256) '$.ExecutorKey') releaseProof
-            WHERE releaseProof.TaskId = {{task}}.Id AND releaseProof.BatchId = {{task}}.BatchId
-              AND releaseProof.AdmissionGeneration = {{task}}.AdmissionGeneration
+        EXISTS (SELECT 1 FROM {{RemovedReleases}} releaseProof
+            WHERE {{ReleaseBindsTask(task)}}
               AND ({{executorSql}} IS NULL OR releaseProof.ExecutorKey COLLATE {{SchemaConfiguration.SchedulerFenceCollation}} = {{executorSql}})
               AND ({{requestDispatch}} IS NULL OR releaseProof.DispatchId = {{requestDispatch}}))
         """
@@ -184,6 +193,30 @@ internal static class SqlRemovedSourceWork
               AND NOT EXISTS (SELECT 1 FROM GpuCapacitySlots slot WHERE slot.ActiveBatchId = cleanupBatch.Id))
         """;
     }
+
+    // The status read obtains the same scheduler facts from separate statements
+    // under its activity fence. Deletion verifies the live tables directly.
+    private static string CompletedSingleTaskDispatches(string task, bool readEvidence) => readEvidence
+        ? $$"""
+        SELECT releaseProof.DispatchId, releaseProof.BatchId, releaseProof.AdmissionGeneration,
+            releaseProof.ExecutorKey COLLATE {{SchemaConfiguration.SchedulerFenceCollation}} AS ExecutorKey,
+            releaseProof.CapacitySlotKey COLLATE {{SchemaConfiguration.SchedulerFenceCollation}} AS CapacitySlotKey
+        FROM {{RemovedReleases}} releaseProof
+        WHERE {{ReleaseBindsTask(task)}} AND releaseProof.SingleTaskCompletion = 1
+        """
+        : $$"""
+        SELECT dispatch.DispatchId, batch.Id AS BatchId, batch.AdmissionGeneration, dispatch.ExecutorKey, batch.CapacitySlotKey
+        FROM GpuBatches batch
+        INNER JOIN GpuExecutorDispatches dispatch ON dispatch.BatchId = batch.Id
+            AND dispatch.AdmissionGeneration = batch.AdmissionGeneration
+            AND dispatch.CapacitySlotKey = batch.CapacitySlotKey AND dispatch.OwnerKey = batch.OwnerKey
+        WHERE batch.Id = {{task}}.BatchId AND batch.AdmissionGeneration = {{task}}.AdmissionGeneration
+            AND batch.ModelRuntimeKey = {{task}}.ModelRuntimeKey AND batch.SettingsFingerprint = {{task}}.SettingsFingerprint
+            AND batch.State = {{(int)GpuBatchState.Completed}} AND batch.ItemCount = 1
+            AND dispatch.State = {{(int)GpuExecutorDispatchState.Terminal}}
+            AND NOT EXISTS (SELECT 1 FROM GpuCapacitySlots slot WHERE slot.ActiveBatchId = batch.Id)
+            AND NOT EXISTS (SELECT 1 FROM GpuMiniTasks other WHERE other.BatchId = batch.Id AND other.Id <> {{task}}.Id)
+        """;
 
     private static string EmbeddingCleanup(string request, string task, string job, bool readEvidence) => $$"""
         ({{request}}.MiniTaskId = {{task}}.Id AND {{task}}.ParentJobId = {{job}}.Id AND {{task}}.SourceRevision = {{job}}.SourceRevision
@@ -213,13 +246,13 @@ internal static class SqlRemovedSourceWork
                  OR ({{request}}.CleanupProofKind = {{(int)DocumentOcrCleanupKind.StoppedMaintenance}}
                    AND LEN({{request}}.PhysicalCleanupEvidenceSha256) = 64
                    AND {{request}}.PhysicalCleanupEvidenceSha256 COLLATE {{SchemaConfiguration.SchedulerFenceCollation}} NOT LIKE '%[^0-9a-f]%')))
-             OR {{OcrDetached(request, task, job)}})
+             OR {{OcrDetached(request, task, job, readEvidence)}})
          AND {{ReleasedBatch(task, request + ".ExecutionDispatchId", readEvidence, PaddleOcrVlmRuntimeContract.ExecutorKey)}})
         """;
 
     // Detachment proves that this source owns no active OCR command. The
     // resident allocation may retain its native GPU capacity independently.
-    internal static string OcrDetached(string request, string task, string job) => $$"""
+    internal static string OcrDetached(string request, string task, string job, bool readEvidence = false) => $$"""
         ({{request}}.MiniTaskId = {{task}}.Id AND {{task}}.ParentJobId = {{job}}.Id
          AND {{request}}.ParentJobId = {{job}}.Id AND {{request}}.PipelineRecordId = {{job}}.PipelineRecordId
          AND {{request}}.SourceRevision = {{job}}.SourceRevision AND {{request}}.SourceRevision = {{task}}.SourceRevision
@@ -230,37 +263,29 @@ internal static class SqlRemovedSourceWork
          AND {{task}}.State = {{(int)GpuMiniTaskExecutionState.Completed}}
          AND EXISTS (SELECT 1 FROM GpuModelDetachmentReceipts detached
             INNER JOIN GpuModelResidencies resident ON resident.ResidencyId = detached.ResidencyId
-            INNER JOIN GpuBatches ocrBatch ON ocrBatch.Id = detached.BatchId
-                AND ocrBatch.AdmissionGeneration = detached.AdmissionGeneration
-            INNER JOIN GpuExecutorDispatches ocrDispatch ON ocrDispatch.DispatchId = detached.DispatchId
-                AND ocrDispatch.BatchId = ocrBatch.Id AND ocrDispatch.AdmissionGeneration = ocrBatch.AdmissionGeneration
-                AND ocrDispatch.CapacitySlotKey = ocrBatch.CapacitySlotKey AND ocrDispatch.OwnerKey = ocrBatch.OwnerKey
+            INNER JOIN ({{CompletedSingleTaskDispatches(task, readEvidence)}}) ocrDispatch ON ocrDispatch.DispatchId = detached.DispatchId
+                AND ocrDispatch.BatchId = detached.BatchId AND ocrDispatch.AdmissionGeneration = detached.AdmissionGeneration
                 AND ocrDispatch.ExecutorKey = detached.ExecutorKey
             INNER JOIN GpuExecutorResultReceipts ocrResult ON ocrResult.DispatchId = ocrDispatch.DispatchId
-                AND ocrResult.BatchId = ocrBatch.Id AND ocrResult.AdmissionGeneration = ocrBatch.AdmissionGeneration
+                AND ocrResult.BatchId = ocrDispatch.BatchId AND ocrResult.AdmissionGeneration = ocrDispatch.AdmissionGeneration
                 AND ocrResult.ExecutorKey = ocrDispatch.ExecutorKey AND ocrResult.MiniTaskId = {{task}}.Id
             WHERE detached.DispatchId = {{request}}.ExecutionDispatchId AND detached.ExecutionInstanceId = {{request}}.ExecutionInstanceId
                 AND detached.BatchId = {{request}}.ExecutionBatchId AND detached.BatchId = {{task}}.BatchId
                 AND detached.AdmissionGeneration = {{request}}.ExecutionAdmissionGeneration
                 AND detached.AdmissionGeneration = {{task}}.AdmissionGeneration
                 AND detached.ExecutorKey = N'{{PaddleOcrVlmRuntimeContract.ExecutorKey}}'
-                AND ocrDispatch.State = {{(int)GpuExecutorDispatchState.Terminal}}
-                AND resident.SlotKey = ocrBatch.CapacitySlotKey AND resident.ChildJobId = resident.ResidencyId
+                AND resident.SlotKey = ocrDispatch.CapacitySlotKey AND resident.ChildJobId = resident.ResidencyId
                 AND resident.RuntimeKey = {{request}}.ModelRuntimeKey AND resident.SettingsFingerprint = {{request}}.SettingsFingerprint
                 AND resident.OwnerProcessId = {{request}}.SupervisorProcessId
                 AND resident.OwnerStartedAtUtc = {{request}}.SupervisorProcessStartedAtUtc
                 AND resident.MachineFingerprint = {{request}}.ExecutionMachineFingerprint
                 AND resident.ChildProcessId = {{request}}.NativeProcessId AND resident.ChildStartedAtUtc = {{request}}.NativeProcessStartedAtUtc
-                AND ocrBatch.State = {{(int)GpuBatchState.Completed}} AND ocrBatch.ItemCount = 1
-                AND ocrBatch.ModelRuntimeKey = {{task}}.ModelRuntimeKey AND ocrBatch.SettingsFingerprint = {{task}}.SettingsFingerprint
                 AND ocrResult.Disposition = {{(int)GpuMiniTaskBoundaryDisposition.Completed}}
                 AND ocrResult.EvidenceClass = {{(int)GpuExecutorEvidenceClass.TaskOutcomeConfirmed}}
-                AND ocrResult.OpaqueResultDigest = {{request}}.ResultDigest
-                AND NOT EXISTS (SELECT 1 FROM GpuCapacitySlots slot WHERE slot.ActiveBatchId = ocrBatch.Id)
-                AND NOT EXISTS (SELECT 1 FROM GpuMiniTasks other WHERE other.BatchId = ocrBatch.Id AND other.Id <> {{task}}.Id)))
+                AND ocrResult.OpaqueResultDigest = {{request}}.ResultDigest))
         """;
 
-    internal static string MediaCleanup(string request, string task, string job) => $$"""
+    internal static string MediaCleanup(string request, string task, string job, bool readEvidence = false) => $$"""
         ({{request}}.MiniTaskId = {{task}}.Id AND {{task}}.ParentJobId = {{job}}.Id
          AND {{request}}.ParentJobId = {{job}}.Id AND {{request}}.PipelineRecordId = {{job}}.PipelineRecordId
          AND {{request}}.SourceRevision = {{job}}.SourceRevision AND {{request}}.SourceRevision = {{task}}.SourceRevision
@@ -274,17 +299,11 @@ internal static class SqlRemovedSourceWork
          AND {{request}}.ExecutionInstanceId IS NOT NULL AND {{request}}.ExecutionDispatchId IS NOT NULL
          AND {{request}}.ExecutionBatchId = {{task}}.BatchId AND {{request}}.ExecutionAdmissionGeneration = {{task}}.AdmissionGeneration
          AND {{task}}.State = {{(int)GpuMiniTaskExecutionState.Completed}}
-         AND EXISTS (SELECT 1 FROM GpuBatches mediaBatch
-            INNER JOIN GpuExecutorDispatches mediaDispatch ON mediaDispatch.BatchId = mediaBatch.Id
-                AND mediaDispatch.AdmissionGeneration = mediaBatch.AdmissionGeneration
-                AND mediaDispatch.CapacitySlotKey = mediaBatch.CapacitySlotKey AND mediaDispatch.OwnerKey = mediaBatch.OwnerKey
+         AND EXISTS (SELECT 1 FROM ({{CompletedSingleTaskDispatches(task, readEvidence)}}) mediaDispatch
             INNER JOIN GpuExecutorResultReceipts mediaResult ON mediaResult.DispatchId = mediaDispatch.DispatchId
                 AND mediaResult.BatchId = mediaDispatch.BatchId AND mediaResult.AdmissionGeneration = mediaDispatch.AdmissionGeneration
                 AND mediaResult.ExecutorKey = mediaDispatch.ExecutorKey AND mediaResult.MiniTaskId = {{task}}.Id
-            WHERE mediaBatch.Id = {{task}}.BatchId AND mediaBatch.AdmissionGeneration = {{task}}.AdmissionGeneration
-                AND mediaBatch.ModelRuntimeKey = {{task}}.ModelRuntimeKey AND mediaBatch.SettingsFingerprint = {{task}}.SettingsFingerprint
-                AND mediaBatch.ItemCount = 1 AND mediaBatch.State = {{(int)GpuBatchState.Completed}}
-                AND mediaDispatch.DispatchId = {{request}}.ExecutionDispatchId AND mediaDispatch.State = {{(int)GpuExecutorDispatchState.Terminal}}
+            WHERE mediaDispatch.DispatchId = {{request}}.ExecutionDispatchId
                 AND (({{request}}.CleanupConfirmedAtUtc IS NOT NULL
                         AND (({{request}}.CleanupKind = {{(int)DocumentOcrCleanupKind.VerifiedUnstarted}} AND {{request}}.NativeProcessId IS NULL)
                             OR ({{request}}.CleanupKind = {{(int)DocumentOcrCleanupKind.OwnedJobEmpty}} AND {{request}}.NativeProcessId IS NOT NULL
@@ -312,9 +331,7 @@ internal static class SqlRemovedSourceWork
                                 AND resident.MachineFingerprint = {{request}}.MachineFingerprint)))
                 AND mediaResult.EvidenceClass = {{(int)GpuExecutorEvidenceClass.TaskOutcomeConfirmed}}
                 AND mediaResult.Disposition = {{(int)GpuMiniTaskBoundaryDisposition.Completed}}
-                AND mediaResult.OpaqueResultDigest = {{request}}.ResultDigest
-                AND NOT EXISTS (SELECT 1 FROM GpuCapacitySlots slot WHERE slot.ActiveBatchId = mediaBatch.Id)
-                AND NOT EXISTS (SELECT 1 FROM GpuMiniTasks other WHERE other.BatchId = mediaBatch.Id AND other.Id <> {{task}}.Id)))
+                AND mediaResult.OpaqueResultDigest = {{request}}.ResultDigest))
         """;
 
     internal static string TaskRequiresVerification(string task, string job, bool readEvidence = false) => $$"""
@@ -323,7 +340,7 @@ internal static class SqlRemovedSourceWork
          OR ({{task}}.State IN ({{(int)GpuMiniTaskExecutionState.Completed}},{{(int)GpuMiniTaskExecutionState.Cancelled}})
              AND NOT {{NeverAdmitted(task)}} AND NOT {{ReleasedBatch(task, "NULL", readEvidence)}})
          OR (NOT {{NeverAdmitted(task)}} AND EXISTS (SELECT 1 FROM MediaTranscriptionGpuRequests media
-                WHERE media.MiniTaskId = {{task}}.Id AND NOT EXISTS (SELECT 1 WHERE {{MediaCleanup("media", task, job)}})))
+                WHERE media.MiniTaskId = {{task}}.Id AND NOT EXISTS (SELECT 1 WHERE {{MediaCleanup("media", task, job, readEvidence)}})))
          OR ({{task}}.State = {{(int)GpuMiniTaskExecutionState.OutcomeUncertain}}
              AND NOT EXISTS (SELECT 1 FROM EmbeddingGpuRequests embedded WHERE {{EmbeddingCleanup("embedded", task, job, readEvidence)}})
              AND NOT EXISTS (SELECT 1 FROM DocumentOcrRequests ocr WHERE {{OcrCleanup("ocr", task, job, readEvidence)}})))
@@ -383,7 +400,7 @@ internal static class SqlRemovedSourceWork
                    OR media.SupervisorInstanceId IS NOT NULL OR media.SupervisorProcessId IS NOT NULL OR media.SupervisorProcessStartedAtUtc IS NOT NULL
                    OR media.NativeProcessId IS NOT NULL OR media.NativeProcessStartedAtUtc IS NOT NULL
                    OR media.CleanupConfirmedAtUtc IS NOT NULL OR media.CleanupKind IS NOT NULL)
-              AND NOT EXISTS (SELECT 1 WHERE {{MediaCleanup("media", "linkedMedia", job)}})))
+              AND NOT EXISTS (SELECT 1 WHERE {{MediaCleanup("media", "linkedMedia", job, readEvidence)}})))
         """;
 
     private static readonly string UnconfirmedJobIdsSql = $$"""

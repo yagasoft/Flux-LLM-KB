@@ -22,7 +22,11 @@ public sealed partial class SqlToUsearchRebuildTests
     [NativeSqlServerFact]
     public async Task Segmented_projection_maintenance_timeout_remains_nonterminal_beyond_five_probes_then_recovers()
     {
-        await using var environment = await PipelineEnvironment.CreateAsync(_fixture, "Maintenance does not invalidate the serving index.", segmented: true);
+        var ownership = new ShortenedProjectionOwnershipWait();
+        await using var environment = await PipelineEnvironment.CreateAsync(_fixture,
+            "Maintenance does not invalidate the serving index.", segmented: true,
+            configureServices: services => services.AddSingleton<IDbContextFactory<FluxKnowledgeDbContext>>(
+                new IndexingSqlFaultFactory(_fixture.ConnectionString, ownership)));
         var recovery = new SqlDerivedIndexRecoveryStore(environment.Factory, TimeProvider.System);
         var held = await recovery.TryAcquireExclusiveLeaseAsync(TimeSpan.Zero, default);
         Assert.NotNull(held);
@@ -34,9 +38,12 @@ public sealed partial class SqlToUsearchRebuildTests
                 await coordinator.RunOnceAsync(default, retryDueWaited: true);
                 Assert.Equal(DerivedIndexRecoveryState.IndexUpdating, coordinator.Snapshot.State);
                 Assert.Null(coordinator.Snapshot.FailureCategory);
+                ownership.Enabled = true;
             }
         }
         finally { await held!.DisposeAsync(); }
+        Assert.Equal(5, ownership.ShortenedWaits);
+        ownership.Enabled = false;
         await coordinator.RunOnceAsync(default);
         Assert.Equal(DerivedIndexRecoveryState.Healthy, coordinator.Snapshot.State);
     }
@@ -189,6 +196,27 @@ public sealed partial class SqlToUsearchRebuildTests
                 await Resume.Task.WaitAsync(cancellationToken);
             }
             return result;
+        }
+    }
+
+    private sealed class ShortenedProjectionOwnershipWait : DbCommandInterceptor
+    {
+        public bool Enabled { get; set; }
+        public int ShortenedWaits { get; private set; }
+
+        public override ValueTask<InterceptionResult<DbDataReader>> ReaderExecutingAsync(DbCommand command,
+            CommandEventData eventData, InterceptionResult<DbDataReader> result, CancellationToken cancellationToken = default)
+        {
+            if (Enabled && command.CommandText.Contains("segmented-projection-read-ownership", StringComparison.Ordinal))
+            {
+                const string normalWait = "@LockTimeout = 5000;";
+                Assert.Contains(normalWait, command.CommandText, StringComparison.Ordinal);
+                // One probe uses the real deadline. The remaining probes ask SQL
+                // for the same contested lock and get its real timeout immediately.
+                command.CommandText = command.CommandText.Replace(normalWait, "@LockTimeout = 0;", StringComparison.Ordinal);
+                ShortenedWaits++;
+            }
+            return ValueTask.FromResult(result);
         }
     }
 

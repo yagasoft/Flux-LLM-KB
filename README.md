@@ -81,6 +81,17 @@ pwsh -NoProfile -File tests/native/repository-contract.ps1
 Tests use disposable databases and synthetic models. Installation and updates
 follow separate procedures in the setup guide.
 
+The default suite checks multi-page embedding recovery, source deletion and
+scoped HTTP retrieval. The following commands run their original
+high-cardinality workloads with the same disposable SQL configuration.
+
+```powershell
+$env:FLUXKNOWLEDGE_TEST_SCALE = '1'
+dotnet test tests/FluxKnowledge.Integration.Tests/FluxKnowledge.Integration.Tests.csproj -c Release --no-build --filter 'Category=Scale&(FullyQualifiedName~EmbeddingRetryTests|FullyQualifiedName~Large_graph_purge)'
+dotnet test tests/FluxKnowledge.Web.Tests/FluxKnowledge.Web.Tests.csproj -c Release --no-build --filter 'Category=Scale&FullyQualifiedName~Scoped_HTTP_hybrid_search_above_ten_thousand'
+Remove-Item Env:FLUXKNOWLEDGE_TEST_SCALE
+```
+
 ## Current scope
 
 The application is in personal use. Hybrid retrieval has passed scoped English

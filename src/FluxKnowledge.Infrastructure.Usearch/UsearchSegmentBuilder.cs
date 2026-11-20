@@ -1,4 +1,4 @@
-using System.Security.Cryptography;
+using System.ComponentModel;
 using System.Text.Json;
 using Cloud.Unum.USearch;
 using FluxKnowledge.Application.Indexing;
@@ -50,7 +50,7 @@ public sealed class UsearchSegmentBuilder(
             previous = vector.VectorId;
             if (batch.Count > 0 && (batch.Count >= _budgets.MaximumVectors || bytes + vector.Values.Length > _budgets.MaximumPayloadBytes))
             {
-                var segment = BuildOne(modelFingerprint, dimensions, batch, incarnation, cancellationToken);
+                var segment = await BuildOneAsync(modelFingerprint, dimensions, batch, incarnation, cancellationToken).ConfigureAwait(false);
                 if (seal is not null) await seal(segment, batch, cancellationToken).ConfigureAwait(false);
                 result.Add(segment);
                 batch.Clear();
@@ -62,14 +62,14 @@ public sealed class UsearchSegmentBuilder(
         }
         if (batch.Count > 0)
         {
-            var segment = BuildOne(modelFingerprint, dimensions, batch, incarnation, cancellationToken);
+            var segment = await BuildOneAsync(modelFingerprint, dimensions, batch, incarnation, cancellationToken).ConfigureAwait(false);
             if (seal is not null) await seal(segment, batch, cancellationToken).ConfigureAwait(false);
             result.Add(segment);
         }
         return result;
     }
 
-    private IndexSegmentDescriptor BuildOne(string fingerprint, int dimensions, IReadOnlyList<CanonicalVector> vectors,
+    private async ValueTask<IndexSegmentDescriptor> BuildOneAsync(string fingerprint, int dimensions, IReadOnlyList<CanonicalVector> vectors,
         Guid incarnation, CancellationToken cancellationToken)
     {
         cancellationToken.ThrowIfCancellationRequested();
@@ -80,6 +80,7 @@ public sealed class UsearchSegmentBuilder(
         if (Directory.Exists(destination)) return Validate(destination, id, fingerprint, dimensions, membership, vectors, incarnation);
         RequireCapacity(vectors.Sum(vector => (long)vector.Values.Length));
         var staging = Path.Combine(options.RootPath, "staging", "segments", Guid.NewGuid().ToString("N"));
+        Exception? buildFailure = null;
         try
         {
             using (paths.AcquireDirectory(staging, create: true))
@@ -104,7 +105,8 @@ public sealed class UsearchSegmentBuilder(
                 JsonSerializer.Serialize(metadataFile, metadata);
                 metadataFile.Flush(true);
             }
-            _ = Validate(staging, id, fingerprint, dimensions, membership, vectors, incarnation);
+            using (await AcquireStagingReadLeaseAsync(staging, cancellationToken).ConfigureAwait(false))
+                _ = ValidateHeld(staging, id, fingerprint, dimensions, membership, vectors, incarnation);
             cancellationToken.ThrowIfCancellationRequested();
             try { Directory.Move(staging, destination); }
             catch (IOException) when (Directory.Exists(destination))
@@ -114,22 +116,53 @@ public sealed class UsearchSegmentBuilder(
             }
             return Validate(destination, id, fingerprint, dimensions, membership, vectors, incarnation);
         }
+        catch (Exception exception)
+        {
+            buildFailure = exception;
+            throw;
+        }
         finally
         {
-            if (Directory.Exists(staging))
+            try { RemoveStaging(staging); }
+            catch (Exception cleanup) when (buildFailure is not null && (cleanup is IOException or UnauthorizedAccessException))
             {
-                using (paths.AcquireDirectory(staging))
-                {
-                    foreach (var filename in new[] { "index.usearch", "metadata.json" })
-                    {
-                        var path = Path.Combine(staging, filename);
-                        if (File.Exists(path)) File.Delete(path);
-                    }
-                }
-                // Only the exact random staging leaf is removed, without recursive traversal.
-                Directory.Delete(staging, false);
+                buildFailure.Data["segment-staging-cleanup-failure"] = cleanup;
             }
         }
+    }
+
+    private async ValueTask<IDisposable> AcquireStagingReadLeaseAsync(string staging, CancellationToken cancellationToken)
+    {
+        const int windowsSharingViolation = 32;
+        const int maximumRetries = 3;
+        var retryDelay = TimeSpan.FromMilliseconds(50);
+        for (var attempt = 0; ; attempt++)
+        {
+            cancellationToken.ThrowIfCancellationRequested();
+            try { return paths.Acquire(staging); }
+            catch (IOException exception) when (attempt < maximumRetries &&
+                exception.InnerException is Win32Exception { NativeErrorCode: windowsSharingViolation })
+            {
+                // A Windows reader can briefly contend with the strict lease after the native save.
+                await Task.Delay(retryDelay, cancellationToken).ConfigureAwait(false);
+                retryDelay *= 2;
+            }
+        }
+    }
+
+    private void RemoveStaging(string staging)
+    {
+        if (!Directory.Exists(staging)) return;
+        using (paths.AcquireDirectory(staging))
+        {
+            foreach (var filename in new[] { "index.usearch", "metadata.json" })
+            {
+                var path = Path.Combine(staging, filename);
+                if (File.Exists(path)) File.Delete(path);
+            }
+        }
+        // Only the exact random staging leaf is removed, without recursive traversal.
+        Directory.Delete(staging, false);
     }
 
     internal void RequireCapacity(long payloadBytes)
@@ -146,6 +179,12 @@ public sealed class UsearchSegmentBuilder(
         string membership, IReadOnlyList<CanonicalVector> vectors, Guid incarnation)
     {
         using var held = paths.Acquire(directory);
+        return ValidateHeld(directory, id, fingerprint, dimensions, membership, vectors, incarnation);
+    }
+
+    private IndexSegmentDescriptor ValidateHeld(string directory, string id, string fingerprint, int dimensions,
+        string membership, IReadOnlyList<CanonicalVector> vectors, Guid incarnation)
+    {
         var metadataPath = Path.Combine(directory, "metadata.json");
         if (new FileInfo(metadataPath).Length > 65536) throw new IndexGenerationValidationException("segment-metadata-too-large");
         var metadata = JsonSerializer.Deserialize<SegmentMetadata>(File.ReadAllText(metadataPath))

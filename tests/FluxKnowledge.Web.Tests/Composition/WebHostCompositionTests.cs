@@ -156,6 +156,7 @@ public sealed class WebHostCompositionTests : IDisposable
             Assert.Equal(0, database.Attempts);
         }
         finally { await application.StopAsync().WaitAsync(TimeSpan.FromSeconds(5)); }
+        Assert.Equal(0, database.Attempts);
     }
 
     private sealed class LegacyFormatStore : ISegmentedIndexStore
@@ -238,15 +239,20 @@ public sealed class WebHostCompositionTests : IDisposable
         }
     }
 
-    [Fact]
-    public async Task Hybrid_runtime_composes_shared_slot_exact_profiles_and_both_executors_without_loading_models()
+    [Theory]
+    [InlineData(null, 3)]
+    [InlineData("false", 0)]
+    public async Task Hybrid_runtime_composes_shared_slot_exact_profiles_and_both_executors_without_loading_models(
+        string? warmingSetting, int expectedResidentModels)
     {
+        var settings = new Dictionary<string, string?>
+        {
+            ["Runtime:Model:Enabled"] = "true", ["Runtime:Gpu:Enabled"] = "true", ["Runtime:Ocr:Enabled"] = "true",
+            ["Search:HybridPassagesEnabled"] = "true"
+        };
+        if (warmingSetting is not null) settings["Gpu:ModelWarmingEnabled"] = warmingSetting;
         var configuration = new ConfigurationBuilder().AddConfiguration(CreateProductionConfiguration())
-            .AddInMemoryCollection(new Dictionary<string, string?>
-            {
-                ["Runtime:Model:Enabled"] = "true", ["Runtime:Gpu:Enabled"] = "true", ["Runtime:Ocr:Enabled"] = "true",
-                ["Search:HybridPassagesEnabled"] = "true"
-            }).Build();
+            .AddInMemoryCollection(settings).Build();
         using var host = new HostBuilder().Build();
         var services = new ServiceCollection();
         services.AddSingleton(host.Services.GetRequiredService<IHostApplicationLifetime>());
@@ -255,7 +261,11 @@ public sealed class WebHostCompositionTests : IDisposable
         await using var scope = provider.CreateAsyncScope();
         Assert.IsType<SqlIndexRetentionOperations>(scope.ServiceProvider.GetRequiredService<SqlIndexRetentionOperations>());
         Assert.IsType<SharedGpuAdmissionGate>(provider.GetRequiredService<IGpuAdmissionGate>());
-        var policy = provider.GetRequiredService<GpuSchedulerOptions>().WorkloadPolicy!;
+        var schedulerOptions = provider.GetRequiredService<GpuSchedulerOptions>();
+        Assert.Equal(expectedResidentModels, schedulerOptions.ResidentEntryModels.Count);
+        var hostedResidency = Assert.Single(provider.GetServices<IHostedService>().OfType<GpuModelResidencyRuntime>());
+        Assert.Same(hostedResidency, provider.GetRequiredService<IGpuProcessModelResidency>());
+        var policy = schedulerOptions.WorkloadPolicy!;
         GpuWorkloadProfile[] expectedProfiles = [
             new(PaddleOcrVlmRuntimeContract.ModelRuntimeKey, PaddleOcrVlmRuntimeContract.SettingsFingerprint, GpuWorkloadKind.Ocr),
             new(BgeOfflineModels.GpuRuntimeKey, BgeOfflineModels.GpuSettingsFingerprint, GpuWorkloadKind.Retrieval),
@@ -558,6 +568,25 @@ public sealed class WebHostCompositionTests : IDisposable
         Assert.Equal(1, services.Count(descriptor => descriptor.ServiceType == typeof(IHostedService) &&
             descriptor.ImplementationType == typeof(DerivedIndexRecoveryService)));
         WebHostComposition.ValidateNativeGoLiveComposition(services, configuration);
+    }
+
+    [Fact]
+    public void Strict_hybrid_composition_rejects_an_independent_hosted_residency_instance()
+    {
+        var configuration = new ConfigurationBuilder().AddConfiguration(CreateProductionConfiguration())
+            .AddInMemoryCollection(new Dictionary<string, string?>
+            {
+                ["Runtime:Model:Enabled"] = "true", ["Runtime:Gpu:Enabled"] = "true", ["Runtime:Ocr:Enabled"] = "true",
+                ["Search:HybridPassagesEnabled"] = "true"
+            }).Build();
+        var services = new ServiceCollection();
+        WebHostComposition.AddProductionFluxKnowledgeServicesForTests(services, configuration);
+
+        Assert.True(services.Remove(BgeSearchRuntimeComposition.ResidencyHostedService));
+        services.AddSingleton<IHostedService, GpuModelResidencyRuntime>();
+
+        Assert.Throws<InvalidOperationException>(() =>
+            WebHostComposition.ValidateNativeGoLiveComposition(services, configuration));
     }
 
     [Fact]

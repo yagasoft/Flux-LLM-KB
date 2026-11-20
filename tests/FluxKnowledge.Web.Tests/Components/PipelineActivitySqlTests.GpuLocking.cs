@@ -22,6 +22,10 @@ public sealed partial class PipelineActivitySqlTests
     {
         var now = DateTimeOffset.UtcNow;
         _ = await SeedGpuReadLockAsync(now);
+        var removedRoot = await AddActivityRootAsync(now);
+        var removed = Revision(Guid.NewGuid(), removedRoot, "removed.txt", now, suppressed: true);
+        removed.RetentionEvidenceJson = "{\"reason\":\"unseen-during-authoritative-scan\"}";
+        await SeedActivityJobAsync(removedRoot, now, PublicJobState.GpuProcessing, null, source: removed);
         var commands = new SingleGpuTableReadInterceptor();
         await using var context = new TestDbContextFactory(_fixture.ConnectionString, commands).CreateDbContext();
         // Snapshot acceptance is covered separately. This contract inspects the
@@ -31,7 +35,8 @@ public sealed partial class PipelineActivitySqlTests
             _ = await new SqlPipelineActivityReader(null, new FixedTimeProvider(now)).ReadAsync(context, now, CancellationToken.None);
         else
         {
-            var evidence = await SqlGpuActivityReadEvidence.ReadAsync(context, CancellationToken.None);
+            var purpose = surface == "jobs" ? SqlGpuActivityReadPurpose.Jobs : SqlGpuActivityReadPurpose.GpuTasks;
+            var evidence = await SqlGpuActivityReadEvidence.ReadAsync(context, CancellationToken.None, purpose);
             await using var branches = await SqlSelectedBranchReadScope.CreateAsync(context, [], CancellationToken.None);
             if (surface == "jobs")
                 _ = await SqlPipelineActivityQuery.Jobs(context, now, new(false, null), branches, evidence).ToArrayAsync();

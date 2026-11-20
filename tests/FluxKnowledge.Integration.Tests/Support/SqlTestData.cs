@@ -20,7 +20,14 @@ internal static class SqlTestData
         await WaitForFullTextAsync(context);
     }
 
-    public static async Task WaitForFullTextAsync(FluxKnowledgeDbContext context)
+    public static Task WaitForFullTextAsync(FluxKnowledgeDbContext context)
+    {
+        var timings = new SqlFixtureTimings(Environment.GetEnvironmentVariable(SqlFixtureTimings.EnvironmentVariable));
+        return timings.MeasureAsync("wait-full-text", context.Database.GetDbConnection().Database,
+            () => WaitForFullTextCoreAsync(context));
+    }
+
+    private static async Task WaitForFullTextCoreAsync(FluxKnowledgeDbContext context)
     {
         // Keyword assertions require this fixture's AUTO population to settle.
         // Observe it without refreshing/reconfiguring the index or consuming a

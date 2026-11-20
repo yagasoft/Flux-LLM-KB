@@ -1,4 +1,6 @@
 using System.Text.Json;
+using FluxKnowledge.Application.Documents;
+using FluxKnowledge.Application.Gpu;
 using FluxKnowledge.Application.Ports;
 using FluxKnowledge.Application.Sources;
 using FluxKnowledge.Domain.Gpu;
@@ -14,6 +16,99 @@ namespace FluxKnowledge.Web.Tests.Components;
 
 public sealed partial class PipelineActivitySqlTests
 {
+    [NativeSqlServerFact]
+    public async Task Removed_media_needs_exact_single_task_completion_to_clear_current_attention()
+    {
+        await EnableOwnedSnapshotAsync();
+        var now = DateTimeOffset.UtcNow;
+        var seed = await SeedGpuReadLockAsync(now);
+        await using var db = new TestDbContextFactory(_fixture.ConnectionString).CreateDbContext();
+        var task = await db.GpuMiniTasks.SingleAsync(item => item.Id == seed.Task);
+        var job = await db.Jobs.SingleAsync(item => item.Id == task.ParentJobId);
+        var record = await db.PipelineRecords.SingleAsync(item => item.Id == job.PipelineRecordId);
+        var source = await db.SourceRevisions.SingleAsync(item => item.Id == record.SourceRevisionId);
+        var batch = await db.GpuBatches.SingleAsync(item => item.Id == seed.Batch);
+        var slot = await db.GpuCapacitySlots.SingleAsync(item => item.SlotKey == seed.Slot);
+        var dispatch = await db.GpuExecutorDispatches.SingleAsync(item => item.BatchId == batch.Id);
+        var digest = new byte[32];
+        source.SuppressedAtUtc = now;
+        source.RetentionEvidenceJson = "{\"reason\":\"unseen-during-authoritative-scan\"}";
+        job.Operation = MediaTranscriptionGpuContracts.Operation;
+        job.PublicState = (int)PublicJobState.Failed;
+        job.Reason = "source-removed";
+        task.PriorityLane = (int)MediaTranscriptionGpuRuntime.PriorityLane;
+        task.ExecutionState = (int)GpuMiniTaskExecutionState.Completed;
+        batch.State = (int)GpuBatchState.Completed;
+        dispatch.State = (int)GpuExecutorDispatchState.Terminal;
+        slot.ActiveBatchId = null;
+        slot.OwnerKey = null;
+        slot.State = (int)GpuCapacitySlotState.Available;
+        db.MediaTranscriptionGpuRequests.Add(new()
+        {
+            MiniTaskId = task.Id, ParentJobId = job.Id, PipelineRecordId = record.Id,
+            SourceRevision = task.SourceRevision, RetainedSourceRevisionId = source.Id, ContentSha256 = source.ContentSha256,
+            ModelRuntimeKey = task.ModelRuntimeKey, SettingsFingerprint = task.SettingsFingerprint,
+            ExecutionPhase = (int)DocumentOcrExecutionPhase.Settled, ExecutionInstanceId = Guid.NewGuid(),
+            ExecutionBatchId = batch.Id, ExecutionDispatchId = dispatch.DispatchId,
+            ExecutionAdmissionGeneration = task.AdmissionGeneration, SupervisorInstanceId = Guid.NewGuid(),
+            SupervisorProcessId = 42, SupervisorProcessStartedAtUtc = now, MachineFingerprint = new('a', 64),
+            ClaimedAtUtc = now, DeadlineAtUtc = now.AddMinutes(1), CleanupConfirmedAtUtc = now,
+            CleanupKind = (int)DocumentOcrCleanupKind.VerifiedUnstarted, ResultJson = "{}", ResultDigest = digest, CreatedAtUtc = now
+        });
+        db.GpuExecutorResultReceipts.Add(new()
+        {
+            OperationId = Guid.NewGuid(), DispatchId = dispatch.DispatchId, BatchId = batch.Id, MiniTaskId = task.Id,
+            ExecutorKey = dispatch.ExecutorKey, AdmissionGeneration = task.AdmissionGeneration,
+            Disposition = (int)GpuMiniTaskBoundaryDisposition.Completed, EvidenceClass = (int)GpuExecutorEvidenceClass.TaskOutcomeConfirmed,
+            OpaqueResultDigest = digest, RequestFingerprint = new('b', 64), CreatedAtUtc = now
+        });
+        db.GpuExecutorEvidence.Add(new()
+        {
+            OperationId = Guid.NewGuid(), DispatchId = dispatch.DispatchId, BatchId = batch.Id, CapacitySlotKey = slot.SlotKey,
+            ExecutorKey = dispatch.ExecutorKey, AdmissionGeneration = task.AdmissionGeneration,
+            EvidenceClass = (int)GpuExecutorEvidenceClass.CapacityReleaseConfirmed, VerifierKey = "media-transcription-owned-job-v1",
+            ObservedAtUtc = now, RequestFingerprint = new('c', 64), CreatedAtUtc = now
+        });
+        await db.SaveChangesAsync();
+        var reader = SnapshotReader();
+        await AssertAttentionAsync(blocked: false);
+
+        dispatch.OwnerKey = "READOWNER";
+        await db.SaveChangesAsync();
+        await AssertAttentionAsync(blocked: true);
+
+        dispatch.OwnerKey = batch.OwnerKey;
+        dispatch.AdmissionGeneration++;
+        await db.SaveChangesAsync();
+        await AssertAttentionAsync(blocked: true);
+
+        dispatch.AdmissionGeneration = batch.AdmissionGeneration;
+        await db.SaveChangesAsync();
+        await AssertAttentionAsync(blocked: false);
+
+        var foreign = await SeedGpuReadLockAsync(now);
+        await db.GpuMiniTasks.Where(item => item.Id == foreign.Task)
+            .ExecuteUpdateAsync(update => update.SetProperty(item => item.BatchId, batch.Id));
+        await AssertAttentionAsync(blocked: true);
+
+        async Task AssertAttentionAsync(bool blocked)
+        {
+            var current = await reader.ReadPipelineAttentionAsync("current-jobs", seed.Root, 0, default);
+            Assert.Equal(blocked ? 1 : 0, current.TotalCount);
+            if (blocked)
+            {
+                var item = Assert.Single(current.Items);
+                Assert.Equal(record.Id, item.PipelineRecordId);
+                Assert.Contains("GPU cleanup", item.Reason, StringComparison.Ordinal);
+            }
+            else
+            {
+                var historical = await reader.ReadPipelineAttentionAsync("historical-jobs", seed.Root, 0, default);
+                Assert.Equal(record.Id, Assert.Single(historical.Items).PipelineRecordId);
+            }
+        }
+    }
+
     [NativeSqlServerTheory]
     [InlineData(1)]
     [InlineData(2)]

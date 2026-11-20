@@ -17,7 +17,7 @@ public sealed record SqlGpuActivityReadEvidence(string OwnedTasksJson, int Uncer
     string RemovedJobBlockersJson = "[]", string RemovedGpuBlockersJson = "[]")
 {
     private static readonly string RemovedSourceGpuTasksSql = $$"""
-        SELECT task.Id, task.BatchId, task.AdmissionGeneration, task.ModelRuntimeKey, task.SettingsFingerprint
+        SELECT task.Id, task.BatchId, task.AdmissionGeneration, task.State, task.ModelRuntimeKey, task.SettingsFingerprint
         {{SqlRemovedSourceWork.RemovedJobBindings}}
         INNER JOIN GpuMiniTasks task ON task.ParentJobId = job.Id AND task.SourceRevision = job.SourceRevision
         WHERE task.BatchId IS NOT NULL AND task.State IN (2,3,4)
@@ -51,7 +51,7 @@ public sealed record SqlGpuActivityReadEvidence(string OwnedTasksJson, int Uncer
             .Distinct().ToArray();
         var batches = await context.GpuBatches.AsNoTracking()
             .Where(b => batchIds.Contains(b.Id))
-            .Select(b => new { b.Id, b.CapacitySlotKey, b.OwnerKey, b.AdmissionGeneration, b.State, b.ModelRuntimeKey, b.SettingsFingerprint })
+            .Select(b => new { b.Id, b.CapacitySlotKey, b.OwnerKey, b.AdmissionGeneration, b.State, b.ModelRuntimeKey, b.SettingsFingerprint, b.ItemCount })
             .ToDictionaryAsync(b => b.Id, cancellationToken).ConfigureAwait(false);
         var dispatches = await context.GpuExecutorDispatches.AsNoTracking()
             .Where(d => batchIds.Contains(d.BatchId))
@@ -104,6 +104,16 @@ public sealed record SqlGpuActivityReadEvidence(string OwnedTasksJson, int Uncer
             .ToArrayAsync(cancellationToken).ConfigureAwait(false);
         var reconciled = reconciliations.Select(receipt =>
             (receipt.BatchId!.Value, receipt.AdmissionGeneration, receipt.CapacitySlotKey, receipt.OwnerKey)).ToHashSet();
+        // A one-item batch header is insufficient: OCR and media cleanup also
+        // require that no other task currently refers to the same batch.
+        var completionCandidates = needsJobBlockers ? removedTasks.Where(task => task.State == (int)GpuMiniTaskExecutionState.Completed &&
+            !occupiedBatches.Contains(task.BatchId) && batches.TryGetValue(task.BatchId, out var batch) &&
+            batch.State == (int)GpuBatchState.Completed && batch.ItemCount == 1).Select(task => task.Id).ToArray() : [];
+        var singleTaskCompletions = completionCandidates.Length == 0 ? [] : await context.GpuMiniTasks.AsNoTracking()
+            .Where(task => completionCandidates.Contains(task.Id) &&
+                !context.GpuMiniTasks.Any(other => other.BatchId == task.BatchId && other.Id != task.Id))
+            .Select(task => task.Id).ToArrayAsync(cancellationToken).ConfigureAwait(false);
+        var singleTaskIds = singleTaskCompletions.ToHashSet();
         var removedReleases = new List<RemovedGpuRelease>();
         foreach (var task in removedTasks)
         {
@@ -118,10 +128,11 @@ public sealed record SqlGpuActivityReadEvidence(string OwnedTasksJson, int Uncer
                 if (dispatch.AdmissionGeneration != batch.AdmissionGeneration || dispatch.CapacitySlotKey != batch.CapacitySlotKey ||
                     dispatch.OwnerKey != batch.OwnerKey)
                     continue;
-                if (dispatch.State is (int)GpuExecutorDispatchState.Terminal or (int)GpuExecutorDispatchState.DeliveryUncertain &&
-                    (batch.State == (int)GpuBatchState.Completed && dispatch.State == (int)GpuExecutorDispatchState.Terminal ||
-                     batch.State == (int)GpuBatchState.Released || reconciledBatch))
-                    removedReleases.Add(new(task.Id, batch.Id, task.AdmissionGeneration, dispatch.DispatchId, dispatch.ExecutorKey));
+                var completed = batch.State == (int)GpuBatchState.Completed && dispatch.State == (int)GpuExecutorDispatchState.Terminal;
+                if (completed || dispatch.State is (int)GpuExecutorDispatchState.Terminal or (int)GpuExecutorDispatchState.DeliveryUncertain &&
+                    (batch.State == (int)GpuBatchState.Released || reconciledBatch))
+                    removedReleases.Add(new(task.Id, batch.Id, task.AdmissionGeneration, dispatch.DispatchId, dispatch.ExecutorKey,
+                        batch.CapacitySlotKey, completed && singleTaskIds.Contains(task.Id)));
             }
         }
         var (jobBlockers, gpuBlockers) = await SqlRemovedSourceWork.ReadBlockersAsync(context, removedInputIds,
@@ -130,12 +141,14 @@ public sealed record SqlGpuActivityReadEvidence(string OwnedTasksJson, int Uncer
     }
 
     private sealed record TaskProof(Guid Id, Guid BatchId, long AdmissionGeneration, bool HasActive, bool HasPending);
-    private sealed record RemovedGpuRelease(Guid TaskId, Guid BatchId, long AdmissionGeneration, Guid DispatchId, string ExecutorKey);
+    private sealed record RemovedGpuRelease(Guid TaskId, Guid BatchId, long AdmissionGeneration, Guid DispatchId,
+        string ExecutorKey, string CapacitySlotKey, bool SingleTaskCompletion);
     private sealed class RemovedGpuTask
     {
         public Guid Id { get; set; }
         public Guid BatchId { get; set; }
         public long AdmissionGeneration { get; set; }
+        public int State { get; set; }
         public string ModelRuntimeKey { get; set; } = "";
         public string SettingsFingerprint { get; set; } = "";
     }

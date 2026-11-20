@@ -18,7 +18,17 @@ public sealed partial class SourceDeletionIntegrationTests
     [NativeSqlServerTheory]
     [InlineData(false)]
     [InlineData(true)]
-    public async Task Graph_purge_with_completed_batch_history_keeps_both_cached_plan_orders_bounded(bool largeFirst)
+    public Task Graph_purge_with_completed_batch_history_keeps_both_cached_plan_orders_bounded(bool largeFirst) =>
+        AssertCompletedBatchGraphPurgeAsync(largeFirst, pagedBatchCount: 1001, maximumPagedReads: 100_000);
+
+    [SqlServerScaleTheory]
+    [Trait("Category", "Scale")]
+    [InlineData(false)]
+    [InlineData(true)]
+    public Task Large_graph_purge_with_completed_batch_history_keeps_both_cached_plan_orders_bounded(bool largeFirst) =>
+        AssertCompletedBatchGraphPurgeAsync(largeFirst, pagedBatchCount: 32768, maximumPagedReads: 8_000_000);
+
+    private async Task AssertCompletedBatchGraphPurgeAsync(bool largeFirst, int pagedBatchCount, int maximumPagedReads)
     {
         var control=await SeedRootAsync("batch-graph-control",SourceRootState.Enabled,DateTimeOffset.UtcNow);
         await using var connection=new SqlConnection(_fixture.ConnectionString);
@@ -30,7 +40,7 @@ public sealed partial class SourceDeletionIntegrationTests
         var factory=new RootDeletionScaleFactory(new DbContextOptionsBuilder<FluxKnowledgeDbContext>()
             .UseSqlServer(connection,sql=>sql.CommandTimeout(8)).Options);
         var store=new SqlSourceDeletionStore(factory,TimeProvider.System);
-        foreach(var count in largeFirst?new[]{32768,1}:new[]{1,32768})
+        foreach(var count in largeFirst?new[]{pagedBatchCount,1}:new[]{1,pagedBatchCount})
         {
             var (source,operation,_)=await SeedCompletedBatchGraphAsync(count);
             messages.Clear();
@@ -39,7 +49,7 @@ public sealed partial class SourceDeletionIntegrationTests
             var reads=messages.SelectMany(message=>Regex.Matches(message,@"(?<!lob )logical reads (\d+),"))
                 .Sum(match=>long.Parse(match.Groups[1].Value,CultureInfo.InvariantCulture));
             output.WriteLine($"batch_graph count={count} large_first={largeFirst} sql_purge_ms={watch.Elapsed.TotalMilliseconds:F1} logical_reads={reads}");
-            Assert.InRange(reads,1,8_000_000);
+            Assert.InRange(reads, 1, count == 1 ? 1_000 : maximumPagedReads);
             await using(var check=CreateContext())
             {
                 Assert.False(await check.PipelineRecords.AnyAsync(record=>record.Id==source.RecordId));
@@ -66,9 +76,17 @@ public sealed partial class SourceDeletionIntegrationTests
     }
 
     [NativeSqlServerFact]
-    public async Task Graph_purge_refuses_a_foreign_task_in_the_last_of_many_owned_batches_without_mutation()
+    public Task Graph_purge_refuses_a_foreign_task_in_the_last_of_many_owned_batches_without_mutation() =>
+        AssertGraphPurgeRefusesForeignTaskAsync(1001);
+
+    [SqlServerScaleFact]
+    [Trait("Category", "Scale")]
+    public Task Large_graph_purge_refuses_a_foreign_task_in_the_last_of_many_owned_batches_without_mutation() =>
+        AssertGraphPurgeRefusesForeignTaskAsync(32768);
+
+    private async Task AssertGraphPurgeRefusesForeignTaskAsync(int batchCount)
     {
-        var (source,operation,lastBatch)=await SeedCompletedBatchGraphAsync(32768);
+        var (source,operation,lastBatch)=await SeedCompletedBatchGraphAsync(batchCount);
         var control=await SeedRootAsync("batch-graph-foreign",SourceRootState.Enabled,DateTimeOffset.UtcNow);
         var foreign=Guid.NewGuid();
         await using(var seed=CreateContext())
@@ -89,8 +107,8 @@ public sealed partial class SourceDeletionIntegrationTests
         Assert.Equal("source-delete-local-ocr-shared-batch",error.Message);
         await using var check=CreateContext();
         Assert.Equal(versions,await check.GpuMiniTasks.OrderBy(task=>task.Id).Select(task=>task.RowVersion).ToArrayAsync());
-        Assert.Equal(32768,await check.GpuBatches.CountAsync());
-        Assert.Equal(32769,await check.DocumentOcrRequests.CountAsync());
+        Assert.Equal(batchCount,await check.GpuBatches.CountAsync());
+        Assert.Equal(batchCount+1,await check.DocumentOcrRequests.CountAsync());
         Assert.True(await check.PipelineRecords.AnyAsync(record=>record.Id==source.RecordId));
         Assert.True(await check.PipelineRecords.AnyAsync(record=>record.Id==control.RecordId));
         Assert.NotEmpty(await check.Vectors.ToArrayAsync());

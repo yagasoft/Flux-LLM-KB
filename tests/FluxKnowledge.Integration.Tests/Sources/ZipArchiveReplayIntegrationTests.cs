@@ -24,6 +24,7 @@ namespace FluxKnowledge.Integration.Tests.Sources;
 
 public sealed class ZipArchiveReplayIntegrationTests(NativeSqlServerFixture fixture) : IClassFixture<NativeSqlServerFixture>
 {
+    private const int LegacyRootMaximumFileBytes = 64 * 1024 * 1024;
     private readonly FluxKnowledge.Testing.TestResources _resources = new();
     private readonly NativeSqlServerFixture _fixture = fixture;
 
@@ -846,25 +847,26 @@ public sealed class ZipArchiveReplayIntegrationTests(NativeSqlServerFixture fixt
     }
 
     [NativeSqlServerFact]
-    public async Task Retained_binary_reader_accepts_a_zip_sized_artifact_without_relaxing_the_utf8_text_ceiling()
+    public async Task Retained_readers_accept_a_zip_sized_artifact_above_the_legacy_root_limit()
     {
         var root = Path.Combine(Path.GetTempPath(), $"flux-zip-reader-limits-{Guid.NewGuid():N}");
         Directory.CreateDirectory(root);
         try
         {
-            var bytes = new byte[64 * 1024 * 1024];
+            const int byteLength = LegacyRootMaximumFileBytes + 1;
+            var bytes = new byte[byteLength];
+            Array.Fill(bytes, (byte)'x');
             var hash = Convert.ToHexStringLower(SHA256.HashData(bytes));
             var relativePath = Path.Combine("sha256", hash[..2], $"{hash}.bin");
             Directory.CreateDirectory(Path.Combine(root, "sha256", hash[..2]));
             await File.WriteAllBytesAsync(Path.Combine(root, relativePath), bytes);
             var seeded = await SeedDeferredZipAsync(hash, bytes.Length, relativePath);
+            var revisionId = new SourceRevisionId(seeded.SourceRevisionId);
             using var reader = new SqlRetainedSourceReader(new ContextFactory(_fixture.ConnectionString), root);
 
-            var binary = await reader.ReadBytesAsync(new SourceRevisionId(seeded.SourceRevisionId), CancellationToken.None);
+            Assert.Equal(byteLength, (await reader.ReadBytesAsync(revisionId, CancellationToken.None)).ByteLength);
+            Assert.Equal(byteLength, (await reader.ReadUtf8Async(revisionId, CancellationToken.None)).Text.Length);
 
-            Assert.Equal(bytes.Length, binary.ByteLength);
-            await Assert.ThrowsAsync<InvalidDataException>(async () =>
-                await reader.ReadUtf8Async(new SourceRevisionId(seeded.SourceRevisionId), CancellationToken.None));
             await using var cleanup = CreateContext();
             (await cleanup.SourceActivities.SingleAsync(value => value.Id == seeded.LegacyActivityId)).State = (int)SourceActivityState.DeferredPolicy;
             await cleanup.SaveChangesAsync();
@@ -1448,7 +1450,7 @@ public sealed class ZipArchiveReplayIntegrationTests(NativeSqlServerFixture fixt
         if (sourceRootId is null)
         {
             context.SourceRootConfigurations.Add(new SourceRootConfigurationEntity { Id = rootId, CanonicalPath = rootPath, DisplayName = "Test", State = 0,
-            Recursive = true, IncludePatternsJson = "[]", ExcludePatternsJson = "[]", FollowLinks = false, MaximumFileBytes = 64L * 1024 * 1024,
+            Recursive = true, IncludePatternsJson = "[]", ExcludePatternsJson = "[]", FollowLinks = false, MaximumFileBytes = LegacyRootMaximumFileBytes,
             AllowedClassificationsJson = "[]", CrawlMode = 0, ReconciliationCadenceSeconds = 900, ConfigurationRevision = 1, CreatedAtUtc = now, UpdatedAtUtc = now });
         }
         context.SourceRevisions.Add(new SourceRevisionEntity { Id = revisionId, SourceRootId = rootId, StableSourceIdentity = stableSourceIdentity ?? $"zip-parent:{revisionId:N}", Revision = revision,

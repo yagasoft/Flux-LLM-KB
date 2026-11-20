@@ -306,6 +306,8 @@ internal sealed class GpuModelResidencyRuntime(SqlGpuModelResidencyStore store, 
     public override async Task StopAsync(CancellationToken cancellationToken)
     {
         await base.StopAsync(cancellationToken).ConfigureAwait(false);
-        await ReconcileIdleAsync(cancellationToken, stopping: true).ConfigureAwait(false);
+        // Other GPU workers can own a residency as soon as shared startup readiness completes.
+        if (readiness.IsReady)
+            await ReconcileIdleAsync(cancellationToken, stopping: true).ConfigureAwait(false);
     }
 }

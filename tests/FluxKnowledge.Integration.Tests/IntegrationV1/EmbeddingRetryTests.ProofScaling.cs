@@ -23,10 +23,19 @@ namespace FluxKnowledge.Integration.Tests.IntegrationV1;
 
 public sealed partial class EmbeddingRetryTests
 {
-    [NativeSqlServerTheory]
-    [InlineData(437)]
-    [InlineData(2048)]
-    public async Task Distinct_group_history_preserves_confirmation_bytes_with_bounded_payload_reads(int groups)
+    [NativeSqlServerFact]
+    public Task Distinct_group_history_preserves_confirmation_bytes_with_bounded_payload_reads() =>
+        AssertDistinctGroupHistoryAsync(groups: 129, verifyCheckpointInvalidation: true, maximumReaders: 180);
+
+    [SqlServerScaleTheory]
+    [Trait("Category", "Scale")]
+    [InlineData(437, true)]
+    [InlineData(2048, false)]
+    public Task Large_distinct_group_history_preserves_confirmation_bytes_with_bounded_payload_reads(
+        int groups, bool verifyCheckpointInvalidation) =>
+        AssertDistinctGroupHistoryAsync(groups, verifyCheckpointInvalidation, maximumReaders: groups / 2 + 250);
+
+    private async Task AssertDistinctGroupHistoryAsync(int groups, bool verifyCheckpointInvalidation, int maximumReaders)
     {
         await using var environment = await SeedAsync(canonicalRoot: Path.Combine(Path.GetTempPath(), "proof-scaling-" + Guid.NewGuid().ToString("N")));
         var work = await ClaimAsync(environment);
@@ -128,7 +137,7 @@ public sealed partial class EmbeddingRetryTests
             $"SQL readers={counter.Count + 1} (including sequential canonical reader); intercepted rows={counter.Rows}; " +
             $"execute-to-reader={counter.ExecuteToReaderMilliseconds:F1}ms; vector payload per full pass={groups * 16L * Profile.Dimensions * sizeof(float)} bytes; maximum result page=128 chunks.");
         Assert.Equal(JsonSerializer.Serialize(expected.Targets), JsonSerializer.Serialize(actual.Targets));
-        Assert.InRange(counter.Count, 1, groups / 2 + 250);
+        Assert.InRange(counter.Count, 1, maximumReaders);
         Assert.True(timer.Elapsed < TimeSpan.FromMinutes(1), $"Proof used {timer.Elapsed} of the two-minute worker lease.");
         // A late sibling and an earlier missing vector must still invalidate the
         // next proof, including history beyond a single bounded payload page.
@@ -183,7 +192,7 @@ public sealed partial class EmbeddingRetryTests
         await using var proofCheck = environment.Factory.CreateDbContext();
         Assert.Equal(groups, await proofCheck.GpuSchedulerOperationReceipts.CountAsync(receipt =>
             receipt.OperationKind == "embedding-checkpoint-validation/v1"));
-        if (groups == 437)
+        if (verifyCheckpointInvalidation)
         {
             var vector = await proofCheck.Vectors.AsNoTracking().OrderBy(value => value.VectorId)
                 .FirstAsync(value => value.IndexGenerationId == first.GenerationId);

@@ -40,10 +40,19 @@ public sealed partial class CorpusRetrievalEndToEndTests(NativeSqlServerFixture 
     private ITestOutputHelper Output => output;
 
     [NativeSqlServerFact]
-    public async Task Scoped_HTTP_hybrid_search_above_ten_thousand_vectors_uses_filtered_ANN_and_deletion_invalidates_citations()
+    public Task Scoped_HTTP_hybrid_search_uses_filtered_ANN_and_deletion_invalidates_citations() =>
+        AssertScopedHttpHybridSearchAsync(passageCount: 513);
+
+    [SqlServerScaleFact]
+    [Trait("Category", "Scale")]
+    public Task Scoped_HTTP_hybrid_search_above_ten_thousand_vectors_uses_filtered_ANN_and_deletion_invalidates_citations() =>
+        AssertScopedHttpHybridSearchAsync(passageCount: 10_001);
+
+    private async Task AssertScopedHttpHybridSearchAsync(int passageCount)
     {
         const string winning = "RepositoryWinner EvidenceMarker.";
-        var text = string.Join('\n', Enumerable.Range(0, 10_001).Select(index => index == 10_000 ? winning : $"Segment {index:D5}."));
+        var text = string.Join('\n', Enumerable.Range(0, passageCount)
+            .Select(index => index == passageCount - 1 ? winning : $"Segment {index:D5}."));
         await using var pipeline = await SqlToUsearchRebuildTests.PipelineEnvironment.CreateAsync(fixture, "Baseline.",
             new PassageBuilder(new WordTokenizer(), new PassagePolicy(2, 2, 128, 0, 0)),
             segmented: true, segmentMaximumVectors: 20_000);

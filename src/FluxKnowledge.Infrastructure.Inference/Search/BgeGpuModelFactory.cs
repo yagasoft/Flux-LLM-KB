@@ -35,8 +35,11 @@ public sealed class BgeGpuModelFactory : IBgeGpuModelFactory
     private readonly BgeGpuModelStores _stores;
     private readonly IGpuProcessModelResidency? _residency;
     public BgeGpuModelFactory(BgeGpuModelStores stores) : this(stores, BgeRerankerPrecision.Fp32) { }
+    public BgeGpuModelFactory(BgeGpuModelStores stores, BgeRerankerPrecision precision)
+        : this(stores, precision, null) { }
+
     public BgeGpuModelFactory(BgeGpuModelStores stores, BgeRerankerPrecision precision,
-        IGpuProcessModelResidency? residency = null)
+        IGpuProcessModelResidency? residency)
     {
         ArgumentNullException.ThrowIfNull(stores);
         _ = BgeOfflineModels.GetRerankerFingerprint(precision);

@@ -109,7 +109,8 @@ public sealed class SourceStatusEligibilityReadCostTests(NativeSqlServerFixture 
             timer.Stop();staleWarmReads=await LogicalReadsAsync(context)-before;
             output.WriteLine($"source_status stale_warm_logical_reads={staleWarmReads} stale_warm_elapsed_ms={timer.Elapsed.TotalMilliseconds:F1}");
             Assert.InRange(staleWarmReads,1,100_000);
-            foreach(var id in new[]{enabled,deleting}) Assert.Equal(result[id].Files.OrderBy(value=>value.SourceRevisionId),staleWarm[id].Files.OrderBy(value=>value.SourceRevisionId));
+            foreach (var id in new[] { enabled, deleting })
+                AssertEqualFileStates(result[id].Files, staleWarm[id].Files);
             var versions=await context.SourceRootConfigurations.OrderBy(value=>value.Id).Select(value=>value.RowVersion).ToArrayAsync();
             await context.Database.ExecuteSqlRawAsync("UPDATE STATISTICS dbo.SourceRootConfigurations PK_SourceRootConfigurations WITH FULLSCAN;");
             Assert.Equal(3,await RootStatisticsRowsAsync(context));
@@ -122,7 +123,21 @@ public sealed class SourceStatusEligibilityReadCostTests(NativeSqlServerFixture 
         var warmReads=await LogicalReadsAsync(context)-before;
         output.WriteLine($"source_status stale_statistics={staleRootStatistics} warm_logical_reads={warmReads} warm_elapsed_ms={timer.Elapsed.TotalMilliseconds:F1}");
         Assert.InRange(warmReads,1,100_000);
-        foreach(var id in new[]{enabled,deleting}) Assert.Equal(result[id].Files.OrderBy(value=>value.SourceRevisionId),warm[id].Files.OrderBy(value=>value.SourceRevisionId));
+        foreach (var id in new[] { enabled, deleting })
+            AssertEqualFileStates(result[id].Files, warm[id].Files);
+    }
+
+    private static void AssertEqualFileStates(
+        IReadOnlyList<SourceLogicalFileState> expected,
+        IReadOnlyList<SourceLogicalFileState> actual)
+    {
+        // Each read materialises a new reason list. Compare its contents and use record equality for the other fields.
+        Assert.Equal<SourceLogicalFileState>(
+            expected.OrderBy(file => file.SourceRevisionId),
+            actual.OrderBy(file => file.SourceRevisionId),
+            static (expectedFile, actualFile) =>
+                (expectedFile with { RecordedReasons = actualFile.RecordedReasons }) == actualFile &&
+                expectedFile.RecordedReasons.SequenceEqual(actualFile.RecordedReasons, StringComparer.Ordinal));
     }
 
     private static async Task<long> RootStatisticsRowsAsync(FluxKnowledgeDbContext context)=>

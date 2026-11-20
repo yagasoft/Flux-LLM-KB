@@ -21,7 +21,7 @@ public sealed class OverviewProjectionTests
         var activity = new PipelineActivitySummary(now, now, [],
             [new(root, "Document library", "Publish", PipelineWorkState.Waiting, false,
                 "index-storage-capacity-deferred", 2)], [], 0, 0, 0);
-        using var factory = new OverviewApplicationFactory(CreateOverview(0, 2) with { Activity = activity });
+        using var factory = new OverviewApplicationFactory(CreateOverview(0, 2) with { Activity = activity }, sampledAt: now);
         using var client = factory.CreateClient();
 
         var html = await client.GetStringAsync("/");
@@ -44,7 +44,7 @@ public sealed class OverviewProjectionTests
         {
             FileCauses = [new(root, "Blocked", "SourceContentNotAvailableLocally", "Make the file available locally, then reconcile metadata.", 2)]
         };
-        using var factory = new OverviewApplicationFactory(CreateOverview(0, 7) with { Activity = activity });
+        using var factory = new OverviewApplicationFactory(CreateOverview(0, 7) with { Activity = activity }, sampledAt: now);
         using var client = factory.CreateClient();
 
         var html = await client.GetStringAsync("/");
@@ -628,7 +628,8 @@ public sealed class OverviewProjectionTests
     private sealed class ProjectionDbException() : DbException("SQL read failed");
 
     private sealed class OverviewApplicationFactory(OverviewProjection? projection = null, bool failReads = false,
-        Exception? readFailure = null, OverviewProjectionState? projectionState = null) : WebApplicationFactory<Program>
+        Exception? readFailure = null, OverviewProjectionState? projectionState = null,
+        DateTimeOffset? sampledAt = null) : WebApplicationFactory<Program>
     {
         protected override void ConfigureWebHost(IWebHostBuilder builder)
         {
@@ -645,6 +646,11 @@ public sealed class OverviewProjectionTests
                 // Rendering uses the fake projection reader. Unrelated hosted
                 // SQL workers must not stop this host on its placeholder server.
                 services.RemoveAll<IHostedService>();
+                if (sampledAt is { } sample)
+                {
+                    services.RemoveAll<TimeProvider>();
+                    services.AddSingleton<TimeProvider>(new SnapshotClock(sample));
+                }
                 services.RemoveAll<IProjectionReader>();
                 if (projection is null) services.AddScoped<IProjectionReader, NoActiveSchedulerProjectionReader>();
                 else services.AddScoped<IProjectionReader>(_ => new FakeProjectionReader(projection)
@@ -656,6 +662,11 @@ public sealed class OverviewProjectionTests
                 }
             });
         }
+    }
+
+    private sealed class SnapshotClock(DateTimeOffset utcNow) : TimeProvider
+    {
+        public override DateTimeOffset GetUtcNow() => utcNow;
     }
 
     private sealed class NoActiveSchedulerProjectionReader : IProjectionReader

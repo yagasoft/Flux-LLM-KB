@@ -22,6 +22,11 @@ internal static class BgeSearchRuntimeComposition
     // Provisional conservative admission estimate; real peak/latency gates still apply before activation.
     private const long EstimatedGpuBytes = 8L * 1024 * 1024 * 1024;
     private static readonly TimeSpan SearchExecutionTimeout = TimeSpan.FromSeconds(20);
+
+    // Share the runtime with executors and let the strict host check recognise this exact factory registration.
+    internal static ServiceDescriptor ResidencyHostedService { get; } = ServiceDescriptor.Singleton<IHostedService>(
+        provider => provider.GetRequiredService<GpuModelResidencyRuntime>());
+
     internal static void Add(IServiceCollection services, bool enableWindowBackfill,
         MediaTranscriptionGpuRuntime? transcription = null, bool enableModelWarming = false)
     {
@@ -58,7 +63,8 @@ internal static class BgeSearchRuntimeComposition
             provider.GetRequiredService<IDatabaseStartupReadiness>(), provider.GetRequiredService<ILogger<GpuModelResidencyRuntime>>(),
             NewSchedulerStore(provider)));
         services.AddSingleton<IGpuProcessModelResidency>(provider => provider.GetRequiredService<GpuModelResidencyRuntime>());
-        services.AddHostedService(provider => provider.GetRequiredService<GpuModelResidencyRuntime>());
+        // Also reconcile existing residency when new warming is disabled.
+        services.Add(ResidencyHostedService);
         services.AddSingleton<IBgeGpuModelFactory>(provider => new BgeGpuModelFactory(provider.GetRequiredService<BgeGpuModelStores>(),
             BgeRerankerPrecision.Fp32, provider.GetRequiredService<IGpuProcessModelResidency>()));
         services.AddSingleton<BgeGpuInferenceSession>();

@@ -84,6 +84,10 @@ public sealed class GitTrackedSourceTests : IDisposable
         {
             await service.StartAsync(CancellationToken.None);
             await PrimeWatcherAsync(store, tracked);
+            // The negative check needs a quiet queue after priming. Positive
+            // checks below wait for their specific hint instead.
+            await Task.Delay(2500);
+            while (store.Signals.Reader.TryRead(out _)) { }
 
             for (var index = 0; index < 50; index++)
             {
@@ -133,7 +137,11 @@ public sealed class GitTrackedSourceTests : IDisposable
             await PrimeWatcherAsync(store, tracked);
             Directory.Move(original, target);
             using var deadline = new CancellationTokenSource(TimeSpan.FromSeconds(5));
-            Assert.Equal(root.Id, (await store.Signals.Reader.ReadAsync(deadline.Token)).RootId);
+            var oldRelative = Path.GetRelativePath(directory, original);
+            var newRelative = Path.GetRelativePath(directory, target);
+            Assert.Equal(root.Id, (await ReadMatchingSignalAsync(store, signal => signal.Paths?.Any(hint =>
+                hint.IsSubtree && (hint.RelativePath == oldRelative || hint.RelativePath == newRelative)) == true,
+                deadline.Token)).RootId);
         }
         finally
         {
@@ -194,7 +202,8 @@ public sealed class GitTrackedSourceTests : IDisposable
             await PrimeWatcherAsync(store, tracked);
             GitAt(watched, "rm", "--cached", "safe.md");
             using var deadline = new CancellationTokenSource(TimeSpan.FromSeconds(5));
-            Assert.Equal(root.Id, (await store.Signals.Reader.ReadAsync(deadline.Token)).RootId);
+            Assert.Equal(root.Id, (await ReadMatchingSignalAsync(store, signal => signal.RepositoryControlChanged,
+                deadline.Token)).RootId);
             Assert.True(File.Exists(tracked));
             Assert.Empty((await new GitTrackedSourceDiscovery().ReadAsync(watched, deadline.Token)).Paths);
         }
@@ -370,8 +379,18 @@ public sealed class GitTrackedSourceTests : IDisposable
         }
         using var deadline = new CancellationTokenSource(TimeSpan.FromSeconds(5));
         Assert.NotEqual(SourceWatchSignalKind.Overflow, (await store.Signals.Reader.ReadAsync(deadline.Token)).Kind);
-        await Task.Delay(2500);
-        while (store.Signals.Reader.TryRead(out _)) { }
+    }
+
+    private static async Task<SourceWatchSignal> ReadMatchingSignalAsync(WatchStore store,
+        Func<SourceWatchSignal, bool> isMatch, CancellationToken cancellationToken)
+    {
+        while (true)
+        {
+            var signal = await store.Signals.Reader.ReadAsync(cancellationToken);
+            Assert.NotEqual(SourceWatchSignalKind.Overflow, signal.Kind);
+            if (isMatch(signal))
+                return signal;
+        }
     }
 
     public void Dispose()

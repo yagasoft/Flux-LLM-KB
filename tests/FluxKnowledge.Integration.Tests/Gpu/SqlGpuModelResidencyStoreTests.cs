@@ -116,6 +116,58 @@ public sealed class SqlGpuModelResidencyStoreTests(NativeSqlServerFixture fixtur
         }
     }
 
+    [NativeSqlServerTheory]
+    [InlineData(true)]
+    [InlineData(false)]
+    public async Task Ready_runtime_releases_owned_parked_model_on_stop_even_without_background_loop(bool startBackgroundLoop)
+    {
+        var setup = new SqlGpuAdmissionTests(fixture);
+        var factory = await setup.CreateEnvironmentAsync();
+        var clock = new ManualClock(DateTimeOffset.UtcNow);
+        var owner = new GpuInteractiveOwnerIdentity(42, clock.GetUtcNow(), new string('a', 64));
+        var model = new GpuResidentModelKey("resident-test:model", "settings", "embedding");
+        var policy = new GpuWorkloadPolicy([new(model.RuntimeKey, model.SettingsFingerprint, GpuWorkloadKind.Retrieval)]);
+        var options = new GpuSchedulerOptions(1, 4096, TimeSpan.FromMinutes(5), TimeSpan.FromMinutes(1),
+            TimeSpan.FromMinutes(10), policy, [model]);
+        var scheduler = new SqlGpuSchedulerStore(factory, timeProvider: clock, interactiveOwner: owner,
+            sourceAdmission: new FixtureSourceAdmission(factory));
+        var store = new SqlGpuModelResidencyStore(factory, clock);
+        using var runtime = new GpuModelResidencyRuntime(store, options, new LocalProcess(owner),
+            new ChannelGpuSchedulerWakeSignal(), clock, new ReadyDatabase(), NullLogger<GpuModelResidencyRuntime>.Instance, scheduler);
+
+        await using var db = await factory.CreateDbContextAsync();
+        var slotKey = await db.GpuCapacitySlots.Select(slot => slot.SlotKey).SingleAsync();
+        var taskId = await setup.AddReadyAsync(factory, GpuPriorityLane.DocumentIndexing, model.RuntimeKey, model.SettingsFingerprint, 1024);
+        var admission = await scheduler.RunAdmissionRoundAsync(GpuSchedulerWakeReason.WorkReady, options,
+            (candidate, _) => ValueTask.FromResult(new GpuAdmissionDecision(GpuAdmissionDisposition.Admit, slotKey,
+                "resident-test:owner", null, candidate.RequiredExecutorKey ?? "resident-test:executor")), default);
+        Assert.Equal(GpuAdmissionDisposition.Admit, admission.Disposition);
+        var dispatch = await db.GpuExecutorDispatches.AsNoTracking().SingleAsync();
+        var handle = new GpuExecutorBatchHandle(dispatch.BatchId, slotKey, dispatch.ExecutorKey,
+            dispatch.AdmissionGeneration, dispatch.DispatchId);
+        Assert.True((await scheduler.AcknowledgeAsync(new(Guid.NewGuid(), handle), default)).Accepted);
+        var context = new GpuOwnedWorkContext(handle, model.RuntimeKey, model.SettingsFingerprint, default);
+        var allocation = await runtime.GetModelAsync(context, model, () => ValueTask.FromResult(new FakeModel()));
+        Assert.True((await scheduler.RecordReceiptAsync(new(Guid.NewGuid(), handle, taskId, GpuMiniTaskBoundaryDisposition.Completed,
+            null, GpuExecutorEvidenceClass.TaskOutcomeConfirmed), default)).Accepted);
+        Assert.True(await runtime.CompleteAsync(context, Guid.NewGuid(), taskId, default));
+        var idle = Assert.Single(await store.ReadLiveAsync(default));
+        Assert.Equal((int)GpuModelResidencyState.Idle, idle.State);
+        Assert.True(idle.IdleUntilUtc > clock.GetUtcNow());
+        Assert.False(allocation.PhysicalReleaseConfirmed);
+
+        if (startBackgroundLoop) await runtime.StartAsync(default);
+        using var shutdown = new CancellationTokenSource(TimeSpan.FromSeconds(30));
+        await runtime.StopAsync(shutdown.Token);
+
+        Assert.True(allocation.PhysicalReleaseConfirmed);
+        var released = await db.GpuModelResidencies.AsNoTracking().SingleAsync(row => row.ResidencyId == idle.ResidencyId);
+        Assert.Equal((int)GpuModelResidencyState.Released, released.State);
+        Assert.Equal((int)GpuResidentReleaseKind.NativeSessionDisposed, released.ReleaseKind);
+        Assert.Equal((int)GpuCapacitySlotState.Available,
+            await db.GpuCapacitySlots.Select(slot => slot.State).SingleAsync());
+    }
+
     [NativeSqlServerFact]
     public async Task Idle_capacity_remains_reserved_until_exact_eviction_proof_and_stale_fences_are_refused()
     {
@@ -206,7 +258,7 @@ public sealed class SqlGpuModelResidencyStoreTests(NativeSqlServerFixture fixtur
     private sealed class FakeModel : IGpuProcessResidentModel
     {
         public bool IsIdle => true;
-        public bool PhysicalReleaseConfirmed => false;
-        public void Dispose() { }
+        public bool PhysicalReleaseConfirmed { get; private set; }
+        public void Dispose() => PhysicalReleaseConfirmed = true;
     }
 }

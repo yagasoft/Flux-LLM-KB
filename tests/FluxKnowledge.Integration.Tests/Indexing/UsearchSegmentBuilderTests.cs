@@ -1,3 +1,4 @@
+using System.ComponentModel;
 using System.Runtime.CompilerServices;
 using System.Security.Cryptography;
 using Cloud.Unum.USearch;
@@ -386,6 +387,85 @@ public sealed class UsearchSegmentBuilderTests : IDisposable
             Directory.Delete(link);
             Directory.Delete(outside);
         }
+    }
+
+    [Fact]
+    public async Task Staged_segment_is_validated_and_placed_after_transient_file_contention()
+    {
+        using var paths = new StagingFileContention(_root, releaseAfterFirstBlockedRead: true);
+        var builder = new UsearchSegmentBuilder(UsearchIndexOptions.FromConfiguredRoot(_root), paths, new(2));
+
+        var segment = Assert.Single(await builder.BuildAsync("synthetic-segment-profile", 4, Stream([Vector(1)]), default));
+
+        Assert.True(paths.ObservedContention);
+        using var native = new USearchIndex(Path.Combine(segment.DirectoryPath, "index.usearch"), false);
+        Assert.True(native.Contains(1));
+        Assert.Empty(Directory.EnumerateFileSystemEntries(Path.Combine(_root, "staging", "segments")));
+    }
+
+    [Fact]
+    public async Task Staging_file_contention_honours_cancellation()
+    {
+        using var cancellation = new CancellationTokenSource();
+        using var paths = new StagingFileContention(_root, releaseAfterFirstBlockedRead: true, cancellation.Cancel);
+        var builder = new UsearchSegmentBuilder(UsearchIndexOptions.FromConfiguredRoot(_root), paths, new(2));
+
+        await Assert.ThrowsAnyAsync<OperationCanceledException>(() =>
+            builder.BuildAsync("synthetic-segment-profile", 4, Stream([Vector(1)]), cancellation.Token).AsTask());
+
+        Assert.True(paths.ObservedContention);
+        Assert.Empty(Directory.EnumerateFileSystemEntries(Path.Combine(_root, "segments")));
+        Assert.Empty(Directory.EnumerateFileSystemEntries(Path.Combine(_root, "staging", "segments")));
+    }
+
+    [Fact]
+    public async Task Persistent_staging_contention_preserves_the_validation_error_when_cleanup_cannot_unlink()
+    {
+        using var deadline = new CancellationTokenSource(TimeSpan.FromSeconds(5));
+        using var paths = new StagingFileContention(_root, releaseAfterFirstBlockedRead: false);
+        var builder = new UsearchSegmentBuilder(UsearchIndexOptions.FromConfiguredRoot(_root), paths, new(2));
+
+        var error = await Assert.ThrowsAsync<IOException>(() =>
+            builder.BuildAsync("synthetic-segment-profile", 4, Stream([Vector(1)]), deadline.Token).AsTask());
+
+        Assert.Equal(32, Assert.IsType<Win32Exception>(error.InnerException).NativeErrorCode);
+        Assert.IsType<IOException>(error.Data["segment-staging-cleanup-failure"]);
+        Assert.Empty(Directory.EnumerateFileSystemEntries(Path.Combine(_root, "segments")));
+    }
+
+    private sealed class StagingFileContention(string root, bool releaseAfterFirstBlockedRead, Action? onBlockedRead = null)
+        : IIndexSegmentReadLeaseFactory, IDisposable
+    {
+        private readonly WindowsIndexSegmentReadLeaseFactory _inner = new(root);
+        private readonly string _staging = Path.Combine(root, "staging", "segments");
+        private FileStream? _held;
+        public bool ObservedContention { get; private set; }
+
+        public IDisposable Acquire(string segmentDirectory)
+        {
+            if (Path.GetDirectoryName(segmentDirectory) != _staging || (ObservedContention && releaseAfterFirstBlockedRead))
+                return _inner.Acquire(segmentDirectory);
+
+            _held ??= File.Open(Path.Combine(segmentDirectory, "index.usearch"), FileMode.Open, FileAccess.Read, FileShare.None);
+            try { return _inner.Acquire(segmentDirectory); }
+            catch (IOException error) when (error.InnerException is Win32Exception { NativeErrorCode: 32 })
+            {
+                ObservedContention = true;
+                if (releaseAfterFirstBlockedRead)
+                {
+                    _held.Dispose();
+                    _held = null;
+                }
+                onBlockedRead?.Invoke();
+                throw;
+            }
+        }
+
+        public IDisposable AcquireManifest(string manifestDirectory) => _inner.AcquireManifest(manifestDirectory);
+
+        public IDisposable AcquireDirectory(string directory, bool create = false) => _inner.AcquireDirectory(directory, create);
+
+        public void Dispose() => _held?.Dispose();
     }
 
     [Fact]

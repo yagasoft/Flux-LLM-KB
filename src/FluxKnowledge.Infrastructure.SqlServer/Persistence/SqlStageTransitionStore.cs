@@ -203,20 +203,20 @@ public sealed partial class SqlStageTransitionStore : IStageTransitionStore
             }
         }
 
-        context.Artifacts.Add(
-            new ArtifactEntity
-            {
-                Id = request.Artifact.Id,
-                PipelineRecordId = request.CurrentJob.PipelineRecordId.Value,
-                SourceRevision = request.CurrentJob.SourceRevision,
-                Stage = (int)request.Artifact.Stage,
-                ContentHash = request.Artifact.ContentHash,
-                ContentType = request.Artifact.ContentType,
-                SearchText = request.Artifact.SearchText,
-                DocumentMetadataJson = request.Artifact.DocumentMetadataJson,
-                CreatedAtUtc = request.Artifact.CreatedAtUtc
-            });
-        await WriteIndexingOutputAsync(context, request, validated.PipelineRecord.RepositoryRecoveryBindingJson is not null, cancellationToken).ConfigureAwait(false);
+        var artifact = new ArtifactEntity
+        {
+            Id = request.Artifact.Id,
+            PipelineRecordId = request.CurrentJob.PipelineRecordId.Value,
+            SourceRevision = request.CurrentJob.SourceRevision,
+            Stage = (int)request.Artifact.Stage,
+            ContentHash = request.Artifact.ContentHash,
+            ContentType = request.Artifact.ContentType,
+            SearchText = request.Artifact.SearchText,
+            DocumentMetadataJson = request.Artifact.DocumentMetadataJson,
+            CreatedAtUtc = request.Artifact.CreatedAtUtc
+        };
+        context.Artifacts.Add(artifact);
+        await WriteIndexingOutputAsync(context, request, artifact, validated.PipelineRecord.RepositoryRecoveryBindingJson is not null, cancellationToken).ConfigureAwait(false);
         if (request.IndexingOutput?.DisclosureProof is { } proof)
         {
             if (request.Artifact.Stage != PipelineStage.CanonicalIndex)
@@ -900,7 +900,7 @@ public sealed partial class SqlStageTransitionStore : IStageTransitionStore
         }
     }
 
-    private async Task WriteIndexingOutputAsync(FluxKnowledgeDbContext context, StageTransitionRequest request,
+    private async Task WriteIndexingOutputAsync(FluxKnowledgeDbContext context, StageTransitionRequest request, ArtifactEntity artifact,
         bool enrolledRepositoryWork, CancellationToken cancellationToken)
     {
         var output = request.IndexingOutput;
@@ -926,8 +926,7 @@ public sealed partial class SqlStageTransitionStore : IStageTransitionStore
                     ContextHeader = chunk.ContextHeader,
                     SearchInputHash = chunk.SearchInputHash
                 };
-                entity.WindowEligibility = CanonicalWindowEligibility.Bind(entity,
-                    context.Artifacts.Local.Single(value => value.Id == request.Artifact.Id), _timeProvider.GetUtcNow());
+                entity.WindowEligibility = CanonicalWindowEligibility.Bind(entity, artifact, _timeProvider.GetUtcNow());
                 context.TextChunks.Add(entity);
             }
         }

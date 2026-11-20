@@ -197,6 +197,7 @@ public static class WebHostComposition
             allowedHostedServiceTypes.Add(typeof(BgeCpuWarmupService));
             allowedHostedServiceTypes.Add(typeof(CorpusAnnPreparationService));
             allowedHostedServiceTypes.Add(typeof(TextChunkWindowBackfillService));
+            allowedHostedServiceTypes.Add(typeof(GpuModelResidencyRuntime));
         }
         if (runtime.WorkerEnabled)
         {
@@ -760,13 +761,19 @@ public static class WebHostComposition
         };
     }
 
-    private static Type? HostedServiceType(ServiceDescriptor descriptor) =>
-        descriptor.ImplementationType ??
-        (descriptor.ImplementationFactory?.Method.Name.Contains(
+    private static Type? HostedServiceType(ServiceDescriptor descriptor)
+    {
+        if (ReferenceEquals(descriptor, BgeSearchRuntimeComposition.ResidencyHostedService))
+            return typeof(GpuModelResidencyRuntime);
+        // A typed residency registration would construct a second owner instead of sharing the runtime.
+        if (descriptor.ImplementationType is { } implementationType)
+            return implementationType == typeof(GpuModelResidencyRuntime) ? null : implementationType;
+        return descriptor.ImplementationFactory?.Method.Name.Contains(
             nameof(OutboxWorkerServiceCollectionExtensions.AddFluxKnowledgeOutboxWorkers),
             StringComparison.Ordinal) == true
             ? typeof(OutboxPumpService)
-            : null);
+            : null;
+    }
 
     private static bool ReadProcessorEnabled(IConfiguration configuration, string key, bool defaultValue) =>
         configuration[key] is not { } configured

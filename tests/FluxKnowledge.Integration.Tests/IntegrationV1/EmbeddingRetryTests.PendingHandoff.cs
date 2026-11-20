@@ -27,8 +27,13 @@ public sealed partial class EmbeddingRetryTests
         AssertPendingHandoffRecoveryAsync();
 
     [NativeSqlServerFact]
+    public Task Multi_page_handoff_history_keeps_native_recovery_queries_bounded_and_preserves_every_saved_sibling() =>
+        AssertPendingHandoffRecoveryAsync(savedGroups: 9, sections: 32, maximumRecoveryReaders: 150);
+
+    [SqlServerScaleFact]
+    [Trait("Category", "Scale")]
     public Task Large_handoff_history_keeps_native_recovery_queries_bounded_and_preserves_every_saved_sibling() =>
-        AssertPendingHandoffRecoveryAsync(savedGroups: 437);
+        AssertPendingHandoffRecoveryAsync(savedGroups: 437, sections: 2000, maximumRecoveryReaders: 437 * 3 + 300);
 
     [NativeSqlServerTheory]
     [InlineData("digest")]
@@ -43,9 +48,10 @@ public sealed partial class EmbeddingRetryTests
     public Task Unstarted_handoff_recovery_refuses_execution_evidence_conflicts_and_stale_confirmation(string boundary) =>
         AssertPendingHandoffRecoveryAsync(boundary);
 
-    private async Task AssertPendingHandoffRecoveryAsync(string? boundary = null, int savedGroups = 1)
+    private async Task AssertPendingHandoffRecoveryAsync(string? boundary = null, int savedGroups = 1, int sections = 12,
+        int? maximumRecoveryReaders = null)
     {
-        await using var environment = await SeedAsync(savedGroups > 1 ? 2000 : 12);
+        await using var environment = await SeedAsync(sections);
         var admission = new FixtureSourceAdmission(environment.Factory);
         var scheduler = new SqlGpuSchedulerStore(environment.Factory, sourceAdmission: admission);
         var wake = new ChannelGpuSchedulerWakeSignal();
@@ -134,7 +140,11 @@ public sealed partial class EmbeddingRetryTests
         }
         var preview = await service.PreviewAsync(command, "test", default);
         await service.CommitAsync(command, preview.ConfirmationId, "recover-never-handed-off-" + work.Job.JobId.Value.ToString("N"), "test", default);
-        if (savedGroups > 1) Assert.InRange(counter.Count, 1, savedGroups * 3 + 300);
+        if (maximumRecoveryReaders is { } maximum)
+        {
+            output.WriteLine($"pending_handoff saved_groups={savedGroups} recovery_sql_readers={counter.Count}");
+            Assert.InRange(counter.Count, 1, maximum);
+        }
         var replayed = await ClaimAsync(environment);
         var upgradedCheckpoint = new SqlEmbeddingCheckpointStore(environment.Factory, TimeProvider.System, Runtime, admission);
         var replayBatch = await upgradedCheckpoint.ReadNextAsync(replayed, Profile, default);
