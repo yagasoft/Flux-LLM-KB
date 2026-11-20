@@ -711,7 +711,9 @@ public sealed partial class SqlSourceScanStore(
     {
         var roots = await context.SourceRootConfigurations
             .Where(root => root.State == (int)SourceRootState.Enabled &&
-                (root.LastScanCompletedAtUtc == null || root.LastScanCompletedAtUtc.Value.AddSeconds(root.ReconciliationCadenceSeconds) <= nowUtc))
+                (root.LastScanCompletedAtUtc == null || root.LastScanCompletedAtUtc.Value.AddSeconds(root.ReconciliationCadenceSeconds) <= nowUtc ||
+                 root.ReconciliationCadenceSeconds == SourcePolicyDefaults.MetadataReconciliationSeconds &&
+                 context.SourceRootScanStates.Any(state => state.SourceRootId == root.Id && state.AncestorReconciliationDueAtUtc <= nowUtc)))
             .ToListAsync(cancellationToken).ConfigureAwait(false);
         foreach (var root in roots)
         {

@@ -111,8 +111,9 @@ internal sealed class SqlPipelineActivityReader(IDeploymentValidationHold? hold,
                 join checkpoint in context.SourceVolumeJournalCheckpoints.AsNoTracking() on state.VolumeIdentity equals checkpoint.VolumeIdentity into checkpoints
                 from checkpoint in checkpoints.DefaultIfEmpty()
                 select new { state.SourceRootId, state.VolumeIdentity, state.Mode, state.RecoveryRequired, state.LastReconciliationAtUtc,
+                    state.AncestorReconciliationDueAtUtc,
                     HasCheckpoint = checkpoint != null, UnavailableSinceUtc = checkpoint == null ? null : checkpoint.UnavailableSinceUtc,
-                    Reason = checkpoint == null ? state.Reason : checkpoint.LastFailureCode,
+                    Reason = checkpoint == null || checkpoint.LastFailureCode == null ? state.Reason : checkpoint.LastFailureCode,
                     NextRetryAtUtc = checkpoint == null ? null : checkpoint.DueAtUtc })
             .ToDictionaryAsync(x => x.SourceRootId, cancellationToken).ConfigureAwait(false);
         var sources = roots.Select(root =>
@@ -139,7 +140,8 @@ internal sealed class SqlPipelineActivityReader(IDeploymentValidationHold? hold,
                     approved && (journal.RecoveryRequired || journal.Mode is "BaselineRequired" or "Baselining"),
                     approved ? journal.Reason : "journal-volume-not-approved",
                     approved ? journal.UnavailableSinceUtc : null, approved ? journal.NextRetryAtUtc : null,
-                    (journal.LastReconciliationAtUtc ?? root.LastScanCompletedAtUtc)?.AddSeconds(root.ReconciliationCadenceSeconds),
+                    NextReconciliation(journal.AncestorReconciliationDueAtUtc,
+                        (journal.LastReconciliationAtUtc ?? root.LastScanCompletedAtUtc)?.AddSeconds(root.ReconciliationCadenceSeconds)),
                     root.ReconciliationCadenceSeconds)
             };
         }).ToArray();
@@ -387,6 +389,9 @@ internal sealed class SqlPipelineActivityReader(IDeploymentValidationHold? hold,
         "no-reason-recorded" => "Reason not recorded",
         _ => FileAttentionIssue.Label(reason)
     };
+
+    private static DateTimeOffset? NextReconciliation(DateTimeOffset? early, DateTimeOffset? weekly) =>
+        weekly is null || early < weekly ? early : weekly;
 
     private static string SourceName(Guid? root, IReadOnlyDictionary<Guid, string> names) =>
         root is { } id ? names.GetValueOrDefault(id) ?? "Source binding unavailable" : "Local ingress";

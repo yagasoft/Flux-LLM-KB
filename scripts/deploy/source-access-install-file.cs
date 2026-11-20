@@ -26,8 +26,8 @@ public static class FluxSourceAccessInstallFile {
     out IntPtr owner,out IntPtr group,out IntPtr dacl,out IntPtr sacl,out IntPtr descriptor);
   [DllImport("advapi32.dll")] static extern uint GetSecurityDescriptorLength(IntPtr descriptor);
   [DllImport("kernel32.dll")] static extern IntPtr LocalFree(IntPtr memory);
-  static bool Trusted(string sid,bool volume) => sid=="S-1-5-18" || sid=="S-1-5-32-544" ||
-    volume && sid=="S-1-5-80-956008885-3418522649-1831038044-1853292631-2271478464";
+  static bool Trusted(string sid,bool windowsServicing) => sid=="S-1-5-18" || sid=="S-1-5-32-544" ||
+    windowsServicing && sid=="S-1-5-80-956008885-3418522649-1831038044-1853292631-2271478464";
   static int MapRights(int mask) {
     int mapped=mask&0x0fffffff;
     if((mask&unchecked((int)0x80000000))!=0) mapped|=0x120089;
@@ -36,20 +36,22 @@ public static class FluxSourceAccessInstallFile {
     if((mask&0x10000000)!=0) mapped|=0x1f01ff;
     return mapped;
   }
-  public static void ValidateDescriptor(byte[] bytes,bool volume) {
+  public static void ValidateDescriptor(byte[] bytes,bool volume) => ValidateDescriptor(bytes,volume,volume);
+  static void ValidateDescriptor(byte[] bytes,bool volume,bool windowsServicing) {
     var raw=new RawSecurityDescriptor(bytes,0);
-    if(raw.Owner==null || !Trusted(raw.Owner.Value,volume) || raw.DiscretionaryAcl==null)
+    if(raw.Owner==null || !Trusted(raw.Owner.Value,windowsServicing) || raw.DiscretionaryAcl==null)
       throw new UnauthorizedAccessException("The installation namespace has unsafe ownership or permissions.");
     foreach(GenericAce generic in raw.DiscretionaryAcl) {
       var ace=generic as CommonAce;
       if(ace==null || ace.IsCallback || (ace.AceQualifier!=AceQualifier.AccessAllowed && ace.AceQualifier!=AceQualifier.AccessDenied))
         throw new UnauthorizedAccessException("Unsupported installation permission ACE.");
       if(ace.AceQualifier==AceQualifier.AccessAllowed && (ace.AceFlags&AceFlags.InheritOnly)==0 &&
-         !Trusted(ace.SecurityIdentifier.Value,volume) && (MapRights(ace.AccessMask)&(volume?0xc0040:0xd0156))!=0)
+         !Trusted(ace.SecurityIdentifier.Value,windowsServicing) && (MapRights(ace.AccessMask)&(volume?0xc0040:0xd0156))!=0)
         throw new UnauthorizedAccessException("The installation namespace permits untrusted mutation.");
     }
   }
-  public static void ValidatePrivateDirectory(SafeFileHandle handle,string path) {
+  public static void ValidatePrivateDirectory(SafeFileHandle handle,string path) => ValidatePrivateDirectory(handle,path,false);
+  static void ValidatePrivateDirectory(SafeFileHandle handle,string path,bool windowsServicing) {
     if(!GetFileInformationByHandleEx(handle,9,out var tag,8) || !GetFileInformationByHandle(handle,out var info))
       throw new Win32Exception(Marshal.GetLastWin32Error());
     var final=new StringBuilder(32768); uint length=FinalPath(handle,final,32768,0);
@@ -61,7 +63,7 @@ public static class FluxSourceAccessInstallFile {
     try {
       uint size=GetSecurityDescriptorLength(descriptor);
       if(size==0 || size>1048576) throw new IOException("Unsafe installation descriptor.");
-      var bytes=new byte[size]; Marshal.Copy(descriptor,bytes,0,(int)size); ValidateDescriptor(bytes,false);
+      var bytes=new byte[size]; Marshal.Copy(descriptor,bytes,0,(int)size); ValidateDescriptor(bytes,false,windowsServicing);
     } finally { LocalFree(descriptor); }
   }
   public static SafeFileHandle CreatePrivateDirectory(string path,byte[] descriptor) {
@@ -78,12 +80,13 @@ public static class FluxSourceAccessInstallFile {
       ValidatePrivateDirectory(handle,canonical); return handle;
     } catch { handle.Dispose(); throw; }
   }
-  public static SafeFileHandle OpenPrivateDirectory(string path) {
+  public static SafeFileHandle OpenPrivateDirectory(string path) => OpenPrivateDirectory(path,false);
+  public static SafeFileHandle OpenPrivateDirectory(string path,bool windowsServicing) {
     string canonical=Path.GetFullPath(path);
     var handle=Open(canonical,0x120080,3,IntPtr.Zero,3,0x02600000,IntPtr.Zero);
     try {
       if(handle.IsInvalid) throw new Win32Exception(Marshal.GetLastWin32Error());
-      ValidatePrivateDirectory(handle,canonical); return handle;
+      ValidatePrivateDirectory(handle,canonical,windowsServicing); return handle;
     } catch { handle.Dispose(); throw; }
   }
   public static FileStream Read(string path,long maximum) {

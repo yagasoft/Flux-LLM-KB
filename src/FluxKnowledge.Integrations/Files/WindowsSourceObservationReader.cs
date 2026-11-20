@@ -56,9 +56,15 @@ public sealed class WindowsSourceObservationReader : ISourceObservationReader
         using var lease = OpenRoot(root);
         return lease.Ancestors;
     }
-    public ISourceRootObservationLease OpenRoot(SourceRootConfiguration root)
+    public ISourceRootObservationLease OpenRoot(SourceRootConfiguration root) => OpenRoot(root, journalCoverage: false);
+
+    public ISourceRootObservationLease OpenRootForJournalCoverage(SourceRootConfiguration root) => OpenRoot(root, journalCoverage: true);
+
+    private static ISourceRootObservationLease OpenRoot(SourceRootConfiguration root, bool journalCoverage)
     {
-        var lease = WindowsSourcePathAccess.OpenDirectoryPath(root.CanonicalPath);
+        if (journalCoverage && root.PhysicalIdentityFingerprint is null)
+            throw new SourceSnapshotChangedException("SourceRootIdentityUnavailable");
+        var lease = WindowsSourcePathAccess.OpenDirectoryPath(root.CanonicalPath, enumerate: journalCoverage);
         try
         {
         if (root.PhysicalIdentityFingerprint is { } fingerprint && lease.Identity.IdentityFingerprint != fingerprint)
@@ -71,7 +77,9 @@ public sealed class WindowsSourceObservationReader : ISourceObservationReader
                 PhysicalFileIdentity.Get(current.Handle).Split(':')[^1], i == 0 ? "" : PhysicalFileIdentity.Get(lease.HeldComponents[i - 1].Handle).Split(':')[^1],
                 i != lease.HeldComponents.Count - 1));
         }
-        return new RootObservationLease(lease, result);
+        var authority = new RootObservationLease(lease, result, journalCoverage);
+        if (journalCoverage) authority.ValidateCurrent();
+        return authority;
         }
         catch { lease.Dispose(); throw; }
     }
@@ -105,10 +113,19 @@ public sealed class WindowsSourceObservationReader : ISourceObservationReader
         public void Dispose() => source.Dispose();
     }
     private sealed class RootObservationLease(WindowsSourcePathAccess.DirectoryPathLease lease,
-        IReadOnlyList<SourceNamespaceObservation> ancestors) : ISourceRootObservationLease
+        IReadOnlyList<SourceNamespaceObservation> ancestors, bool journalCoverage) : ISourceRootObservationLease
     {
         public IReadOnlyList<SourceNamespaceObservation> Ancestors { get; } = ancestors;
-        public void ValidateCurrent() => lease.ValidateCurrent();
+        public void ValidateCurrent()
+        {
+            lease.ValidateCurrent();
+            if (!journalCoverage) return;
+            // Reacquire list permission at validation time. The original handles still bind every component.
+            using var current = WindowsSourcePathAccess.OpenDirectoryPath(lease.Path, enumerate: true);
+            if (current.Identity != lease.Identity)
+                throw new SourceSnapshotChangedException("SourceRootIdentityMismatch");
+            current.ValidateJournalCoverageNamespace();
+        }
         public void Dispose() => lease.Dispose();
     }
     private static void ValidateCompleteNamespace(WindowsSourcePathAccess.DirectoryPathLease parent, string root)

@@ -175,7 +175,7 @@ function Invoke-AllowlistAdmission($Context,[scriptblock]$Action){
     $sql=Get-AllowlistConnection $settings $Context.Target
     $mode=if($settings.Contains('IndexPublication') -and $settings.IndexPublication.Contains('Mode')){$settings.IndexPublication.Mode}else{'Legacy'}
     $payloads=@($Context.Payloads|ForEach-Object {@{Root=$_.Root;Role=$_.Role;Sha256=$_.Digest}})
-    $web=@{Root=$Context.Target.Web;Role='Web';ExpectedSha256=$Context.Binding.WebSha256}
+    $web=@{Root=$Context.Target.Web;Role='Web';ExpectedSha256=($Context.Payloads | Where-Object Role -CEQ 'Web').Digest}
     $argsForIndex=@{ConnectionString=$sql;Payloads=@($web);WebIndexMode=$mode;ExpectedDatabaseIdentity=$Context.Binding.DatabaseIdentity;
         ReadPayloadFingerprint={param($path) Get-HybridPayloadFingerprint $path};ExpectedConfigurationPath=$Context.Target.AppConfig;
         ExpectedConfigurationSha256=[Convert]::ToHexString([Security.Cryptography.SHA256]::HashData($bytes))}

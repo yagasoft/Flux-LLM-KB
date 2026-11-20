@@ -33,7 +33,7 @@
         }
         else if (attempt.Receipt is null)
         {
-            <button type="button" @ref="_focusTarget" @onclick="PreviewAsync" disabled="@attempt.IsBusy">Preview @ActionLabel.ToLowerInvariant()</button>
+            <button type="button" @ref="_focusTarget" @onclick="PreviewAsync" disabled="@attempt.IsBusy">@(InitialButtonLabel ?? $"Preview {ActionLabel.ToLowerInvariant()}")</button>
         }
 
         <p role="status" aria-live="polite">@attempt.Message</p>
@@ -54,6 +54,7 @@
     [Parameter, EditorRequired] public Guid TargetId { get; set; }
     [Parameter, EditorRequired] public string ActionLabel { get; set; } = string.Empty;
     [Parameter] public bool ReconcileMetadata { get; set; }
+    [Parameter] public string? InitialButtonLabel { get; set; }
     [Parameter] public EventCallback OnCommitted { get; set; }
     [Parameter] public bool CanDismissReceipt { get; set; }
 

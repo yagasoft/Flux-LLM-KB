@@ -8,8 +8,9 @@ fields describe what FluxKnowledge has reconciled. A source can have partial
 coverage when its durable cursor has caught up. A missing checkpoint leaves
 lag unmeasured.
 
-For an enabled source, **Reconcile source metadata** queues the existing paced
-metadata sweep through the confirmed source command. It uses the normal
+For an enabled source, choose **Reconcile** beside its Overview warning
+and confirm the request. **Reconcile source metadata** in source details
+queues the same paced metadata sweep through the confirmed source command. It uses the normal
 permissions, path guards and change detection rules. Review **Last finished
 scan issues** for paths the indexer could not read or safely open. A helper
 refusal points to the protected policy or indexing identity. If Windows reports
@@ -25,7 +26,7 @@ The dashboard and operator use distinct loopback ports. The operator is addresse
 
 Save updates the app configuration and helper policy under a durable hold. IIS and the helper restart, and the held app verifies journal transport. The operation preserves the installed payloads and does not run migration DDL or retire verification requests. The receipt distinguishes an applied change, a verified reversal and a hold requiring recovery.
 
-The one-time operator setup pins the installed payloads, helper task, database incarnation and operator SIDs. The setup script provides a hash-bound installation plan. A subsequent app release changes the relevant fingerprints and blocks further saves until the operator binding is reviewed and refreshed. Keep the protected receipt directory when planning that refresh. The plain HTTP loopback handoff assumes other local processes are trusted with the information already available in the local dashboard. Where that assumption does not hold, qualify a browser-authenticated transport before enabling Save.
+The setup script provides a hash-bound installation plan. After installation, use `refresh-source-journal-allowlist-operator.ps1 -PlanOnly` and apply the reviewed plan with `-Apply -ExpectedPlanSha256`. The refresh preserves the task definition, Windows operator SIDs, helper identity, database incarnation and receipts. It upgrades the binding to version 2. Version 2 accepts compatible payloads from the protected role directories and binds each save to the exact bytes observed for that operation. Use `-Verify -RequireRunning` before deploying a schema change. If refresh is interrupted after writing its intent, preserve the backup and use `-Apply -Resume -ExpectedPlanSha256` with that same plan. The plain HTTP loopback handoff assumes other local processes are trusted with the information already available in the local dashboard. Where that assumption does not hold, qualify a browser-authenticated transport before enabling Save.
 
 ## Review and download a proposal
 

@@ -21,6 +21,7 @@ public interface ISourceObservationReader
     ISourceObservationLease Open(SourceRootConfiguration root, string relativePath);
     IReadOnlyList<SourceNamespaceObservation> ReadRootAncestors(SourceRootConfiguration root);
     ISourceRootObservationLease OpenRoot(SourceRootConfiguration root);
+    ISourceRootObservationLease? OpenRootForJournalCoverage(SourceRootConfiguration root) => null;
     ISourceAbsenceLease? OpenAbsence(SourceRootConfiguration root, string relativePath);
 }
 public interface ISourceAbsenceLease : IDisposable { void ValidateCurrent(); }

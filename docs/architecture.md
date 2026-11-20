@@ -264,6 +264,15 @@ availability, retry timing, recovery debt and paused scan admission in its commi
 status sample. Production release and resumption remain separate
 gates in the [correction record](design/reconciliation-loop-correction.md).
 
+An ancestor authority event preserves a baseline only when an ordered same-parent,
+case-only rename in the accepted NTFS page agrees with the complete guarded directory
+chain and continuous journal coverage. Cloud reparse changes, access failures and
+ambiguous events keep coverage in recovery. Their first due time commits with the
+cursor, survives restart and is at least 30 seconds after detection and 15 minutes
+from the last reconciliation. The recurring scheduler coalesces requests under the
+same source lease and retains the weekly metadata backstop. Only a current,
+namespace-complete baseline clears the early reconciliation obligation.
+
 Cloud seal profiles additionally bind the provider name/version read from Cloud
 Files metadata at the root. A mismatch or unavailable provider evidence revokes
 reuse and advisory-only watcher trust. Local qualification remains separate.

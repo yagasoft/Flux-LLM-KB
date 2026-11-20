@@ -34,6 +34,7 @@ public sealed class SourceRootScanStateEntity
     public long Generation { get; set; }
     public long? UnresolvedThroughUsn { get; set; }
     public DateTimeOffset? LastReconciliationAtUtc { get; set; }
+    public DateTimeOffset? AncestorReconciliationDueAtUtc { get; set; }
     public DateTimeOffset? LastBaselineAtUtc { get; set; }
     public DateTimeOffset? LastVerifiedAtUtc { get; set; }
     public string VerificationPolicyJson { get; set; } = "{}";

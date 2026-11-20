@@ -26,7 +26,11 @@
     var existingRecoveries = view.Jobs.Where(j => !j.IsHistorical && RecoveryExplanation(j.Reason) is not null &&
         j.State is PipelineWorkState.Waiting or PipelineWorkState.Queued or PipelineWorkState.Running).ToArray();
     var foregroundResultCount = SelectedRoot is null ? activity.GpuTasks.Where(g => g.IsInteractive && g.State == "Outcome uncertain").Sum(g => g.Count) : 0;
+    var journalWarnings = view.Sources.Where(source => source.JournalHealth is { IsUnavailable: true } or
+        { RecoveryRequired: true } or { Mode: "JournalPartial" }).ToArray();
     var submitted = GuidedActions.Recent(SelectedRoot).Where(attempt =>
+        (!attempt.Target.ReconcileMetadata || ProjectionState.IsStale ||
+         !journalWarnings.Any(source => source.Id == attempt.Target.TargetId && source.Lifecycle == "Enabled")) &&
         (attempt.Target.Action != "root_resume" || ProjectionState.IsStale ||
          !view.Sources.Any(source => source.Id == attempt.Target.TargetId && source.Lifecycle == "Paused")) &&
         (ProjectionState.IsStale || !(_attention?.Items.Any(item => item.Id == attempt.Target.TargetId && item.Applicability == "Current" &&
@@ -77,9 +81,9 @@
             </dl>
         </section>
     }
-    @foreach (var source in view.Sources.Where(s => s.JournalHealth is { IsUnavailable: true } or { RecoveryRequired: true } or { Mode: "JournalPartial" }))
+    @foreach (var source in journalWarnings)
     {
-        <SourceJournalWarning Source="source" />
+        <SourceJournalWarning @key="source.Id" Source="source" OnCommitted="RefreshFromButtonAsync" ControlsDisabled="ProjectionState.IsStale" />
     }
     <section id="pipeline-attention" aria-labelledby="attention-heading">
         <h2 id="attention-heading" tabindex="-1" @ref="_attentionHeading">Needs attention</h2>

@@ -50,10 +50,18 @@
             }
         </p>
         <a href="@($"/sources/{Source.Id}")">View source status</a>
+        @if (Source.Lifecycle == "Enabled" && !ControlsDisabled)
+        {
+            <GuidedRecoveryAction Action="source_sync" TargetId="Source.Id" SourceRootId="Source.Id"
+                                  ReconcileMetadata="true" ActionLabel="Reconcile" InitialButtonLabel="Reconcile"
+                                  CanDismissReceipt="true" OnCommitted="OnCommitted" />
+        }
     </aside>
 }
 
 @code {
     [Parameter, EditorRequired] public SourcePipelineProgress Source { get; set; } = default!;
+    [Parameter] public EventCallback OnCommitted { get; set; }
+    [Parameter] public bool ControlsDisabled { get; set; }
     private static string Utc(DateTimeOffset value) => value.UtcDateTime.ToString("dd MMM yyyy HH:mm:ss 'UTC'", System.Globalization.CultureInfo.GetCultureInfo("en-GB"));
 }

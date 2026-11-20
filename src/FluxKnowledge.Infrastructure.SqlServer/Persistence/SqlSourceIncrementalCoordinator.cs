@@ -11,7 +11,7 @@ public sealed partial class SqlSourceIncrementalCoordinator(
     IDbContextFactory<FluxKnowledgeDbContext> factory, TimeProvider time, ISourceChangeJournalReader reader,
     ISourceObservationReader observations, ISourceArtifactStore artifacts, SourceJournalOptions options, SqlSourceWorkRecoveryProgress? recoveryProgress = null) : ISourceIncrementalCoordinator
 {
-    private readonly SqlSourceChangeJournalStore _journal = new(factory, time);
+    private readonly SqlSourceChangeJournalStore _journal = new(factory, time, observations);
     private sealed record CachedObservation(int Version, SourceFileObservation Source, RetainedFileObservation Retained,
         bool JournalCovered, long RecoveryGeneration, long? SealUsn = null, string? SealProfileId = null,
         long? CaptureGeneration = null, string? JournalId = null, bool MetadataOnly = false);
@@ -142,6 +142,7 @@ public sealed partial class SqlSourceIncrementalCoordinator(
             if (state is null) { state = new() { SourceRootId = root.Id.Value }; db.SourceRootScanStates.Add(state); }
             if (enrol)
             {
+                state.AncestorReconciliationDueAtUtc = null;
                 SqlSourceIncrementalState.InvalidateCoverage(state, "journal-unavailable", point?.NextUsn ?? 0);
                 state.VolumeIdentity = volume; state.PolicyFingerprint = policy; state.CoveredUsn = point?.NextUsn ?? 0;
                 if (point is not null) point.RegistrationGeneration++;
@@ -181,7 +182,12 @@ public sealed partial class SqlSourceIncrementalCoordinator(
             var reset = newCheckpoint || state is null || state.PolicyFingerprint != policy || state.VolumeIdentity != capability.VolumeIdentity;
             if (state is null) { state = new() { SourceRootId = root.Id.Value }; db.SourceRootScanStates.Add(state); }
             if (!reset && !SqlSourceIncrementalState.RequiresBaseline(state)) return;
-            if (reset) SqlSourceIncrementalState.InvalidateCoverage(state, "baseline-required", checkpoint.NextUsn);
+            if (reset)
+            {
+                if (state.PolicyFingerprint != policy || state.VolumeIdentity != capability.VolumeIdentity)
+                    state.AncestorReconciliationDueAtUtc = null;
+                SqlSourceIncrementalState.InvalidateCoverage(state, "baseline-required", checkpoint.NextUsn);
+            }
             state.VolumeIdentity = capability.VolumeIdentity; state.PolicyFingerprint = policy;
             if (reset) state.CoveredUsn = checkpoint.NextUsn;
             var old = await db.SourceInventoryEntries.Where(x => x.SourceRootId == root.Id.Value && x.IsDirectory).ToListAsync(ct).ConfigureAwait(false);
@@ -264,8 +270,9 @@ public sealed partial class SqlSourceIncrementalCoordinator(
         await using var lookup = await factory.CreateDbContextAsync(ct).ConfigureAwait(false);
         var roots = await lookup.SourcePendingChanges.Where(x => (x.ReasonFlags & ~SourcePendingReasons.RemovalPending) != 0 &&
                 (x.NotBeforeUtc == null || x.NotBeforeUtc <= now))
-            .Select(x => x.SourceRootId).Union(lookup.SourceRootScanStates.Where(x => x.Mode != "Fallback" && (x.RecoveryRequired ||
-                x.Mode == "BaselineRequired" || x.Mode == "Baselining")).Select(x => x.SourceRootId)).ToArrayAsync(ct).ConfigureAwait(false);
+            .Select(x => x.SourceRootId).Union(lookup.SourceRootScanStates.Where(x => x.AncestorReconciliationDueAtUtc <= now ||
+                x.Mode != "Fallback" && (x.RecoveryRequired || x.Mode == "BaselineRequired" || x.Mode == "Baselining"))
+                .Select(x => x.SourceRootId)).ToArrayAsync(ct).ConfigureAwait(false);
         foreach (var id in roots.Order())
         {
             var dispatchable = false;
@@ -280,14 +287,21 @@ public sealed partial class SqlSourceIncrementalCoordinator(
                     .Select(x => x.State).ToArrayAsync(ct).ConfigureAwait(false);
                 if (active.Length != 0)
                 {
-                    dispatchable = active.Contains((int)SourceScanRequestState.Released) ||
-                        await db.SourceScanJobs.AnyAsync(x => x.SourceScanRequest.SourceRootId == id &&
-                            x.State == (int)SourceScanJobState.Running && x.LeaseExpiresAtUtc <= now, ct).ConfigureAwait(false);
+                    dispatchable = await db.SourceScanJobs.AnyAsync(x => x.SourceScanRequest.SourceRootId == id &&
+                        (x.State == (int)SourceScanJobState.Pending && x.DueAtUtc <= now &&
+                            x.SourceScanRequest.State == (int)SourceScanRequestState.Released ||
+                         x.State == (int)SourceScanJobState.Running && x.LeaseExpiresAtUtc <= now), ct).ConfigureAwait(false);
                     return;
                 }
                 var state = await db.SourceRootScanStates.SingleOrDefaultAsync(x => x.SourceRootId == id, ct).ConfigureAwait(false);
-                // Journal polling is independent of full-scan admission. Recovery or a
-                // restored journal must not bypass the ordinary whole-root schedule.
+                if (state?.AncestorReconciliationDueAtUtc <= now &&
+                    root.ReconciliationCadenceSeconds == SourcePolicyDefaults.MetadataReconciliationSeconds)
+                {
+                    // The recurring scheduler owns both this early sweep and the weekly backstop.
+                    dispatchable = true;
+                    return;
+                }
+                // Other journal gaps still follow the ordinary whole-root schedule.
                 if ((state?.LastReconciliationAtUtc ?? root.LastScanCompletedAtUtc) is { } completed &&
                     completed.AddSeconds(root.ReconciliationCadenceSeconds) > now &&
                     !await db.SourcePendingChanges.AnyAsync(x => x.SourceRootId == id && x.RelativePath != "." &&

@@ -163,7 +163,13 @@ public sealed partial class SqlSourceIncrementalCoordinator
                 }
                 state.RecoveryInProgress = false;
             }
-            if (plan.IsBaseline || plan.IsReconciliation) state.LastReconciliationAtUtc = time.GetUtcNow();
+            if (plan.IsBaseline || plan.IsReconciliation)
+            {
+                var reconciledAt = time.GetUtcNow();
+                state.LastReconciliationAtUtc = reconciledAt;
+                if (state.AncestorReconciliationDueAtUtc is not null && plan.IsBaseline)
+                    state.AncestorReconciliationDueAtUtc = namespaceComplete ? null : reconciledAt.Add(root.ReconciliationCadence);
+            }
             state.LastStatisticsJson = JsonSerializer.Serialize(new { kind = plan.IsBaseline ? "baseline" : "targeted", seen = seen.Count, targets = plan.Targets.Count, deferred = deferred.Count });
             var pending = await db.SourcePendingChanges.Where(x => x.SourceRootId == root.Id.Value).ToArrayAsync(ct).ConfigureAwait(false);
             foreach (var item in pending.Where(x => plan.Targets.Any(target =>

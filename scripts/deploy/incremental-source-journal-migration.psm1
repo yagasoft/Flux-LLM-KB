@@ -132,6 +132,17 @@ function Assert-SourceJournalSchema {
     $mediaObservation=$DatabaseState.PSObject.Properties['MediaSchemaFingerprint']
     $residencyObservation=$DatabaseState.PSObject.Properties['ResidencySchemaFingerprint']
     $residency=Get-PassageWindowEligibilityMigrationContract -GpuResidency
+    $journalHash = $contract.SchemaSha256
+    if ($history.Count -eq 85) {
+        $ancestor = Get-PassageWindowEligibilityMigrationContract -AncestorReconciliation
+        $prefix = @($history[0..83])
+        if ($history[-1] -cne $ancestor.Target -or $DatabaseState.SchemaSha256 -cne $ancestor.SuccessorJournalSchemaSha256 -or
+            (Get-SourceJournalValueHash ($prefix -join [char]10)) -cne $ancestor.PriorHistorySha256) {
+            throw 'journal-schema-ancestor-reconciliation-successor-invalid'
+        }
+        $history = $prefix
+        $journalHash = $ancestor.SuccessorJournalSchemaSha256
+    }
     $hasResidency=$history.Count -eq 84
     if ($hasResidency) {
         $prefix=@($history[0..82])
@@ -192,7 +203,7 @@ function Assert-SourceJournalSchema {
     $base=$history.Count -eq $contract.BaselineHistoryCount -and $DatabaseState.SchemaSha256 -ceq $contract.BaselineSchemaSha256
     $complete=$history.Count -eq ($contract.BaselineHistoryCount+$contract.Migrations.Count) -and
         ($history[$contract.BaselineHistoryCount..($history.Count-1)] -join '|') -ceq ($contract.Migrations -join '|') -and
-        $DatabaseState.SchemaSha256 -ceq $contract.SchemaSha256
+        $DatabaseState.SchemaSha256 -ceq $journalHash
     if(!$complete -and !($AllowBaseline -and $base)){throw 'journal-schema-partial-or-unreviewed-state-retain-hold'}
 }
 
@@ -213,7 +224,7 @@ function New-SourceJournalMigrationState {
     if(Test-Path -LiteralPath $intent){throw 'journal-schema-existing-intent-requires-reconciliation'}
     $state=@{Version=1;ReleaseId=$ReleaseId;Identity=$DatabaseState.Identity;OriginalHistory=@($DatabaseState.History);
         OriginalSchemaSha256=$DatabaseState.SchemaSha256;ExpectedHistory=$(if($already){@($DatabaseState.History)}else{@($DatabaseState.History)+@($contract.Migrations)});
-        ExpectedSchemaSha256=$contract.SchemaSha256;SqlSha256=$SqlSha256;IntentPath=$intent;
+        ExpectedSchemaSha256=$(if($already){$DatabaseState.SchemaSha256}else{$contract.SchemaSha256});SqlSha256=$SqlSha256;IntentPath=$intent;
         AlreadyApplied=$already;Attempted=$false;Applied=$false}
     $index=$DatabaseState.PSObject.Properties['VectorPublicationIndexSha256']
     if($index){
@@ -257,7 +268,8 @@ function Invoke-SourceJournalMigrationAttempt {
     &$AssertStopped
     $after=&$ReadState
     Assert-SourceJournalSchema $after
-    if($after.Identity -cne $State.Identity -or ($after.History -join '|') -cne ($State.ExpectedHistory -join '|')){throw 'journal-schema-postflight-binding-changed'}
+    if($after.Identity -cne $State.Identity -or $after.SchemaSha256 -cne $State.ExpectedSchemaSha256 -or
+        ($after.History -join '|') -cne ($State.ExpectedHistory -join '|')){throw 'journal-schema-postflight-binding-changed'}
     $State.Applied=$true
 }
 
@@ -375,7 +387,7 @@ function Get-SourceJournalHeldMigrationIntent {
     if($intent -isnot [Collections.IDictionary] -or $intent.Version -ne 1 -or
         $intent.Purpose -cne 'source-journal-additive-migration' -or $intent.ReleaseId -cne $releaseId -or
         $intent.Identity -cne $ExpectedDatabaseIdentity -or $intent.Attempted -isnot [bool] -or !$intent.Attempted -or
-        $intent.SqlSha256 -cne $contract.UpSha256 -or $intent.ExpectedSchemaSha256 -cne $contract.SchemaSha256){
+        $intent.SqlSha256 -cne $contract.UpSha256){
         throw 'journal-schema-held-intent-binding-changed'
     }
     $original=[pscustomobject]@{Identity=$intent.Identity;History=@($intent.OriginalHistory);SchemaSha256=$intent.OriginalSchemaSha256}
@@ -397,7 +409,12 @@ function Get-SourceJournalHeldMigrationIntent {
     # already accepted by the schema contract. A metadata successor requires it.
     Assert-SourceJournalSchema $original -AllowBaseline
     $expected=@($original.History)
-    if($expected.Count -eq $contract.BaselineHistoryCount){$expected+=@($contract.Migrations)}
+    $expectedSchema = $original.SchemaSha256
+    if($expected.Count -eq $contract.BaselineHistoryCount){
+        $expected+=@($contract.Migrations)
+        $expectedSchema = $contract.SchemaSha256
+    }
+    if($intent.ExpectedSchemaSha256 -cne $expectedSchema){throw 'journal-schema-held-intent-schema-changed'}
     if(($intent.ExpectedHistory -join '|') -cne ($expected -join '|')){
         throw 'journal-schema-held-intent-history-changed'
     }

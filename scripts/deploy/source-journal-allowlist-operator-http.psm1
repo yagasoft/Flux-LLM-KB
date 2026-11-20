@@ -358,7 +358,7 @@ function Start-SourceJournalAllowlistOperatorListener {
     $ErrorActionPreference = 'Stop'
     Assert-SourceJournalOperatorOrigin $Binding.OperatorOrigin 'localhost'
     Assert-SourceJournalOperatorOrigin $Binding.DashboardOrigin '127.0.0.1'
-    if ($Binding.Version -ne 1 -or ([uri]$Binding.OperatorOrigin).Port -eq ([uri]$Binding.DashboardOrigin).Port -or
+    if ($Binding.Version -notin 1,2 -or ([uri]$Binding.OperatorOrigin).Port -eq ([uri]$Binding.DashboardOrigin).Port -or
         ![IO.Path]::IsPathFullyQualified($Binding.ReceiptDirectory) -or ![IO.Directory]::Exists($Binding.ReceiptDirectory) -or
         $Binding.OperatorSids -isnot [array] -or $Binding.OperatorSids.Count -lt 1 -or $Binding.OperatorSids.Count -gt 64) {
         throw 'The protected journal operator listener binding is invalid.'

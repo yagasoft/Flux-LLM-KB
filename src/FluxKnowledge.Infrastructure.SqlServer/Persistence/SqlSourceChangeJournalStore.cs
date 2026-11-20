@@ -11,7 +11,8 @@ using Microsoft.EntityFrameworkCore;
 namespace FluxKnowledge.Infrastructure.SqlServer.Persistence;
 
 /// <summary>The accepted cursor and every routed dirty generation share one commit.</summary>
-public sealed class SqlSourceChangeJournalStore(IDbContextFactory<FluxKnowledgeDbContext> factory, TimeProvider time) : ISourceChangeJournalStore
+public sealed partial class SqlSourceChangeJournalStore(IDbContextFactory<FluxKnowledgeDbContext> factory, TimeProvider time,
+    ISourceObservationReader? observations = null) : ISourceChangeJournalStore
 {
     private readonly string _owner = $"journal:{Guid.NewGuid():N}";
 
@@ -31,8 +32,12 @@ public sealed class SqlSourceChangeJournalStore(IDbContextFactory<FluxKnowledgeD
                     $"SELECT * FROM [SourceVolumeJournalCheckpoints] WITH (UPDLOCK,HOLDLOCK) WHERE [VolumeIdentity]={volumeIdentity} AND ([LeaseExpiresAtUtc] IS NULL OR [LeaseExpiresAtUtc]<={now}) AND ({ignoreIdleDelay}=1 OR [DueAtUtc] IS NULL OR [DueAtUtc]<={now})");
             var row = await query.SingleOrDefaultAsync(ct).ConfigureAwait(false);
             if (row is null) return;
+            // An earlier claim expired without advancing this cursor. Route it conservatively
+            // so slow optional path checks cannot repeatedly delay the whole volume.
+            var takeover = row.LeaseExpiresAtUtc is not null;
             row.LeaseOwner = _owner; row.LeaseGeneration++; row.LeaseExpiresAtUtc = now.AddSeconds(30);
-            result = new(new(row.VolumeIdentity, Convert.ToUInt64(row.JournalId, 16), row.NextUsn), _owner, row.LeaseGeneration, row.RegistrationGeneration);
+            result = new(new(row.VolumeIdentity, Convert.ToUInt64(row.JournalId, 16), row.NextUsn), _owner, row.LeaseGeneration, row.RegistrationGeneration)
+            { SkipAncestorCoverageProbe = takeover };
         }, ct).ConfigureAwait(false);
         return result;
     }
@@ -52,8 +57,26 @@ public sealed class SqlSourceChangeJournalStore(IDbContextFactory<FluxKnowledgeD
         await using (var lookup = await factory.CreateDbContextAsync(ct).ConfigureAwait(false))
             rootIds = await lookup.SourceRootScanStates.AsNoTracking().Where(x => x.VolumeIdentity == claim.Cursor.VolumeIdentity)
                 .Select(x => x.SourceRootId).ToArrayAsync(ct).ConfigureAwait(false);
-        await ExecuteAsync(async db =>
+        using var coverage = claim.SkipAncestorCoverageProbe ? new AncestorCoverage() :
+            await ObserveAncestorPathsAsync(rootIds, page, ct).ConfigureAwait(false);
+        DateTimeOffset? claimExpiresAt = null;
+        while (true)
         {
+            try
+            {
+                await AcceptCoreAsync().ConfigureAwait(false);
+                return;
+            }
+            catch (AncestorCoverageChangedException)
+            {
+                // Reprocess the still-owned page, treating each newly failed guard as uncertain.
+                // Each retry excludes at least one guard and preserves the other roots' evidence.
+            }
+        }
+
+        Task AcceptCoreAsync() => ExecuteAsync(async db =>
+        {
+            coverage.Used.Clear();
             // Match the source lock order: root(s) before incremental records. A concurrent
             // registration changes the checkpoint generation and forces a reroute/retry.
             var roots = new List<SourceRootConfigurationEntity>();
@@ -92,22 +115,33 @@ public sealed class SqlSourceChangeJournalStore(IDbContextFactory<FluxKnowledgeD
                 checkpoint.LeaseExpiresAtUtc <= time.GetUtcNow() || checkpoint.NextUsn != claim.Cursor.NextUsn ||
                 checkpoint.JournalId != claim.Cursor.JournalId.ToString("X16") || checkpoint.RegistrationGeneration != claim.RegistrationGeneration)
                 throw new InvalidOperationException("SourceJournalClaimStale");
-            var states = await db.SourceRootScanStates.Where(x => rootIds.Contains(x.SourceRootId)).ToListAsync(ct).ConfigureAwait(false);
+            claimExpiresAt = checkpoint.LeaseExpiresAtUtc;
+            var states = await db.SourceRootScanStates.Where(x => rootIds.Contains(x.SourceRootId) && x.VolumeIdentity == claim.Cursor.VolumeIdentity)
+                .ToDictionaryAsync(x => x.SourceRootId, ct).ConfigureAwait(false);
+            roots.RemoveAll(root => !states.ContainsKey(root.Id));
             var identities = page.Changes.SelectMany(x => new[] { x.FileId, x.ParentId }).Distinct().ToArray();
             var entries = await db.SourceInventoryEntries.Where(x => rootIds.Contains(x.SourceRootId) && identities.Contains(x.FileId))
                 .ToListAsync(ct).ConfigureAwait(false);
             foreach (var disabled in roots.Where(x => x.State != (int)SourceRootState.Enabled))
             {
-                var state = states.Single(x => x.SourceRootId == disabled.Id);
+                var state = states[disabled.Id];
                 if (!SqlSourceIncrementalState.RequiresBaseline(state) || state.Reason != "root-not-enabled")
                     SqlSourceIncrementalState.InvalidateCoverage(state, "root-not-enabled", page.Next.NextUsn);
             }
             foreach (var root in roots.Where(x => x.State == (int)SourceRootState.Enabled))
             {
-                var state = states.Single(x => x.SourceRootId == root.Id);
+                var state = states[root.Id];
                 var owned = entries.Where(x => x.SourceRootId == root.Id).ToArray();
                 var targets = new Dictionary<string, (long Reasons, bool Subtree, long First, long Last, long Content)>(StringComparer.OrdinalIgnoreCase);
                 var namespaceChanged = false;
+                if (page.Changes.Any(change => (change.Reason & AncestorAuthorityReasons) != 0 &&
+                        owned.Any(entry => entry.IsAncestor && entry.FileId == change.FileId)) &&
+                    !await CanKeepAncestorCoverageAsync(db, root, state, page, coverage, ct).ConfigureAwait(false))
+                {
+                    SqlSourceIncrementalState.InvalidateCoverage(state, "ancestor-authority-changed", page.Next.NextUsn);
+                    state.AncestorReconciliationDueAtUtc ??= SqlSourceIncrementalState.AncestorReconciliationDue(
+                        time.GetUtcNow(), state.LastReconciliationAtUtc ?? root.LastScanCompletedAtUtc);
+                }
                 foreach (var change in page.Changes)
                 {
                     var aliases = owned.Where(x => x.FileId == change.FileId).ToArray();
@@ -119,10 +153,6 @@ public sealed class SqlSourceChangeJournalStore(IDbContextFactory<FluxKnowledgeD
                         // receipt grants a seal; later content evidence revokes it.
                         if (!alias.IsDirectory && change.ContentChanged)
                         { alias.IsSealed = false; }
-                    }
-                    if (aliases.Any(x => x.IsAncestor) && (change.Reason & 0x00113800) != 0)
-                    {
-                        SqlSourceIncrementalState.InvalidateCoverage(state, "ancestor-authority-changed", page.Next.NextUsn);
                     }
                     foreach (var alias in aliases.Where(x => !x.IsAncestor)) Add(alias.RelativePath, change, alias.IsDirectory);
                     var parent = owned.FirstOrDefault(x => x.FileId == change.ParentId && x.IsDirectory && !x.IsAncestor);
@@ -209,7 +239,12 @@ public sealed class SqlSourceChangeJournalStore(IDbContextFactory<FluxKnowledgeD
             checkpoint.UnavailableSinceUtc = null; checkpoint.LastFailureCode = null;
             checkpoint.LeaseOwner = null; checkpoint.LeaseExpiresAtUtc = null;
             checkpoint.DueAtUtc = page.Changes.Count == 0 ? time.GetUtcNow().AddSeconds(2) : null;
-        }, ct).ConfigureAwait(false);
+        }, ct, () =>
+        {
+            if (coverage.Used.Count == 0) return;
+            coverage.ValidateBeforeCommit();
+            if (claimExpiresAt <= time.GetUtcNow()) throw new InvalidOperationException("SourceJournalClaimStale");
+        });
     }
 
     public async ValueTask MarkUnavailableAsync(JournalReadClaim claim, DateTimeOffset retryAt, CancellationToken ct)

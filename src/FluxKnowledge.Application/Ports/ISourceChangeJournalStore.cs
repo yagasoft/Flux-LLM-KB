@@ -1,6 +1,9 @@
 namespace FluxKnowledge.Application.Ports;
 
-public sealed record JournalReadClaim(JournalCursor Cursor, string Owner, long Generation, long RegistrationGeneration);
+public sealed record JournalReadClaim(JournalCursor Cursor, string Owner, long Generation, long RegistrationGeneration)
+{
+    public bool SkipAncestorCoverageProbe { get; init; }
+}
 public interface ISourceChangeJournalStore
 {
     ValueTask<JournalReadClaim?> ClaimAsync(DateTimeOffset now, CancellationToken cancellationToken);

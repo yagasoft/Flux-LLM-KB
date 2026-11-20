@@ -5,6 +5,13 @@ namespace FluxKnowledge.Infrastructure.SqlServer.Persistence;
 
 internal static class SqlSourceIncrementalState
 {
+    internal static DateTimeOffset AncestorReconciliationDue(DateTimeOffset now, DateTimeOffset? lastReconciliation)
+    {
+        var due = now.AddSeconds(30);
+        var afterCooldown = lastReconciliation?.AddMinutes(15);
+        return afterCooldown > due ? afterCooldown.Value : due;
+    }
+
     internal static bool RequiresBaseline(SourceRootScanStateEntity state) =>
         state.RecoveryRequired || state.Mode is "BaselineRequired" or "Baselining";
 

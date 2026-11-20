@@ -245,6 +245,21 @@ internal static class WindowsSourcePathAccess
             }
         }
 
+        internal void ValidateJournalCoverageNamespace()
+        {
+            const int fileCaseSensitiveInformation = 71;
+            for (var i = 0; i < _chain.Count; i++)
+            {
+                var handle = _chain[i].Handle;
+                var metadata = ReadMetadata(handle);
+                if ((metadata.Attributes & 0x400) != 0 || metadata.NamespaceIncomplete || metadata.PlaceholderState != 0)
+                    throw new SourceSnapshotChangedException("SourceAncestorProviderCoverageUnproven");
+                if (i < _chain.Count - 1 &&
+                    (NtQueryInformationFile(handle, out _, out var flags, sizeof(uint), fileCaseSensitiveInformation) != 0 || flags != 0))
+                    throw new SourceSnapshotChangedException("SourceAncestorCaseInsensitiveCoverageUnproven");
+            }
+        }
+
         internal void Add(string canonicalPath, SafeFileHandle handle)
         {
             try
@@ -369,6 +384,7 @@ internal static class WindowsSourcePathAccess
     [DllImport("cldapi.dll")] private static extern uint CfGetPlaceholderStateFromAttributeTag(uint attributes, uint tag);
     [DllImport("ntdll.dll")] private static extern int NtCreateFile(out SafeFileHandle handle, uint access, ref ObjectAttributes attributes, out IoStatusBlock ioStatus, IntPtr allocationSize, uint fileAttributes, uint share, uint disposition, uint options, IntPtr eaBuffer, uint eaLength);
     [DllImport("ntdll.dll")] private static extern uint RtlNtStatusToDosError(int status);
+    [DllImport("ntdll.dll")] private static extern int NtQueryInformationFile(SafeFileHandle handle, out IoStatusBlock ioStatus, out uint information, uint length, int informationClass);
     [DllImport("ntdll.dll")] private static extern int NtQueryDirectoryFileEx(SafeFileHandle handle, IntPtr @event, IntPtr apcRoutine, IntPtr apcContext, out IoStatusBlock ioStatus, IntPtr information, uint length, int informationClass, uint flags, IntPtr fileName);
 #pragma warning restore SYSLIB1054
 }

@@ -27,8 +27,10 @@ public sealed class SourceJournalOperatorBrowserTests
         var ingress = Path.Combine(ground, "Sources");
         var alpha = Path.Combine(ingress, "Alpha");
         var beta = Path.Combine(ingress, "Beta");
+        var gamma = Path.Combine(ingress, "Gamma");
         Directory.CreateDirectory(alpha);
         Directory.CreateDirectory(beta);
+        Directory.CreateDirectory(gamma);
         try
         {
             await using var db = new FluxKnowledgeDbContext(new DbContextOptionsBuilder<FluxKnowledgeDbContext>().UseSqlServer(sql.ConnectionString).Options);
@@ -37,7 +39,10 @@ public sealed class SourceJournalOperatorBrowserTests
             var now = DateTimeOffset.UtcNow;
             var first = Root(alpha, "Alpha workspace", now);
             var second = Root(beta, "Beta workspace", now);
-            db.SourceRootConfigurations.AddRange(first, second);
+            var paused = Root(gamma, "Paused workspace", now);
+            paused.State = (int)SourceRootState.Paused;
+            db.SourceRootConfigurations.AddRange(first, second, paused);
+            db.SourceRootScanStates.Add(new() { SourceRootId = paused.Id, VolumeIdentity = volume, BaselineEpoch = 1, Mode = "JournalPartial" });
             db.SourceRootScanStates.Add(new()
             {
                 SourceRootId = first.Id, VolumeIdentity = volume, BaselineEpoch = 1, Generation = 1,
@@ -95,14 +100,24 @@ public sealed class SourceJournalOperatorBrowserTests
             await Assertions.Expect(panel).ToContainTextAsync("Partial journal coverage");
             await CaptureAsync(page, "usn-source-diagnostics.png");
 
-            await panel.GetByRole(AriaRole.Button, new() { Name = "Reconcile source metadata" }).ClickAsync();
-            await Assertions.Expect(panel).ToContainTextAsync("Metadata reconciliation was requested.");
+            await page.GotoAsync(host.BaseAddress.ToString(), new() { WaitUntil = WaitUntilState.NetworkIdle });
+            var warning = page.Locator(".source-journal-warning").Filter(new() { HasText = "Alpha workspace" });
+            await warning.GetByRole(AriaRole.Button, new() { Name = "Reconcile", Exact = true }).ClickAsync();
+            await warning.GetByRole(AriaRole.Button, new() { Name = "Confirm reconcile" }).ClickAsync();
+            await Assertions.Expect(warning).ToContainTextAsync("Operation receipt");
+            await CaptureAsync(page, "usn-overview-reconcile.png");
+            var pausedWarning = page.Locator(".source-journal-warning").Filter(new() { HasText = "Paused workspace" });
+            await Assertions.Expect(pausedWarning).ToContainTextAsync("Updates remain blocked while this source is paused.");
+            await Assertions.Expect(pausedWarning.GetByRole(AriaRole.Button, new() { Name = "Reconcile", Exact = true })).ToHaveCountAsync(0);
             Assert.Equal(1, await db.SourceScanRequests.AsNoTracking().CountAsync(x => x.SourceRootId == first.Id && x.RequestKind == 1));
             Assert.False(await db.SourceScanRequests.AsNoTracking().AnyAsync(x => x.RequestKind == 5));
 
             await page.GotoAsync(new Uri(host.BaseAddress, $"sources/{second.Id:D}").ToString(), new() { WaitUntil = WaitUntilState.NetworkIdle });
             await Assertions.Expect(panel).ToContainTextAsync("No journal checkpoint has been recorded");
             await Assertions.Expect(panel).ToContainTextAsync("Not measured");
+            await panel.GetByRole(AriaRole.Button, new() { Name = "Reconcile source metadata", Exact = true }).ClickAsync();
+            await Assertions.Expect(panel).ToContainTextAsync("Metadata reconciliation was requested.");
+            Assert.Equal(1, await db.SourceScanRequests.AsNoTracking().CountAsync(x => x.SourceRootId == second.Id && x.RequestKind == 1));
             await page.GetByRole(AriaRole.Link, new() { Name = "Manage USN journal allowlist" }).ClickAsync();
             var current = page.GetByRole(AriaRole.Row).Filter(new() { HasText = volume });
             var candidate = page.GetByRole(AriaRole.Row).Filter(new() { HasText = otherVolume });

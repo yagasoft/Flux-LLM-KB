@@ -677,6 +677,7 @@ public sealed class SqlNativeOperationStore(
                 await context.OutlookCaptureProfiles.AnyAsync(value => value.WatchedSourceRootId == rootIdValue, cancellationToken))
                 throw new NativeOperationException("outlook-export-path-reserved");
 
+            var priorScanPolicy = SqlRepositoryWorkRecovery.Policy(source);
             if (payload.TryGetProperty("displayName", out _)) source.DisplayName = String(payload, "displayName", 256);
             if (includes is not null) source.IncludePatternsJson = SourceRootControlConfiguration.CanonicalJson(includes);
             if (excludes is not null) source.ExcludePatternsJson = SourceRootControlConfiguration.CanonicalJson(excludes);
@@ -688,6 +689,11 @@ public sealed class SqlNativeOperationStore(
             }
             var configuration = SourceRootControlConfiguration.From(source);
             source.HealthEvidenceJson = SourceRootControlAuditEvidence.UpdateConfigurationFingerprint(source.HealthEvidenceJson, configuration);
+            if (priorScanPolicy != SqlRepositoryWorkRecovery.Policy(source))
+            {
+                var scanState = await context.SourceRootScanStates.SingleOrDefaultAsync(x => x.SourceRootId == source.Id, cancellationToken).ConfigureAwait(false);
+                if (scanState is not null) scanState.AncestorReconciliationDueAtUtc = null;
+            }
             if (Bool(payload, "reconcile", true))
                 await EnqueueAsync(context, targets, rootIdValue, actor, now, requestKind: 1, configuration, cancellationToken);
             return;

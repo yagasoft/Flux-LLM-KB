@@ -21,6 +21,8 @@ if ($plan.Mode -cne 'plan-only' -or $plan.TaskName -cne 'FluxKnowledge.SourceJou
     $plan.PlanSha256 -cnotmatch '^[A-F0-9]{64}$' -or $plan.Binding.OperatorOrigin -cne 'http://localhost:56138') {
     throw 'Staging installation plan is not bound to the exact distinct operator targets'
 }
+$refreshPackage = (Import-PowerShellDataFile (Join-Path (Split-Path -Parent $installer) 'source-journal-allowlist-package.psd1')).Files
+if (Compare-Object $refreshPackage @($plan.Package.PSObject.Properties.Name)) { throw 'Install and refresh must service the same package.' }
 foreach ($schema in 'outlook-watched-source-schema.sql', 'codex-workspace-notes-schema.sql',
     'media-transcription-gpu-schema.sql', 'gpu-model-residency-schema.sql') {
     $path = Join-Path (Split-Path -Parent $installer) $schema

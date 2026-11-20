@@ -13,7 +13,7 @@ function Get-AllowlistTargets([Collections.IDictionary]$Binding) {
     $fields=@('Version','OperatorOrigin','DashboardOrigin','OperatorSids','ReceiptDirectory','StageName','DatabaseIdentity',
         'JournalPipeName','WebSha256','HelperSha256','OutlookSha256','TaskDefinitionSha256','TaskSecuritySha256','StageVolumes')
     if($Binding.Count -ne $fields.Count -or @($fields|Where-Object {$_ -cnotin $Binding.Keys}).Count -or
-        $Binding.Version -isnot [int] -and $Binding.Version -isnot [long] -or $Binding.Version -ne 1) {throw 'binding-invalid'}
+        $Binding.Version -isnot [int] -and $Binding.Version -isnot [long] -or $Binding.Version -notin 1,2) {throw 'binding-invalid'}
     $origins=@{OperatorOrigin='localhost';DashboardOrigin='127.0.0.1'}
     foreach($key in $origins.Keys){
         $pattern='\Ahttp://'+[regex]::Escape($origins[$key])+':([1-9][0-9]{0,4})\z'
@@ -192,6 +192,15 @@ function Get-AllowlistTargetIdentity($Context){
             $Context.Leases.Add([FluxSourceAccessInstallFile]::OpenPrivateDirectory($path))
         }
         foreach($payload in $Context.Payloads){
+            if ($Context.Binding.Version -eq 2) {
+                # Pin and check every replaceable directory from the volume to the role root.
+                $volume = [IO.Path]::GetPathRoot($payload.Root)
+                [FluxSourceAccessInstallFile]::ValidateDescriptor((Get-Acl -LiteralPath $volume).GetSecurityDescriptorBinaryForm(),$true)
+                for ($dir = $payload.Root; $dir -ne $volume; $dir = [IO.Path]::GetDirectoryName($dir)) {
+                    $servicedAncestor = $dir -cin @('C:\inetpub','C:\inetpub\FluxKnowledge')
+                    $Context.Leases.Add([FluxSourceAccessInstallFile]::OpenPrivateDirectory($dir,$servicedAncestor))
+                }
+            }
             for($dir=$payload.Root;$dir;$dir=[IO.Path]::GetDirectoryName($dir)){
                 if([IO.File]::GetAttributes($dir) -band [IO.FileAttributes]::ReparsePoint){throw 'linked-payload'}
             }
@@ -201,12 +210,24 @@ function Get-AllowlistTargetIdentity($Context){
             $names=[Collections.Generic.List[string]]::new()
             foreach($item in @(Get-ChildItem -LiteralPath $payload.Root -Recurse -Force|Sort-Object FullName)){
                 if($item.Attributes -band [IO.FileAttributes]::ReparsePoint){throw 'linked-payload'}
+                if ($item.PSIsContainer -and $Context.Binding.Version -eq 2) {
+                    $Context.Leases.Add([FluxSourceAccessInstallFile]::OpenPrivateDirectory($item.FullName))
+                }
                 if(!$item.PSIsContainer){
                     $handle=[FluxSourceAccessInstallFile]::Read($item.FullName,[long]::MaxValue)
                     $Context.Leases.Add($handle);$names.Add($item.FullName)
+                    if ($Context.Binding.Version -eq 2) {
+                        [FluxSourceAccessInstallFile]::ValidateDescriptor((Get-Acl -LiteralPath $item.FullName).GetSecurityDescriptorBinaryForm(),$false)
+                    }
                 }
             }
-            if((Get-HybridPayloadFingerprint $payload.Root) -cne $payload.Digest){throw 'payload-hash-mismatch'}
+            $entryPoint = if ($Context.Target.Stage -and $payload.Role -ceq 'Web') { 'FluxKnowledge.StagingHost.exe' } else { 'FluxKnowledge.' + $payload.Role + '.exe' }
+            if ($Context.Binding.Version -eq 2 -and !(Test-Path -LiteralPath (Join-Path $payload.Root $entryPoint) -PathType Leaf)) {
+                throw 'operator-role-entrypoint-missing'
+            }
+            $observed = Get-HybridPayloadFingerprint $payload.Root
+            if ($Context.Binding.Version -eq 2) { $payload.Digest = $observed }
+            elseif ($observed -cne $payload.Digest) { throw 'payload-hash-mismatch' }
             $payload.Names=$names.ToArray()
         }
         $Context.Initialised=$true
@@ -226,6 +247,7 @@ function Get-AllowlistTargetIdentity($Context){
     Assert-SourceJournalSchema $db
     $parts=@($Context.BindingDigest,$db.Identity,($db.History -join ','),$db.SchemaSha256,$db.VectorPublicationIndexSha256,
         $db.WindowEligibilitySchemaSha256,$db.QueueIndexSha256)
+    if ($Context.Binding.Version -eq 2) { $parts += @($Context.Payloads | ForEach-Object { $_.Role + '=' + $_.Digest }) }
     foreach($file in @('policy.json','root-read-plan.json')){
         $parts+=Get-AllowlistSha (Read-AllowlistFile (Join-Path $Context.Target.Helper $file) 2097152 -Private)
     }

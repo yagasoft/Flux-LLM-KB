@@ -13,6 +13,9 @@ $module=Import-Module (Join-Path $PSScriptRoot '../../scripts/deploy/source-jour
         JournalPipeName="FluxKnowledge.SourceJournal.Staging-$stage";WebSha256='A'*64;OutlookSha256='B'*64;
         HelperSha256='C'*64;TaskDefinitionSha256='D'*64;TaskSecuritySha256='E'*64}
     $targets=Get-AllowlistTargets $binding
+    $v2=$binding.Clone();$v2.Version=2
+    if ((Get-AllowlistTargets $v2).BindingPath -cne $targets.BindingPath) { throw 'Version 2 changed the installation target.' }
+    $v2.Version=3;Assert-Rejected { Get-AllowlistTargets $v2 }
     $helperPorts=New-SourceJournalHelperNativeTaskPorts -State @{InstallRoot=$targets.Helper;TaskName=$targets.Task;OriginalTask=@{}} -AssertApplicationStopped {} -Probe {}
     # Dynamic callback modules have a different command search scope.
     $null=& $helperPorts.ReadTask.Module {Get-Command incremental-source-journal-helper-task\Get-SourceJournalHelperTaskObservation -ErrorAction Stop}
@@ -100,7 +103,7 @@ $module=Import-Module (Join-Path $PSScriptRoot '../../scripts/deploy/source-jour
         }
         $receipt=Join-Path $operatorRoot 'Receipts'
         foreach($path in @($receipt,(Join-Path $stageRoot 'Config'),(Join-Path $stageRoot 'Runtime'))){$null=[IO.Directory]::CreateDirectory($path)}
-        $binding=@{Version=1;OperatorOrigin='http://localhost:5511';DashboardOrigin='http://127.0.0.1:5512';
+        $binding=@{Version=2;OperatorOrigin='http://localhost:5511';DashboardOrigin='http://127.0.0.1:5512';
             OperatorSids=@('S-1-5-21-1001-1002-1003-1004');ReceiptDirectory=$receipt;StageName=$stage;StageVolumes=$vols;
             DatabaseIdentity="TESTHOST|FluxKnowledge_Staging_$stage|11111111-2222-3333-4444-555555555555";
             JournalPipeName="FluxKnowledge.SourceJournal.Staging-$stage";WebSha256='A'*64;OutlookSha256='B'*64;
