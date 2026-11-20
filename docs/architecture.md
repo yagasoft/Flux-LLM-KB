@@ -114,12 +114,21 @@ The GPU adapter admits one task in the existing background video lane. The
 native child starts only after durable permission and Windows job containment.
 Settlement requires exact process cleanup evidence. The worker applies the
 Egyptian Arabic and English code-switching profile when language sampling
-supports Arabic or Arabic and English. The transcript is flushed to a private
+supports Arabic or Arabic and English. Teams recordings can attribute the spoken
+words to active nameplates in supported gallery and screen-sharing layouts.
+The supervised worker uses offline OCR and runs visual attribution after ASR
+within the remaining lease. It leaves speech unlabelled when visual analysis is
+unavailable and renders unresolved concurrent candidates with `or`. The
+same versioned module ships with the shared local scripts. Audio-only cues
+retain their existing format. The transcript is flushed to a private
 pending file before the GPU job settles. The original extraction job then saves
 a UTF-8 file named `<recording name>.transcript.txt` beside the recording.
 The normal source scanner classifies and indexes it as text. SQL retains a
 receipt and the ordinary search index. The recording and transcript each have
 their own status in the file drawer.
+Corpus retrieval preserves bracketed cue timestamps as plain text. The disclosure
+guard still checks structured JSON and embedded credentials before returning
+transcript passages.
 
 Published catch-up results are eligible for conversion only for the configured
 exact revision IDs. The conversion keeps the previous publication until it

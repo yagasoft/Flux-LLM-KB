@@ -80,6 +80,44 @@ class TranscriptionProfileTests(unittest.TestCase):
         self.assertEqual([dict(startMillis=100, endMillis=900, text="اختبار with English")], result["cues"])
 
 
+    def test_native_video_analysis_follows_completed_recognition(self):
+        calls = []
+
+        def recognise(_, **settings):
+            calls.append("recognise")
+            yield SimpleNamespace(start=.1, end=.9, text="speech")
+
+        def video(duration):
+            calls.append("video")
+            self.assertEqual(1., duration)
+            return worker.speakers.SpeakerTimeline("analysis-time-limit", [])
+
+        model = SimpleNamespace(detect_language=lambda **_: ("en", .97, ()),
+                                transcribe=lambda *args, **kwargs: (recognise(*args, **kwargs), SimpleNamespace(
+                                    language="en", language_probability=.97)))
+        result = worker.transcribe(WarmTranscriptionTests.Audio("en"), lambda _: model, video)
+        self.assertEqual(["recognise", "video"], calls)
+        self.assertEqual("speech", result["cues"][0]["text"])
+        self.assertEqual("analysis-time-limit", result["speakerAttribution"]["status"])
+
+    def test_native_cues_use_shared_speaker_names_and_word_boundaries(self):
+        def recognise(_, **settings):
+            words = [SimpleNamespace(start=.1, end=.3, word=" First"),
+                     SimpleNamespace(start=.6, end=.9, word=" second")]
+            segment = SimpleNamespace(start=.1, end=.9, text=" First second", words=words)
+            return [segment], SimpleNamespace(language="en", language_probability=.97)
+
+        timeline = worker.speakers.SpeakerTimeline("analysed", [
+            (0., "sidebar", ("Name A",)), (.25, "sidebar", ("Name A",)),
+            (.5, "sidebar", ("Name B", "Name C")), (.75, "sidebar", ("Name B", "Name C"))])
+        model = SimpleNamespace(detect_language=lambda **_: ("en", .97, ()), transcribe=recognise)
+        audio = WarmTranscriptionTests.Audio("en")
+        result = worker.transcribe(audio, lambda _: model, lambda _: timeline)
+        self.assertEqual("teams-nameplates-v1", result["speakerAttribution"]["version"])
+        self.assertEqual(
+            [dict(startMillis=100, endMillis=300, text="Name A: First"),
+             dict(startMillis=600, endMillis=900, text="Name B or Name C: second")], result["cues"])
+
 class WarmTranscriptionTests(unittest.TestCase):
     class Audio:
         def __init__(self, language):
@@ -117,6 +155,7 @@ class WarmTranscriptionTests(unittest.TestCase):
     def setUp(self):
         self.directory = Path(self.enterContext(TemporaryDirectory(dir=Path(__file__).resolve().parents[2])))
         self.lifecycle = []
+        self.enterContext(patch.object(worker.speakers, "inspect_video", return_value=None))
         self.enterContext(patch.object(worker, "resolve_cached_configuration", side_effect=lambda config: (config,)))
         self.enterContext(patch.object(worker, "create_cached_model_loader",
                                        return_value=lambda profile: self.Model(profile, self.lifecycle)))

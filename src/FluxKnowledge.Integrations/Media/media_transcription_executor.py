@@ -1,11 +1,19 @@
 """Native FluxKnowledge speech recognition. The supervisor owns its start and exit."""
 import gc
+import importlib.util
 import json
 import math
 import os
 from pathlib import Path
 import re
 import sys
+import time
+
+# Isolated Python does not import from the script or working directory.
+_speaker_spec = importlib.util.spec_from_file_location(
+    "flux_speaker_attribution", Path(__file__).with_name("speaker_attribution.py"))
+speakers = importlib.util.module_from_spec(_speaker_spec)
+_speaker_spec.loader.exec_module(speakers)
 
 PROFILE_GENERAL = "general"
 PROFILE_EGYPTIAN = "egyptian-ar-en"
@@ -61,7 +69,7 @@ class WorkRefused(Exception):
     """Stable outcome code safe to return without input details."""
 
 
-def transcribe(audio, open_model):
+def transcribe(audio, open_model, analyse_speakers=None):
     sample_rate = 16_000
     sample_length = 30 * sample_rate
     end = max(0, len(audio) - sample_length)
@@ -90,6 +98,7 @@ def transcribe(audio, open_model):
         vad_parameters=dict(min_silence_duration_ms=500, speech_pad_ms=300),
         temperature=(0.0, 0.2, 0.4, 0.6, 0.8, 1.0))
     cues = []
+    timed = []
     total_characters = 0
     duration_millis = round(len(audio) * 1000 / sample_rate)
     for segment in segments:
@@ -103,14 +112,46 @@ def transcribe(audio, open_model):
             raise WorkRefused("transcription-output-too-large")
         if start < 0 or end > duration_millis + 100 or start > duration_millis:
             raise WorkRefused("transcription-output-invalid")
-        cues.append(dict(startMillis=start, endMillis=min(end, duration_millis), text=text))
+        cue = dict(startMillis=start, endMillis=min(end, duration_millis), text=text)
+        cues.append(cue)
+        if analyse_speakers is not None:
+            words = [dict(start=word.start, end=word.end, word=word.word)
+                     for word in getattr(segment, "words", None) or ()]
+            timed.append((segment.start, segment.end, text, words))
     if not cues:
         raise WorkRefused("transcription-no-speech-found")
     confidence = info.language_probability if hint is None else max(
         item["confidence"] for item in evidence if item["language"] == hint)
-    return dict(profile=profile, selectionReason=rationale, language=info.language,
-                languageConfidence=round(confidence, 4), languageEvidence=evidence,
-                durationMillis=duration_millis, cues=cues)
+    result = dict(profile=profile, selectionReason=rationale, language=info.language,
+                  languageConfidence=round(confidence, 4), languageEvidence=evidence,
+                  durationMillis=duration_millis, cues=cues)
+    if analyse_speakers is not None:
+        timeline = analyse_speakers(len(audio) / sample_rate)
+        if timeline is not None:
+            status = timeline.status
+            if timeline.samples:
+                attributed = attributed_cues(timeline, timed, duration_millis)
+                if attributed is None:
+                    status = "output-limit"
+                else:
+                    result["cues"] = attributed
+            result["speakerAttribution"] = dict(version=speakers.VERSION, status=status)
+    return result
+
+
+def attributed_cues(timeline, timed, duration_millis):
+    cues = []
+    characters = 0
+    for start, end, text, words in timed:
+        for part in timeline.split(start, end, text, words):
+            first = round(part.start * 1000)
+            last = min(round(part.end * 1000), duration_millis)
+            labelled = part.labelled_text
+            characters += len(labelled)
+            if last <= first or len(cues) >= 10_000 or characters > 1_000_000:
+                return None
+            cues.append(dict(startMillis=first, endMillis=last, text=labelled))
+    return cues
 
 
 def resolve_cached_configuration(configuration):
@@ -215,7 +256,14 @@ def run_transcription(manifest, open_models, warm=False):
         source = manifest.parent / "input.media"
         open_model = open_models(configuration)
         audio = decode_bounded_audio(source)
-        result = transcribe(audio, open_model)
+        def analyse_speakers(duration):
+            deadline = configuration.get("speakerDeadlineUnixMillis")
+            if type(deadline) is not int:
+                return speakers.SpeakerTimeline("analysis-time-limit", [])
+            remaining = deadline / 1000 - time.time()
+            return speakers.inspect_video(source, duration, time_limit=remaining)
+
+        result = transcribe(audio, open_model, analyse_speakers)
         return dict(succeeded=True, result=result)
     except WorkRefused as error:
         return dict(succeeded=False, reasonCode=str(error))

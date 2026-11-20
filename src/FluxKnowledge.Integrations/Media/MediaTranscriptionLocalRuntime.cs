@@ -17,8 +17,9 @@ public static class MediaTranscriptionLocalRuntime
     internal static string Script => Path.Combine(AppContext.BaseDirectory, "Media", "media_transcription_executor.py");
     private static readonly string[] DllDirectories =
         ["cublas", "cuda_runtime", "cudnn", "cufft", "curand", "cusolver", "cusparse", "nvjitlink"];
-    internal static object Manifest => new { packages = Packages, generalModel = GeneralModel, egyptianModel = EgyptianModel,
-        dllDirectories = DllDirectories.Select(component => Path.Combine(NativeLibraries, component, "bin")).ToArray() };
+    internal static object CreateManifest(DateTimeOffset executionDeadline) => new { packages = Packages, generalModel = GeneralModel, egyptianModel = EgyptianModel,
+        dllDirectories = DllDirectories.Select(component => Path.Combine(NativeLibraries, component, "bin")).ToArray(),
+        speakerDeadlineUnixMillis = executionDeadline.AddSeconds(-30).ToUnixTimeMilliseconds() };
 
     // Exclusive admission uses the higher estimated peak of the two serially loaded models.
     // This is a staging policy value until real peak memory is measured.
@@ -34,6 +35,7 @@ public static class MediaTranscriptionLocalRuntime
         {
             PhysicalFileIdentity.EnsureNoReparsePointTraversal(Cache);
             return HasPinnedFile(Python) && File.Exists(Script) &&
+                File.Exists(Path.Combine(AppContext.BaseDirectory, "Media", "speaker_attribution.py")) &&
                 HasPinnedFile(Path.Combine(Packages, "faster_whisper", "transcribe.py")) &&
                 HasPinnedFile(Path.Combine(Packages, "ctranslate2", "__init__.py")) &&
                 HasPinnedFile(Path.Combine(Packages, "av", "__init__.py")) &&

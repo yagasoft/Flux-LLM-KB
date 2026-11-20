@@ -231,6 +231,7 @@ public sealed partial class DeletedSourceRecoveryIntegrationTests(NativeSqlServe
     internal sealed class Scenario : IAsyncDisposable
     {
         private readonly string _area = Path.Combine(@"I:\Codex Workspaces\Staging\FluxKnowledge", "Removal-" + Guid.NewGuid().ToString("N"));
+        internal string Area => _area;
         internal string Files => Path.Combine(_area, "Sources");
         internal string Retained => Path.Combine(_area, "Retained");
         internal SourceJournalStoreIntegrationTests.ContextFactory Factory { get; }
@@ -243,16 +244,21 @@ public sealed partial class DeletedSourceRecoveryIntegrationTests(NativeSqlServe
             Factory = new(connection);
             Scans = new(Factory, TimeProvider.System, recoveryProgress: recoveryProgress);
         }
-        internal static async Task<Scenario> CreateAsync(string connection, SqlSourceWorkRecoveryProgress? recoveryProgress = null)
+        internal static async Task<Scenario> CreateAsync(string connection, SqlSourceWorkRecoveryProgress? recoveryProgress = null,
+            int maximumFileBytes = 1024, bool seed = true)
         {
             var result = new Scenario(connection, recoveryProgress);
-            Directory.CreateDirectory(Path.Combine(result.Files, "removed"));
-            await File.WriteAllTextAsync(Path.Combine(result.Files, "removed", "one.txt"), "first input");
-            await File.WriteAllTextAsync(Path.Combine(result.Files, "removed", "two.txt"), "second input");
-            await File.WriteAllTextAsync(Path.Combine(result.Files, "keeper.txt"), "retained sibling");
+            Directory.CreateDirectory(result.Files);
+            if (seed)
+            {
+                Directory.CreateDirectory(Path.Combine(result.Files, "removed"));
+                await File.WriteAllTextAsync(Path.Combine(result.Files, "removed", "one.txt"), "first input");
+                await File.WriteAllTextAsync(Path.Combine(result.Files, "removed", "two.txt"), "second input");
+                await File.WriteAllTextAsync(Path.Combine(result.Files, "keeper.txt"), "retained sibling");
+            }
             var commands = new NativeCorpusCommandService(new NativeOperationService(new SqlNativeOperationStore(result.Factory, TimeProvider.System), []),
                 new SqlNativeCorpusActionStore(result.Factory, new SourceRootPathPolicy(new LocalIngressOptions([result.Files])), new LocalPrivateContentDisclosure()));
-            var mutation = new NativeCorpusMutation("root_create", JsonSerializer.SerializeToElement(new { path = result.Files, displayName = "Removal fixture", recursive = true, maximumFileBytes = 1024 }));
+            var mutation = new NativeCorpusMutation("root_create", JsonSerializer.SerializeToElement(new { path = result.Files, displayName = "Removal fixture", recursive = true, maximumFileBytes }));
             var preview = await commands.PreviewAsync(mutation, "test", default);
             await commands.CommitAsync(mutation, preview.ConfirmationId, Guid.NewGuid().ToString("N"), "test", default);
             result.Claim = Assert.IsType<ClaimedSourceScan>(await result.Scans.ClaimNextReleasedAsync("removal", DateTimeOffset.UtcNow, TimeSpan.FromMinutes(10), default));

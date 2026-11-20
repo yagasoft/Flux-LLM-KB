@@ -113,6 +113,65 @@ public sealed class LocalPrivateContentDisclosureTests
         Assert.Equal("secret-content-withheld", result.ReasonCode);
     }
 
+    [Theory]
+    [InlineData("[00:00:01.100] Speaker A: Opening words.\n[00:00:02.200] Speaker B: Reply.")]
+    [InlineData("Carry-over text.\r\n[00:00:02.200] Speaker B: Reply.")]
+    [InlineData("[1,2,3]")]
+    [InlineData("[true,false,null]")]
+    [InlineData("{\"status\":\"ready\"}")]
+    [InlineData("[INFO] Ordinary diagnostic.\n[WARNING] Another ordinary diagnostic.")]
+    [InlineData("[INFO] [READY] the worker is ready")]
+    [InlineData("[INFO] [1,2,3]")]
+    [InlineData("[INFO]")]
+    [InlineData("[00:00:01.10] A caption with two digits of precision.")]
+    [InlineData(" [00:00:01.100] An indented bracketed label.")]
+    [InlineData("[section 2] Notes from a meeting.")]
+    public void Disclosure_preserves_clean_transcript_cues_and_valid_JSON(string value)
+    {
+        var result = Evaluate(value);
+        Assert.False(result.Withheld);
+        Assert.Equal(value, result.Value);
+    }
+
+    [Fact]
+    public void Ordinary_brackets_do_not_exhaust_the_embedded_JSON_candidate_budget()
+    {
+        var value = "Carry-over text.\n" + string.Join('\n', Enumerable.Repeat("[INFO] Status line.\n[00:00:01.100] Speaker A: Ordinary words.", 100));
+        Assert.Equal(value, Evaluate(value).Value);
+    }
+
+    [Theory]
+    [InlineData("[1,2,")]
+    [InlineData("[1 2]")]
+    [InlineData("[-")]
+    [InlineData("[tru")]
+    [InlineData("[INFO] [1,2,")]
+    [InlineData("[INFO] \"unclosed JSON string")]
+    [InlineData("[INFO]\"unclosed JSON string")]
+    [InlineData("""[INFO] [\"password\":\"synthetic-secret\"]""")]
+    [InlineData("[INFO] Ready.\n[WARN] {\"credential\":{\"client_secret\":\"synthetic-value\"}}")]
+    [InlineData("[00:00:01.100] [1,2,")]
+    [InlineData("[00:00:01.100] Speaker A: password=synthetic-password")]
+    [InlineData("[00:00:01.100] Speaker A: note.\n\"oauth_access_token_value\": \"synthetic-secret\"")]
+    [InlineData("[00:00:01.100] Speaker A: note.\n[00:00:02.000] Speaker B: {\"oauth_access_token_value\":\"synthetic-secret\"}")]
+    [InlineData("[00:00:01.100] Speaker A: said [{\"token\":\"synthetic-secret\"}]")]
+    public void Transcript_cues_preserve_malformed_JSON_and_credential_protection(string value) =>
+        Assert.True(Evaluate(value).Withheld);
+
+    [Fact]
+    public void Disclosure_checks_encoded_JSON_after_ordinary_bracketed_prefixes()
+    {
+        const string json = """{"password":"synthetic-value"}""";
+        var encoded = Convert.ToBase64String(System.Text.Encoding.UTF8.GetBytes(json));
+        Assert.True(Evaluate("[INFO] [DATA] " + encoded).Withheld);
+        Assert.True(Evaluate("[INFO][DATA]" + encoded).Withheld);
+        Assert.True(Evaluate("[INFO]\n" + encoded).Withheld);
+        Assert.True(Evaluate("[INFO] " + encoded[..12] + "\r\n" + encoded[12..]).Withheld);
+        Assert.True(Evaluate("[INFO] " + encoded + "\nOrdinary prose follows.").Withheld);
+        Assert.True(Evaluate("[INFO] " + encoded[..12] + "\r\n" + encoded[12..] + "\nOrdinary prose follows.").Withheld);
+    }
+
+
     [Fact]
     public void Local_disclosure_returns_a_clean_non_JSON_diagnostic_unchanged()
     {

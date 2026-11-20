@@ -86,13 +86,16 @@ internal static class MediaTranscriptionFileReader
             (PublicJobState?)row.JobState, row.JobReason, row.Uncertain, row.Permitted, row.ResultingPipelineRecordId));
         if (saved.Count == 0) return result;
 
-        var hashes = saved.Values.Select(value => value.Receipt!.ContentSha256).Distinct().ToArray();
+        var roots = saved.Values.Select(value => value.SourceRootId).Distinct().ToArray();
         var paths = saved.Values.Select(value => value.Path).Distinct().ToArray();
         var sidecars = await (
             from source in context.SourceRevisions.AsNoTracking()
             join record in context.PipelineRecords.AsNoTracking() on source.Id equals record.SourceRevisionId
-            where paths.Contains(source.CanonicalPath) && hashes.Contains(source.ContentSha256) &&
+            where paths.Contains(source.CanonicalPath) && roots.Contains(source.SourceRootId) &&
                 source.OriginKind == 0 && source.SuppressedAtUtc == null && source.Extension == ".txt" &&
+                !context.SourceRevisions.Any(other => other.Id != source.Id && other.SourceRootId == source.SourceRootId &&
+                    other.CanonicalPathFingerprint == source.CanonicalPathFingerprint &&
+                    other.OriginKind == 0 && other.SuppressedAtUtc == null) &&
                 !record.IsDeleted && record.CompletionCriteriaMet && record.CurrentStage == (int)PipelineStage.Publish &&
                 EF.Functions.Collate(record.ContentHash, SchemaConfiguration.SchedulerFenceCollation) ==
                     EF.Functions.Collate(source.ContentSha256, SchemaConfiguration.SchedulerFenceCollation) &&
@@ -107,11 +110,16 @@ internal static class MediaTranscriptionFileReader
         foreach (var row in saved.Values)
         {
             var records = sidecars.Where(sidecar => sidecar.SourceRootId == row.SourceRootId &&
-                string.Equals(sidecar.CanonicalPath, row.Path, StringComparison.OrdinalIgnoreCase) &&
-                sidecar.ContentSha256 == row.Receipt!.ContentSha256 && sidecar.ByteLength == row.Receipt.ByteLength).ToArray();
-            result[row.RevisionId] = records.Length == 1
-                ? new("Transcript indexed", "Saved beside the recording. Accuracy unverified.", records[0].Id)
-                : new("Transcript saved beside recording", "Waiting for the source scanner to index the text file.");
+                string.Equals(sidecar.CanonicalPath, row.Path, StringComparison.OrdinalIgnoreCase)).ToArray();
+            if (records.Length != 1)
+            {
+                result[row.RevisionId] = new("Transcript saved beside recording", "Waiting for the source scanner to index the text file.");
+                continue;
+            }
+            var record = records[0];
+            result[row.RevisionId] = record.ContentSha256 == row.Receipt!.ContentSha256 && record.ByteLength == row.Receipt.ByteLength
+                ? new("Transcript indexed", "Saved beside the recording. Accuracy unverified.", record.Id)
+                : new("Updated transcript indexed", "The text has changed since FluxKnowledge saved the original transcript.", record.Id);
         }
         return result;
     }

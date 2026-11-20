@@ -106,7 +106,7 @@ public sealed partial class LocalPrivateContentDisclosure : ILocalPrivateContent
         CredentialUriPattern().IsMatch(value) ||
         SecretAssignmentPattern().IsMatch(value) ||
         CredentialHeaderPattern().IsMatch(value) ||
-        ContainsJsonCredential(value, structural: structural) ||
+        ContainsJsonCredential(value, structural: structural, encodedDepth: encodedDepth) ||
         ContainsEncodedCredential(value, encodedDepth);
 
     private static bool ContainsEncodedCredential(string value, int encodedDepth)
@@ -132,11 +132,11 @@ public sealed partial class LocalPrivateContentDisclosure : ILocalPrivateContent
     }
 
     private static bool ContainsJsonCredential(string value, int encodedJsonStringDepth = 0,
-        IReadOnlySet<int>? structural = null)
+        IReadOnlySet<int>? structural = null, int encodedDepth = 0)
     {
         if (!LooksLikeJson(value, structural))
         {
-            return ContainsEmbeddedJsonCredential(value, encodedJsonStringDepth, structural);
+            return ContainsEmbeddedJsonCredential(value, encodedJsonStringDepth, structural, encodedDepth);
         }
 
         if (encodedJsonStringDepth >= MaximumEncodedJsonStringDepth)
@@ -147,7 +147,7 @@ public sealed partial class LocalPrivateContentDisclosure : ILocalPrivateContent
         try
         {
             using var document = JsonDocument.Parse(value, new JsonDocumentOptions { MaxDepth = 32 });
-            return ContainsJsonCredential(document.RootElement, encodedJsonStringDepth);
+            return ContainsJsonCredential(document.RootElement, encodedJsonStringDepth, encodedDepth);
         }
         catch (JsonException)
         {
@@ -158,9 +158,10 @@ public sealed partial class LocalPrivateContentDisclosure : ILocalPrivateContent
     }
 
     private static bool ContainsEmbeddedJsonCredential(string value, int encodedJsonStringDepth,
-        IReadOnlySet<int>? structural = null)
+        IReadOnlySet<int>? structural, int encodedDepth)
     {
         var candidates = 0;
+        var checkedBareKeys = false;
         for (var start = 0; start < value.Length; start++)
         {
             if (value[start] is not ('{' or '['))
@@ -168,6 +169,21 @@ public sealed partial class LocalPrivateContentDisclosure : ILocalPrivateContent
                 continue;
             }
             if (structural?.Contains(start) == true) continue;
+            if (value[start] == '[' && !HasJsonArrayStart(value.AsSpan(start + 1)))
+            {
+                // Keep scanning the text and any later structured fragments.
+                // Plain bracketed labels do not use the JSON candidate budget.
+                if (!checkedBareKeys &&
+                    (ContainsCredentialPropertyToken(value, 0, value.Length, false, true) ||
+                     ContainsCredentialPropertyToken(value, 0, value.Length, true, true)))
+                    return true;
+                checkedBareKeys = true;
+
+                if (IsLinePrefix(value, start) &&
+                    ContainsProtectedBracketLabelBody(value.AsSpan(start), encodedJsonStringDepth, encodedDepth))
+                    return true;
+                continue;
+            }
 
             if (++candidates > MaximumEmbeddedJsonCandidates)
             {
@@ -205,7 +221,7 @@ public sealed partial class LocalPrivateContentDisclosure : ILocalPrivateContent
             {
                 if (TryDecodeEscapedJsonFragment(fragment, out var decoded))
                 {
-                    if (ContainsJsonCredential(decoded, encodedJsonStringDepth + 1))
+                    if (ContainsJsonCredential(decoded, encodedJsonStringDepth + 1, encodedDepth: encodedDepth))
                     {
                         return true;
                     }
@@ -215,7 +231,7 @@ public sealed partial class LocalPrivateContentDisclosure : ILocalPrivateContent
             {
                 using (document)
                 {
-                    if (ContainsJsonCredential(document.RootElement, encodedJsonStringDepth))
+                    if (ContainsJsonCredential(document.RootElement, encodedJsonStringDepth, encodedDepth))
                     {
                         return true;
                     }
@@ -539,13 +555,13 @@ public sealed partial class LocalPrivateContentDisclosure : ILocalPrivateContent
         }
     }
 
-    private static bool ContainsJsonCredential(JsonElement element, int encodedJsonStringDepth) => element.ValueKind switch
+    private static bool ContainsJsonCredential(JsonElement element, int encodedJsonStringDepth, int encodedDepth) => element.ValueKind switch
     {
         JsonValueKind.Object => element.EnumerateObject().Any(property =>
-            IsJsonCredentialProperty(property.Name) || ContainsJsonCredential(property.Value, encodedJsonStringDepth)),
-        JsonValueKind.Array => element.EnumerateArray().Any(item => ContainsJsonCredential(item, encodedJsonStringDepth)),
+            IsJsonCredentialProperty(property.Name) || ContainsJsonCredential(property.Value, encodedJsonStringDepth, encodedDepth)),
+        JsonValueKind.Array => element.EnumerateArray().Any(item => ContainsJsonCredential(item, encodedJsonStringDepth, encodedDepth)),
         JsonValueKind.String => ContainsCredentialText(element.GetString() ?? string.Empty) ||
-            ContainsJsonCredential(element.GetString() ?? string.Empty, encodedJsonStringDepth + 1),
+            ContainsJsonCredential(element.GetString() ?? string.Empty, encodedJsonStringDepth + 1, encodedDepth: encodedDepth),
         _ => false
     };
 
@@ -557,8 +573,103 @@ public sealed partial class LocalPrivateContentDisclosure : ILocalPrivateContent
             index++;
         }
 
-        return index < value.Length && value[index] is '{' or '[' or '"' &&
-            structural?.Contains(index) != true;
+        return index < value.Length && structural?.Contains(index) != true &&
+            (value[index] is '{' or '"' ||
+             value[index] == '[' && HasJsonArrayStart(value.AsSpan(index + 1)));
+    }
+
+    private static bool HasJsonArrayStart(ReadOnlySpan<char> contents)
+    {
+        contents = contents.TrimStart();
+        if (contents.IsEmpty || contents[0] is ']' or '[' or '{' or '"' or ',' ||
+            contents.StartsWith("\\\"", StringComparison.Ordinal))
+            return true; // Empty, structured, or truncated array.
+
+        var first = contents[0];
+        var end = 1;
+        if (first == '-' || char.IsAsciiDigit(first))
+        {
+            // Leave validation of the complete number to the JSON parser.
+            // Adjacent prose punctuation, such as a colon, does not frame an array member.
+            while (end < contents.Length &&
+                (char.IsAsciiDigit(contents[end]) || contents[end] is '.' or 'e' or 'E' or '+' or '-'))
+                end++;
+            return end == contents.Length || IsArrayTokenBoundary(contents[end]);
+        }
+
+        ReadOnlySpan<char> keyword = first switch
+        {
+            't' => "true",
+            'f' => "false",
+            'n' => "null",
+            _ => ""
+        };
+        if (keyword.IsEmpty) return false;
+        while (end < contents.Length && !IsArrayTokenBoundary(contents[end])) end++;
+        return keyword.StartsWith(contents[..end], StringComparison.Ordinal);
+    }
+
+    private static bool IsArrayTokenBoundary(char next) =>
+        char.IsWhiteSpace(next) || next is ']' or ',' or '[' or '{' or '}' or '"';
+
+    private static bool IsLinePrefix(string value, int start)
+    {
+        for (var index = start - 1; index >= 0 && value[index] is not ('\r' or '\n'); index--)
+            if (!char.IsWhiteSpace(value[index])) return false;
+        return true;
+    }
+
+    private static bool ContainsProtectedBracketLabelBody(ReadOnlySpan<char> text,
+        int encodedJsonStringDepth, int encodedDepth)
+    {
+        var end = text.IndexOfAny('\r', '\n');
+        var firstLineLength = end < 0 ? text.Length : end;
+        var line = text[..firstLineLength];
+        // Strip only ordinary leading labels for the standalone checks.
+        // The original text still goes through all full-window checks.
+        while (!line.IsEmpty && line[0] == '[' && !HasJsonArrayStart(line[1..]))
+        {
+            var close = line[1..].IndexOfAny(']', '[', '{');
+            if (close < 0 || line[close + 1] != ']')
+                return false;
+            line = line[(close + 2)..].TrimStart();
+        }
+        var remainder = text[(firstLineLength - line.Length)..].TrimStart();
+        if (remainder.IsEmpty) return false;
+
+        var bodyEnd = remainder.IndexOfAny('\r', '\n');
+        var body = (bodyEnd < 0 ? remainder : remainder[..bodyEnd]).ToString();
+        if (LooksLikeJson(body) && ContainsJsonCredential(body, encodedJsonStringDepth, encodedDepth: encodedDepth))
+            return true;
+
+        // Check each complete encoded prefix before later lines can invalidate it.
+        var encodedLength = 0;
+        var candidates = 0;
+        for (var index = 0; index <= remainder.Length; index++)
+        {
+            var atEnd = index == remainder.Length;
+            var character = atEnd ? '\0' : remainder[index];
+            var isEncoded = char.IsAsciiLetterOrDigit(character) || character is '+' or '/' or '-' or '_' or '=';
+            if (isEncoded)
+            {
+                encodedLength++;
+                continue;
+            }
+
+            var isWhitespace = char.IsWhiteSpace(character);
+            if (!isWhitespace || character is '\r' or '\n')
+            {
+                if (encodedLength >= 12 && encodedLength % 4 != 1 && index > 0 &&
+                    remainder[index - 1] is not ('\r' or '\n') &&
+                    (++candidates > MaximumEmbeddedJsonCandidates ||
+                     ContainsEncodedCredential(remainder[..index].ToString(), encodedDepth)))
+                    return true;
+            }
+
+            if (!isWhitespace) break;
+        }
+
+        return false;
     }
 
     private static bool IsJsonCredentialProperty(string propertyName)

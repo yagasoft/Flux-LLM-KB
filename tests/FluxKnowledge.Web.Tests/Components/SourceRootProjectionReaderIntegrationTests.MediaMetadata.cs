@@ -156,6 +156,69 @@ public sealed partial class SourceRootProjectionReaderIntegrationTests
         Assert.Equal(0, completedSummary.MetadataOnly);
         Assert.True(Assert.Single(completedSummary.Files, file => file.SourceRevisionId == mediaId).MetadataIndexed);
 
+        var sidecarPath = (await context.SourceRevisions.SingleAsync(row => row.Id == mediaId)).CanonicalPath +
+            MediaTranscriptionGpuContracts.SidecarSuffix;
+        var originalSidecar = Revision(Guid.NewGuid(), rootId, "meeting.mp4.transcript.txt", now, false);
+        originalSidecar.CanonicalPath = sidecarPath;
+        originalSidecar.Extension = ".txt";
+        context.SourceRevisions.Add(originalSidecar);
+        context.Artifacts.Add(new ArtifactEntity
+        {
+            Id = Guid.NewGuid(), PipelineRecordId = recordId, SourceRevision = 1, Stage = (int)PipelineStage.Extract,
+            ContentHash = activity.InputFingerprint, ContentType = MediaTranscriptionGpuContracts.SidecarReceiptContentType,
+            DocumentMetadataJson = System.Text.Json.JsonSerializer.Serialize(
+                new FluxKnowledge.Integrations.Files.TranscriptSidecarReceipt("meeting.mp4.transcript.txt", originalSidecar.ContentSha256, (int)originalSidecar.ByteLength),
+                new System.Text.Json.JsonSerializerOptions(System.Text.Json.JsonSerializerDefaults.Web)),
+            CreatedAtUtc = now.AddMinutes(2)
+        });
+        var originalPublication = PublishSidecar(originalSidecar);
+        await context.SaveChangesAsync();
+        var original = (await MediaTranscriptionFileReader.ReadAsync(context, [mediaId], default))[mediaId];
+        Assert.Equal("Transcript indexed", original.Status);
+        Assert.Equal(originalPublication, original.PublishedRecordId);
+
+        var editedSidecar = Revision(Guid.NewGuid(), rootId, "meeting.mp4.transcript.txt", now.AddMinutes(3), false);
+        editedSidecar.CanonicalPath = sidecarPath;
+        editedSidecar.Extension = ".txt";
+        editedSidecar.ContentSha256 = new string('7', 64);
+        editedSidecar.ParentSourceRevisionId = originalSidecar.Id;
+        editedSidecar.Revision = originalSidecar.Revision + 1;
+        editedSidecar.StableSourceIdentity = originalSidecar.StableSourceIdentity;
+        originalSidecar.SuppressedAtUtc = now.AddMinutes(3);
+        context.SourceRevisions.Add(editedSidecar);
+        await context.SaveChangesAsync();
+        var pending = (await MediaTranscriptionFileReader.ReadAsync(context, [mediaId], default))[mediaId];
+        Assert.Null(pending.PublishedRecordId);
+
+        var editedPublication = PublishSidecar(editedSidecar);
+        await context.SaveChangesAsync();
+        var updated = (await MediaTranscriptionFileReader.ReadAsync(context, [mediaId], default))[mediaId];
+        Assert.Equal("Updated transcript indexed", updated.Status);
+        Assert.Equal(editedPublication, updated.PublishedRecordId);
+
+        Guid PublishSidecar(SourceRevisionEntity owner)
+        {
+            var identity = Guid.NewGuid();
+            var id = Guid.NewGuid();
+            context.SourceIdentities.Add(new SourceIdentityEntity
+            {
+                Id = identity, SourceKind = "retained local source", StableKey = $"sidecar-test:{owner.Id:N}", CreatedAtUtc = now
+            });
+            context.PipelineRecords.Add(new PipelineRecordEntity
+            {
+                Id = id, SourceIdentityId = identity, SourceRevisionId = owner.Id, Revision = 1,
+                ContentHash = owner.ContentSha256, RootLineageRecordId = id, CompletionCriteriaMet = true,
+                CurrentStage = (int)PipelineStage.Publish, RegisteredAtUtc = now
+            });
+            context.Artifacts.Add(new ArtifactEntity
+            {
+                Id = Guid.NewGuid(), PipelineRecordId = id, SourceRevision = 1, Stage = (int)PipelineStage.Publish,
+                ContentHash = owner.ContentSha256, ContentType = "text/plain", CreatedAtUtc = now
+            });
+            context.Jobs.Add(CompletedJob(id, PipelineStage.Extract, PipelineOperations.ExtractUtf8));
+            return id;
+        }
+
         JobEntity CompletedJob(Guid owner, PipelineStage stage, string operation) => new()
         {
             Id = Guid.NewGuid(), PipelineRecordId = owner, SourceRevision = 1, Stage = (int)stage,

@@ -115,7 +115,7 @@ public sealed partial class MediaTranscriptionLocalExecutor(LiveRootLayout layou
             var manifest = Path.Combine(directory, "runtime.json");
             await using (var stream = new FileStream(manifest, FileMode.CreateNew, FileAccess.Write, FileShare.None,
                              81920, FileOptions.Asynchronous))
-                await JsonSerializer.SerializeAsync(stream, MediaTranscriptionLocalRuntime.Manifest, cancellationToken: cancellationToken)
+                await JsonSerializer.SerializeAsync(stream, MediaTranscriptionLocalRuntime.CreateManifest(execution.Lease.DeadlineAtUtc), cancellationToken: cancellationToken)
                     .ConfigureAwait(false);
 
             if (runWarmProcess is not null)
@@ -273,9 +273,22 @@ public sealed partial class MediaTranscriptionLocalExecutor(LiveRootLayout layou
                 positions.Add(new { startMillis = start, endMillis = end });
             }
 
+            object? speakerAttribution = null;
+            if (result.TryGetProperty("speakerAttribution", out var attribution))
+            {
+                var version = attribution.GetProperty("version").GetString();
+                var status = attribution.GetProperty("status").GetString();
+                if (version != "teams-nameplates-v1" || status is not ("analysed" or "audio-only" or
+                    "unsupported-video" or "unsupported-layout" or "video-timing-unavailable" or
+                    "ocr-unavailable" or "analysis-time-limit" or "ocr-budget-reached" or
+                    "attribution-unavailable" or "duration-unavailable" or "output-limit"))
+                    return Refused("transcription-output-invalid");
+                speakerAttribution = new { version, status };
+            }
             var metadata = JsonSerializer.Serialize(new { schema = MediaTranscriptionGpuContracts.MetadataSchema, profile,
                 selectionReason, language, confidence, durationMillis = duration, languageEvidence = samples, cues = positions,
-                reviewStatus = "unreviewed", source = "machine-generated" });
+                speakerAttribution, reviewStatus = "unreviewed", source = "machine-generated" },
+                new JsonSerializerOptions { DefaultIgnoreCondition = System.Text.Json.Serialization.JsonIgnoreCondition.WhenWritingNull });
             var completion = new MediaTranscriptionResult(true, "transcription-complete", string.Join('\n', lines), metadata);
             var jsonOptions = new JsonSerializerOptions { Encoder = System.Text.Encodings.Web.JavaScriptEncoder.UnsafeRelaxedJsonEscaping };
             if (JsonSerializer.Serialize(completion, jsonOptions).Length * sizeof(char) > MediaTranscriptionGpuContracts.MaximumResultBytes)
