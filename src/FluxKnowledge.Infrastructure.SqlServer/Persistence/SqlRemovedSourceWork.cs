@@ -101,13 +101,16 @@ internal static class SqlRemovedSourceWork
         public int Blocker { get; set; }
     }
 
-    private static string RemovalWitness(string source)
+    internal static string RemovalWitness(string source, bool includeLegacy = true)
     {
         var json = $"CASE WHEN ISJSON({source}.RetentionEvidenceJson) = 1 THEN {source}.RetentionEvidenceJson ELSE N'[]' END";
+        var legacy = includeLegacy ? $$"""
+            (DATALENGTH({{source}}.RetentionEvidenceJson) = DATALENGTH({{LegacyWitness}})
+             AND {{source}}.RetentionEvidenceJson COLLATE {{SchemaConfiguration.SchedulerFenceCollation}} = {{LegacyWitness}}) OR
+            """ : "";
         return $$"""
             ({{source}}.SuppressedAtUtc IS NOT NULL AND
-              ((DATALENGTH({{source}}.RetentionEvidenceJson) = DATALENGTH({{LegacyWitness}})
-                 AND {{source}}.RetentionEvidenceJson COLLATE {{SchemaConfiguration.SchedulerFenceCollation}} = {{LegacyWitness}}) OR
+              ({{legacy}}
                 (TRY_CONVERT(uniqueidentifier, JSON_VALUE({{json}}, '$.SourceRootId')) = {{source}}.SourceRootId
                  AND TRY_CONVERT(uniqueidentifier, JSON_VALUE({{json}}, '$.SourceRevisionId')) = {{source}}.Id
                  AND TRY_CONVERT(datetimeoffset(7), JSON_VALUE({{json}}, '$.SuppressedAtUtc'), 127) = {{source}}.SuppressedAtUtc

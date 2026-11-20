@@ -24,6 +24,7 @@ public sealed class SqlSourceWorkRecoveryProgress
     private bool _rediscoveryOverflow;
 
     internal SemaphoreSlim RediscoveryOwner { get; } = new(1);
+    internal SqlDeletedFileJobRetention DeletedFileJobs { get; } = new();
     internal RediscoverySweep? ActiveRediscovery { get; set; }
     internal DateTimeOffset NextRediscoveryFallback { get; set; }
     internal DateTimeOffset RediscoveryRetryAt { get; set; }
@@ -123,7 +124,13 @@ public sealed partial class SqlSourceWorkRecovery(IDbContextFactory<FluxKnowledg
                 _progress.After.TryRemove(id, out _);
         if (retirement is not null) await retirement.RetireAsync(cancellationToken).ConfigureAwait(false);
         // A standalone admission check owns only the exact command it serves.
-        if (targetRootId is null) await ResumeRediscoveredExtractionAsync(cancellationToken).ConfigureAwait(false);
+        if (targetRootId is null)
+        {
+            await ResumeRediscoveredExtractionAsync(cancellationToken).ConfigureAwait(false);
+            if (await _progress.DeletedFileJobs.AdvanceAsync(factory, observations, clock.GetUtcNow(), cancellationToken).ConfigureAwait(false) > 0 &&
+                statusEvents is not null)
+                await statusEvents.PublishAsync(new StatusChanged(null, "sources", clock.GetUtcNow()), CancellationToken.None).ConfigureAwait(false);
+        }
     }
 
     private async Task AnnounceAdmissionsAsync(CancellationToken ct)

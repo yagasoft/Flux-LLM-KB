@@ -55,6 +55,23 @@ Local wake signals and watcher events are hints; reconciliation rereads durable
 state. Retained processor completion wakes source registration immediately, with
 a periodic reconciliation fallback for missed signals.
 
+Normal source recovery retains pipeline jobs for at least seven days from the
+committed suppression time in a verified file-deletion witness. It checks the
+original namespace for absence again, checks for a recorded return, and
+revalidates ownership under the publication and scheduler fences. A sweep
+considers at most 32 jobs per maintenance tick and commits each physical
+owner's changes together. A restart rediscovers remaining jobs from SQL.
+
+Generic legacy suppression, edits and policy exclusions provide insufficient
+deletion evidence. Leased work, uncertain outcomes, native associations,
+recoverable incomplete records and checkpoints with no independent cleanup
+anchor retain their jobs. Git publication recovery keeps its original stage
+chain for the existing revision retention window. Completed attempts cascade
+with their job, dispatched outbox history keeps its artifact reference, and
+terminal publication candidates retain detached provenance. Settled GPU
+batches remain while another owner or dispatch reference needs them. Retained
+source revisions, content and whole-source deletion have their own lifecycles.
+
 Source deletion discovers GPU task ownership through the request's pipeline
 record, including mismatched foreign parents. It subtracts already proven local
 tasks in memory and checks remaining task IDs in batches against the unchanged

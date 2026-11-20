@@ -19,6 +19,7 @@ public sealed partial class DeletedSourceRecoveryIntegrationTests
     [InlineData("signal-after-content-hold")]
     [InlineData("fallback-missed-capture")]
     [InlineData("hint-after-retention-failure")]
+    [InlineData("after-content-retention-deadline")]
     [InlineData("attempted")]
     [InlineData("active")]
     [InlineData("owned-outbox")]
@@ -29,7 +30,8 @@ public sealed partial class DeletedSourceRecoveryIntegrationTests
         var progress = new SqlSourceWorkRecoveryProgress();
         var time = new RediscoveryClock(DateTimeOffset.UtcNow);
         var hinted = history != "fallback-missed-capture";
-        var recovered = history is "never-started" or "signal-after-removal-hold" or "signal-after-content-hold" or "fallback-missed-capture" or "hint-after-retention-failure";
+        var recovered = history is "never-started" or "signal-after-removal-hold" or "signal-after-content-hold" or
+            "fallback-missed-capture" or "hint-after-retention-failure" or "after-content-retention-deadline";
         await using var scenario = await Scenario.CreateAsync(fixture.ConnectionString, hinted ? progress : null);
         const string name = "returning.md";
         const string content = "# Returning content\n";
@@ -68,6 +70,13 @@ public sealed partial class DeletedSourceRecoveryIntegrationTests
         Assert.Equal("source-removed", await db.Jobs.AsNoTracking().Where(row => row.Id == job.Id).Select(row => row.Reason).SingleAsync());
         Assert.Equal((int)SourceActivityState.CancelledSuperseded, await db.SourceActivities.AsNoTracking().Where(row => row.Id == activity.Id)
             .Select(row => row.State).SingleAsync());
+
+        if (history == "after-content-retention-deadline")
+        {
+            time.Now = DateTimeOffset.UtcNow.AddDays(31);
+            await recovery.AdvanceAsync(default);
+            Assert.True(await db.Jobs.AnyAsync(row => row.Id == job.Id));
+        }
 
         if (history == "hint-after-retention-failure") File.Move(heldRecording, path);
         else await File.WriteAllTextAsync(path, content);
@@ -111,7 +120,7 @@ public sealed partial class DeletedSourceRecoveryIntegrationTests
         if (history == "pending-content") await scenario.PendingAsync(name, false);
         if (history == "changed-after-capture") await File.AppendAllTextAsync(path, "Later edit.");
 
-        time.Now = DateTimeOffset.UtcNow.AddSeconds(1);
+        time.Now = history == "after-content-retention-deadline" ? time.Now.AddMinutes(2) : DateTimeOffset.UtcNow.AddSeconds(1);
         await recovery.AdvanceAsync(default);
         if (history is "signal-after-removal-hold" or "signal-after-content-hold" or "fallback-missed-capture")
         {

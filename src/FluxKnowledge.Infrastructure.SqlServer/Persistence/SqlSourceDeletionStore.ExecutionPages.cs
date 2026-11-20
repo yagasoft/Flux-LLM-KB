@@ -32,6 +32,13 @@ public sealed partial class SqlSourceDeletionStore
         // receipts until the final task leaves; never retire an unselected task.
         var empty=await context.GpuBatches.Where(batch=>touched.Contains(batch.Id)&&
             !context.GpuMiniTasks.Any(task=>task.BatchId==batch.Id)).Select(batch=>batch.Id).ToArrayAsync(ct).ConfigureAwait(false);
+        await DeleteEmptyExecutionBatchesAsync(context,empty,ct).ConfigureAwait(false);
+        return true;
+    }
+
+    // The caller proves empty batch ownership inside its original transaction.
+    internal static async Task DeleteEmptyExecutionBatchesAsync(FluxKnowledgeDbContext context,Guid[] empty,CancellationToken ct)
+    {
         if(empty.Length>0)
         {
             await context.GpuExecutorEvidence.Where(value=>empty.Contains(value.BatchId)).ExecuteDeleteAsync(ct).ConfigureAwait(false);
@@ -41,6 +48,5 @@ public sealed partial class SqlSourceDeletionStore
                 .ExecuteDeleteAsync(ct).ConfigureAwait(false);
             await context.GpuBatches.Where(value=>empty.Contains(value.Id)).ExecuteDeleteAsync(ct).ConfigureAwait(false);
         }
-        return true;
     }
 }
