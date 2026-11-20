@@ -60,9 +60,28 @@ internal static class SqlRemovedSourceWork
         INNER JOIN Jobs job ON job.PipelineRecordId = record.Id AND job.SourceRevision = record.Revision
         """;
 
+    private const string RemovedJobCandidates = """
+        FROM #FluxRemovedJobCandidates candidate
+        INNER JOIN Jobs job ON job.Id = candidate.Id
+        INNER JOIN PipelineRecords record ON record.Id = job.PipelineRecordId AND record.Revision = job.SourceRevision
+        """;
+
+    private const string DropReadEvidenceSql = """
+        DROP TABLE IF EXISTS #FluxRemovedGpuReleaseProofs;
+        DROP TABLE IF EXISTS #FluxRemovedJobCandidates;
+        """;
+
+    private static readonly string MarkUnconfirmedDeliveriesSql = $$"""
+        UPDATE candidate SET HasUnconfirmedDelivery = 1
+        FROM #FluxRemovedJobCandidates candidate
+        INNER JOIN Jobs job ON job.Id = candidate.Id
+        WHERE {{CanHaveUnconfirmedDelivery("job")}}
+          AND EXISTS (SELECT 1 FROM OutboxMessages delivery WHERE {{UnconfirmedDeliveryBinding("job")}});
+        """;
+
     private static readonly string RemovedJobFactsSql = $$"""
         SELECT job.Id,
-          CASE WHEN {{HasUnconfirmedWorker("job")}}
+          CASE WHEN {{HasUnconfirmedWorker("job", "candidate.HasUnconfirmedDelivery = 1")}}
               OR (job.PublicState IN (0,2,3) AND (job.LeaseOwner IS NOT NULL OR job.LeaseExpiresAtUtc IS NOT NULL)) THEN 1
             WHEN {{HasUnconfirmedGpuRequests("job", "record", readEvidence: true)}}
               OR EXISTS (SELECT 1 FROM GpuMiniTasks terminalTask WHERE terminalTask.ParentJobId = job.Id
@@ -70,13 +89,13 @@ internal static class SqlRemovedSourceWork
               OR (job.PublicState = 3 AND NOT EXISTS (SELECT 1 FROM GpuMiniTasks boundTask
                   WHERE boundTask.ParentJobId = job.Id AND boundTask.SourceRevision = job.SourceRevision)) THEN 2
             ELSE 0 END AS Blocker
-        {{RemovedJobBindings}}
+        {{RemovedJobCandidates}}
         WHERE job.PublicState <> 4
         """;
 
     private static readonly string RemovedGpuBlockersSql = $$"""
         SELECT task.Id AS [Value]
-        {{RemovedJobBindings}}
+        {{RemovedJobCandidates}}
         INNER JOIN GpuMiniTasks task ON task.ParentJobId = job.Id
         WHERE task.State IN (0,3) AND {{TaskRequiresVerification("task", "job", readEvidence: true)}}
         """;
@@ -85,14 +104,50 @@ internal static class SqlRemovedSourceWork
         FluxKnowledgeDbContext context, string removedInputIds, string gpuReleases, bool includeJobs, bool includeGpu,
         CancellationToken cancellationToken)
     {
-        if (removedInputIds == "[]") return ("[]", "[]");
-        var jobs = !includeJobs ? [] : await context.Database.SqlQueryRaw<RemovedJobFact>(RemovedJobFactsSql,
-                JsonParameter("@removedInputIds", removedInputIds), JsonParameter("@removedSourceGpuReleases", gpuReleases))
-            .ToArrayAsync(cancellationToken).ConfigureAwait(false);
-        var gpu = !includeGpu ? [] : await context.Database.SqlQueryRaw<Guid>(RemovedGpuBlockersSql,
-                JsonParameter("@removedInputIds", removedInputIds), JsonParameter("@removedSourceGpuReleases", gpuReleases))
-            .ToArrayAsync(cancellationToken).ConfigureAwait(false);
-        return (JsonSerializer.Serialize(jobs.Where(job => job.Blocker != 0)), JsonSerializer.Serialize(gpu));
+        if (removedInputIds == "[]" || !(includeJobs || includeGpu)) return ("[]", "[]");
+        await context.Database.OpenConnectionAsync(cancellationToken).ConfigureAwait(false);
+        try
+        {
+            // Build statistics for this exact set of removed jobs and seek by task
+            // identity instead of parsing the same release proofs in correlated predicates.
+            await context.Database.ExecuteSqlRawAsync("""
+                CREATE TABLE #FluxRemovedJobCandidates (
+                    Id uniqueidentifier NOT NULL PRIMARY KEY CLUSTERED,
+                    HasUnconfirmedDelivery bit NOT NULL DEFAULT (0)
+                );
+                CREATE TABLE #FluxRemovedGpuReleaseProofs (
+                    TaskId uniqueidentifier NULL, BatchId uniqueidentifier NULL, AdmissionGeneration bigint NULL,
+                    DispatchId uniqueidentifier NULL, ExecutorKey nvarchar(256) NULL, CapacitySlotKey nvarchar(256) NULL,
+                    SingleTaskCompletion bit NULL,
+                    INDEX IX_FluxRemovedGpuReleaseProofs CLUSTERED (TaskId, BatchId, AdmissionGeneration)
+                );
+                """, cancellationToken).ConfigureAwait(false);
+            await context.Database.ExecuteSqlRawAsync($$"""
+                INSERT INTO #FluxRemovedJobCandidates (Id)
+                SELECT DISTINCT job.Id {{RemovedJobBindings}};
+                INSERT INTO #FluxRemovedGpuReleaseProofs
+                    (TaskId, BatchId, AdmissionGeneration, DispatchId, ExecutorKey, CapacitySlotKey, SingleTaskCompletion)
+                SELECT TaskId, BatchId, AdmissionGeneration, DispatchId, ExecutorKey, CapacitySlotKey, SingleTaskCompletion
+                FROM {{RemovedReleasesJson}} AS proof;
+                """, [JsonParameter("@removedInputIds", removedInputIds), JsonParameter("@removedSourceGpuReleases", gpuReleases)],
+                cancellationToken).ConfigureAwait(false);
+            if (includeJobs)
+                await context.Database.ExecuteSqlRawAsync(MarkUnconfirmedDeliveriesSql, cancellationToken).ConfigureAwait(false);
+            var jobs = !includeJobs ? [] : await context.Database.SqlQueryRaw<RemovedJobFact>(RemovedJobFactsSql)
+                .ToArrayAsync(cancellationToken).ConfigureAwait(false);
+            var gpu = !includeGpu ? [] : await context.Database.SqlQueryRaw<Guid>(RemovedGpuBlockersSql)
+                .ToArrayAsync(cancellationToken).ConfigureAwait(false);
+            await context.Database.ExecuteSqlRawAsync(DropReadEvidenceSql, cancellationToken).ConfigureAwait(false);
+            return (JsonSerializer.Serialize(jobs.Where(job => job.Blocker != 0)), JsonSerializer.Serialize(gpu));
+        }
+        catch
+        {
+            using var cleanup = new CancellationTokenSource(TimeSpan.FromMilliseconds(500));
+            try { await context.Database.ExecuteSqlRawAsync(DropReadEvidenceSql, cleanup.Token).ConfigureAwait(false); }
+            catch (Exception exception) when (exception is System.Data.Common.DbException or OperationCanceledException or InvalidOperationException) { }
+            throw;
+        }
+        finally { await context.Database.CloseConnectionAsync().ConfigureAwait(false); }
     }
 
     private sealed class RemovedJobFact
@@ -135,21 +190,33 @@ internal static class SqlRemovedSourceWork
           AND DATALENGTH(JSON_VALUE({{json}}, '$.{{field}}')) = DATALENGTH(N'{{expected}}')
         """;
 
-    internal static string HasUnconfirmedWorker(string job) => $$"""
+    internal static string HasUnconfirmedWorker(string job) => HasUnconfirmedWorker(job, $$"""
+        ({{CanHaveUnconfirmedDelivery(job)}} AND EXISTS (SELECT 1 FROM OutboxMessages delivery WHERE {{UnconfirmedDeliveryBinding(job)}}))
+        """);
+
+    private static string HasUnconfirmedWorker(string job, string unconfirmedDelivery) => $$"""
         ({{job}}.PublicState = {{(int)PublicJobState.WorkerProcessing}}
          OR EXISTS (SELECT 1 FROM JobAttempts attempt WHERE attempt.JobId = {{job}}.Id AND attempt.CompletedAtUtc IS NULL)
-         OR ({{job}}.PublicState = {{(int)PublicJobState.Failed}} AND {{job}}.Reason = N'source-removed'
-             AND {{job}}.LeaseGeneration > 0 AND EXISTS (SELECT 1 FROM OutboxMessages delivery
-                WHERE delivery.JobId = {{job}}.Id AND delivery.PipelineRecordId = {{job}}.PipelineRecordId
-                  AND delivery.SourceRevision = {{job}}.SourceRevision AND delivery.Stage = {{job}}.Stage
-                  AND delivery.Operation COLLATE {{SchemaConfiguration.SchedulerFenceCollation}} =
-                      {{job}}.Operation COLLATE {{SchemaConfiguration.SchedulerFenceCollation}}
-                  AND delivery.DispatchedAtUtc IS NULL AND delivery.LeaseOwner IS NOT NULL)))
+         OR {{unconfirmedDelivery}})
+        """;
+
+    private static string CanHaveUnconfirmedDelivery(string job) => $$"""
+        {{job}}.PublicState = {{(int)PublicJobState.Failed}} AND {{job}}.Reason = N'source-removed' AND {{job}}.LeaseGeneration > 0
+        """;
+
+    private static string UnconfirmedDeliveryBinding(string job) => $$"""
+        delivery.JobId = {{job}}.Id AND delivery.PipelineRecordId = {{job}}.PipelineRecordId
+          AND delivery.SourceRevision = {{job}}.SourceRevision AND delivery.Stage = {{job}}.Stage
+          AND delivery.Operation COLLATE {{SchemaConfiguration.SchedulerFenceCollation}} =
+              {{job}}.Operation COLLATE {{SchemaConfiguration.SchedulerFenceCollation}}
+          AND delivery.DispatchedAtUtc IS NULL AND delivery.LeaseOwner IS NOT NULL
         """;
 
     internal static string NeverAdmitted(string task) => $"({task}.AdmissionGeneration = 0 AND {task}.BatchId IS NULL)";
 
-    private const string RemovedReleases = """
+    private const string RemovedReleases = "#FluxRemovedGpuReleaseProofs";
+
+    private const string RemovedReleasesJson = """
         OPENJSON(@removedSourceGpuReleases) WITH (
             TaskId uniqueidentifier '$.TaskId', BatchId uniqueidentifier '$.BatchId',
             AdmissionGeneration bigint '$.AdmissionGeneration', DispatchId uniqueidentifier '$.DispatchId',

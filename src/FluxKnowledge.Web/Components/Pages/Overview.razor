@@ -48,7 +48,7 @@
                 }
             </select>
         </label>
-            <button type="button" @onclick="RefreshAsync">Refresh status</button>
+            <button type="button" @onclick="RefreshFromButtonAsync">Refresh status</button>
         </div>
     </header>
     <p class="visually-hidden" role="status" aria-live="polite">@_announcement</p>
@@ -609,9 +609,11 @@
             ? $"{ProjectionState.RefreshIssue} {(ProjectionState.HasSnapshot ? "The last successful read may be out of date." : "Current activity is unavailable; zero activity has not been confirmed.")}"
             : $"{view.State}. {view.Message}";
     }
-    private async Task RefreshAsync()
+    private Task RefreshFromButtonAsync() => RefreshAsync(Guid.NewGuid());
+    private Task RefreshAsync() => RefreshAsync(null);
+    private async Task RefreshAsync(Guid? clickId)
     {
-        await ProjectionState.ReloadAsync(_stopping.Token);
+        await ProjectionState.ReloadAsync(_stopping.Token, clickId);
         await ApplyCurrentScopeAsync();
     }
     private async Task ApplyCurrentScopeAsync()

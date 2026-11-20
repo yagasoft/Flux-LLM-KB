@@ -1,14 +1,67 @@
+using System.Collections.Concurrent;
 using FluxKnowledge.Application.Contracts;
 using FluxKnowledge.Application.Sources;
 using FluxKnowledge.Web.Components.Status;
 using Microsoft.Extensions.DependencyInjection;
 using Microsoft.Extensions.Hosting;
+using Microsoft.Extensions.Logging;
 using Xunit;
 
 namespace FluxKnowledge.Web.Tests.Components;
 
+internal sealed class OverviewRefreshLog : ILogger<OverviewSnapshotCoordinator>
+{
+    public ConcurrentQueue<IReadOnlyDictionary<string, object?>> Entries { get; } = new();
+    public IDisposable? BeginScope<TState>(TState state) where TState : notnull => null;
+    public bool IsEnabled(LogLevel level) => true;
+    public void Log<TState>(LogLevel level, EventId eventId, TState state, Exception? exception,
+        Func<TState, Exception?, string> formatter)
+    {
+        if (state is IEnumerable<KeyValuePair<string, object?>> properties)
+            Entries.Enqueue(properties.ToDictionary());
+    }
+}
+
 public sealed class OverviewSnapshotCoordinatorTests
 {
+    [Theory]
+    [InlineData(false, "published")]
+    [InlineData(true, "timeout")]
+    [InlineData(false, "failed")]
+    public async Task Button_requests_identify_the_shared_read_and_its_outcome(bool timeout, string outcome)
+    {
+        var clock = new ManualClock();
+        var reader = new ControlledReader { Fail = outcome == "failed" };
+        var logger = new OverviewRefreshLog();
+        using var services = new ServiceCollection().AddSingleton<IProjectionReader>(reader).BuildServiceProvider();
+        await using var shared = new OverviewSnapshotCoordinator(services.GetRequiredService<IServiceScopeFactory>(),
+            new StatusEventFeed(), clock, logger);
+        var firstClick = Guid.NewGuid();
+        var secondClick = Guid.NewGuid();
+        var first = shared.RefreshAsync(default, force: true, clickId: firstClick).AsTask();
+        await reader.Started.Task.WaitAsync(TimeSpan.FromSeconds(3));
+        var second = shared.RefreshAsync(default, force: true, clickId: secondClick).AsTask();
+        if (timeout) clock.Advance(TimeSpan.FromSeconds(5));
+        else reader.Release.SetResult();
+        await Task.WhenAll(first, second).WaitAsync(TimeSpan.FromSeconds(3));
+
+        var firstRequest = Assert.Single(logger.Entries, entry => Equals(entry.GetValueOrDefault("ClickId"), firstClick));
+        var secondRequest = Assert.Single(logger.Entries, entry => Equals(entry.GetValueOrDefault("ClickId"), secondClick));
+        var readId = Assert.IsType<Guid>(firstRequest["ReadId"]);
+        Assert.Equal(readId, secondRequest["ReadId"]);
+        Assert.Equal(false, firstRequest["Joined"]);
+        Assert.Equal(true, secondRequest["Joined"]);
+        var started = Assert.Single(logger.Entries, entry => entry.ContainsKey("QueueMs"));
+        var finished = Assert.Single(logger.Entries, entry => entry.ContainsKey("Outcome"));
+        Assert.Equal(readId, started["ReadId"]);
+        Assert.Equal(readId, finished["ReadId"]);
+        Assert.Equal(outcome, finished["Outcome"]);
+        if (outcome == "failed")
+            Assert.Contains(logger.Entries, entry => Equals(entry.GetValueOrDefault("ReadId"), readId) &&
+                Equals(entry.GetValueOrDefault("{OriginalFormat}"), "Shared overview refresh failed. ReadId={ReadId}."));
+        Assert.Equal(1, reader.Reads);
+    }
+
     [Fact]
     public async Task Forced_refresh_still_waits_the_full_two_second_start_interval()
     {

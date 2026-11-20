@@ -1,14 +1,113 @@
+using System.Data.Common;
 using System.Diagnostics;
+using System.Text.Json;
 using FluxKnowledge.Application.Contracts;
+using FluxKnowledge.Domain.Gpu;
+using FluxKnowledge.Domain.Jobs;
+using FluxKnowledge.Infrastructure.SqlServer.Persistence;
+using FluxKnowledge.Infrastructure.SqlServer.Persistence.Entities;
 using FluxKnowledge.Integration.Tests.Support;
 using FluxKnowledge.Web.Components.Status;
+using Microsoft.Data.SqlClient;
 using Microsoft.EntityFrameworkCore;
+using Microsoft.EntityFrameworkCore.Diagnostics;
 using Xunit;
 
 namespace FluxKnowledge.Web.Tests.Components;
 
 public sealed partial class PipelineActivitySqlTests
 {
+    [NativeSqlServerFact]
+    public async Task Removed_job_release_proof_is_bound_to_the_exact_task_and_generation_on_repeated_reads()
+    {
+        var (_, batch, taskId, slot) = await SeedGpuReadLockAsync(DateTimeOffset.UtcNow);
+        await using var context = new TestDbContextFactory(_fixture.ConnectionString).CreateDbContext();
+        var task = await context.GpuMiniTasks.SingleAsync(row => row.Id == taskId);
+        var job = await context.Jobs.SingleAsync(row => row.Id == task.ParentJobId);
+        var record = await context.PipelineRecords.SingleAsync(row => row.Id == job.PipelineRecordId);
+        var dispatch = await context.GpuExecutorDispatches.SingleAsync(row => row.BatchId == batch);
+        task.ExecutionState = (int)GpuMiniTaskExecutionState.Completed;
+        await context.SaveChangesAsync();
+        Assert.NotNull(record.SourceRevisionId);
+        await context.Database.OpenConnectionAsync();
+        var inputs = JsonSerializer.Serialize(new[] { record.SourceRevisionId });
+        var proof = new
+        {
+            TaskId = taskId, BatchId = batch, task.AdmissionGeneration, dispatch.DispatchId, dispatch.ExecutorKey,
+            CapacitySlotKey = slot, SingleTaskCompletion = true
+        };
+        var wrongGeneration = proof with { AdmissionGeneration = proof.AdmissionGeneration + 1 };
+        var wrongTask = proof with { TaskId = Guid.NewGuid() };
+        var blocked = await SqlRemovedSourceWork.ReadBlockersAsync(context, inputs,
+            JsonSerializer.Serialize(new[] { wrongGeneration, wrongTask }), true, true, default);
+        using var blockers = JsonDocument.Parse(blocked.JobBlockers);
+        var blocker = Assert.Single(blockers.RootElement.EnumerateArray());
+        Assert.Equal(job.Id, blocker.GetProperty("Id").GetGuid());
+        Assert.Equal(2, blocker.GetProperty("Blocker").GetInt32());
+
+        var released = await SqlRemovedSourceWork.ReadBlockersAsync(context, inputs,
+            JsonSerializer.Serialize(new[] { wrongGeneration, proof, proof }), true, true, default);
+        Assert.Equal(("[]", "[]"), released);
+
+        job.PublicState = (int)PublicJobState.Failed;
+        job.Reason = "source-removed";
+        job.LeaseGeneration = 1;
+        var delivery = new OutboxMessageEntity
+        {
+            Id = Guid.NewGuid(), JobId = job.Id, PipelineRecordId = job.PipelineRecordId, SourceRevision = job.SourceRevision,
+            Stage = job.Stage, Operation = job.Operation.ToUpperInvariant(), IdempotencyKey = $"removed-proof:{job.Id:N}",
+            LeaseOwner = "delivery-owner", DueAtUtc = DateTimeOffset.UtcNow, CreatedAtUtc = DateTimeOffset.UtcNow
+        };
+        Assert.NotEqual(job.Operation, delivery.Operation);
+        context.OutboxMessages.Add(delivery);
+        await context.SaveChangesAsync();
+        var proofs = JsonSerializer.Serialize(new[] { proof });
+        Assert.Equal(("[]", "[]"), await SqlRemovedSourceWork.ReadBlockersAsync(context, inputs, proofs, true, true, default));
+
+        delivery.Operation = job.Operation;
+        await context.SaveChangesAsync();
+        var outstanding = await SqlRemovedSourceWork.ReadBlockersAsync(context, inputs, proofs, true, true, default);
+        using var outstandingJobs = JsonDocument.Parse(outstanding.JobBlockers);
+        var deliveryBlocker = Assert.Single(outstandingJobs.RootElement.EnumerateArray());
+        Assert.Equal(job.Id, deliveryBlocker.GetProperty("Id").GetGuid());
+        Assert.Equal(1, deliveryBlocker.GetProperty("Blocker").GetInt32());
+
+        delivery.DispatchedAtUtc = DateTimeOffset.UtcNow;
+        await context.SaveChangesAsync();
+        Assert.Equal(("[]", "[]"), await SqlRemovedSourceWork.ReadBlockersAsync(context, inputs, proofs, true, true, default));
+    }
+
+    [NativeSqlServerFact]
+    public async Task Cancelled_removed_proof_read_cleans_its_tables_on_the_callers_open_connection()
+    {
+        using var cancellation = new CancellationTokenSource();
+        await using var context = new TestDbContextFactory(_fixture.ConnectionString,
+            new CancelAfterRemovedProofTablesCreated(cancellation)).CreateDbContext();
+        await context.Database.OpenConnectionAsync();
+        var connection = (SqlConnection)context.Database.GetDbConnection();
+        var connectionId = connection.ClientConnectionId;
+        var inputs = JsonSerializer.Serialize(new[] { Guid.NewGuid() });
+        await Assert.ThrowsAnyAsync<OperationCanceledException>(() =>
+            SqlRemovedSourceWork.ReadBlockersAsync(context, inputs, "[]", true, true, cancellation.Token).AsTask());
+        Assert.Equal(connectionId, connection.ClientConnectionId);
+        Assert.Equal(0, await context.Database.SqlQueryRaw<int>("""
+            SELECT CASE WHEN OBJECT_ID('tempdb..#FluxRemovedJobCandidates') IS NULL
+                        AND OBJECT_ID('tempdb..#FluxRemovedGpuReleaseProofs') IS NULL THEN 0 ELSE 1 END AS [Value]
+            """).SingleAsync());
+        Assert.Equal(("[]", "[]"), await SqlRemovedSourceWork.ReadBlockersAsync(context, inputs, "[]", true, true, default));
+    }
+
+    private sealed class CancelAfterRemovedProofTablesCreated(CancellationTokenSource cancellation) : DbCommandInterceptor
+    {
+        public override ValueTask<int> NonQueryExecutedAsync(DbCommand command, CommandExecutedEventData eventData,
+            int result, CancellationToken cancellationToken = default)
+        {
+            if (command.CommandText.Contains("CREATE TABLE #FluxRemovedJobCandidates", StringComparison.Ordinal))
+                cancellation.Cancel();
+            return ValueTask.FromResult(result);
+        }
+    }
+
     [SqlServerScaleFact]
     [Trait("Category", "Scale")]
     public async Task Overview_keeps_removed_source_verification_usable_with_large_unrelated_GPU_history()
@@ -126,10 +225,12 @@ public sealed partial class PipelineActivitySqlTests
         output.WriteLine($"Historical job drawer read: {historyWatch.Elapsed.TotalMilliseconds:F1} ms.");
 
         var timings = new FileCostCommandTimings();
-        var reader = SnapshotReader(new FileCostRuntimeFactory(_fixture.ConnectionString, timings));
+        var commands = new FileCommandTrace();
+        var reader = SnapshotReader(new FileCostRuntimeFactory(_fixture.ConnectionString, timings, commands));
         for (var run = 0; run < 2; run++)
         {
             timings.Reset();
+            commands.Commands.Clear();
             var watch = Stopwatch.StartNew();
             try
             {
@@ -140,6 +241,13 @@ public sealed partial class PipelineActivitySqlTests
                 Assert.Equal(8_999, view.HistoricalJobs);
                 Assert.Contains(view.Jobs, job => job.State == PipelineWorkState.Attention &&
                     job.Reason == "Worker cleanup is unconfirmed after source removal.");
+                var jobProof = Assert.Single(commands.Commands, sql => sql.Contains("END AS Blocker", StringComparison.Ordinal));
+                var gpuProof = Assert.Single(commands.Commands, sql => sql.Contains("SELECT task.Id AS [Value]", StringComparison.Ordinal));
+                Assert.DoesNotContain("OPENJSON(@removedInputIds)", jobProof);
+                Assert.DoesNotContain("OPENJSON(@removedInputIds)", gpuProof);
+                Assert.DoesNotContain("OPENJSON(@removedSourceGpuReleases)", jobProof);
+                Assert.DoesNotContain("OPENJSON(@removedSourceGpuReleases)", gpuProof);
+                Assert.DoesNotContain("OutboxMessages", jobProof);
             }
             finally
             {

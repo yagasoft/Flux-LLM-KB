@@ -1,4 +1,5 @@
 using System.Collections.Immutable;
+using System.Diagnostics;
 using FluxKnowledge.Application.Contracts;
 using FluxKnowledge.Application.Sources;
 using Microsoft.Data.SqlClient;
@@ -23,6 +24,7 @@ public sealed class OverviewSnapshotCoordinator : IAsyncDisposable
     private readonly Task _periodic;
     private OverviewSnapshot _current = new(null, null);
     private Task? _inFlight;
+    private Guid _inFlightReadId;
     private DateTimeOffset _lastStart = DateTimeOffset.MinValue;
     private DateTimeOffset _retryAfter = DateTimeOffset.MinValue;
     private long _invalidationVersion, _publishedVersion;
@@ -89,23 +91,34 @@ public sealed class OverviewSnapshotCoordinator : IAsyncDisposable
         return new Subscription(this);
     }
 
-    public async ValueTask RefreshAsync(CancellationToken cancellationToken, bool force = false)
+    public async ValueTask RefreshAsync(CancellationToken cancellationToken, bool force = false, Guid? clickId = null)
     {
         cancellationToken.ThrowIfCancellationRequested();
-        await RequestRefresh(force, automatic: false).WaitAsync(cancellationToken).ConfigureAwait(false);
+        var receivedAt = clickId.HasValue ? _clock.GetUtcNow() : (DateTimeOffset?)null;
+        var (completion, readId, joined) = RequestRefresh(force, automatic: false);
+        if (clickId is { } click)
+            _logger?.LogInformation("Overview refresh click {ClickId}: receivedUtc={ReceivedUtc:O}; readId={ReadId}; joined={Joined}.",
+                click, receivedAt, readId, joined);
+        await completion.WaitAsync(cancellationToken).ConfigureAwait(false);
     }
 
-    private Task RequestRefresh(bool force, bool automatic)
+    private (Task Completion, Guid? ReadId, bool Joined) RequestRefresh(bool force, bool automatic)
     {
         lock (_sync)
         {
-            if (_stopping.IsCancellationRequested) return Task.CompletedTask;
-            if (_inFlight is not null) { _coalesced++; return _inFlight; }
-            if (automatic && (_subscribers == 0 || _clock.GetUtcNow() < _retryAfter)) return Task.CompletedTask;
-            if (!force && _invalidationVersion == _publishedVersion && IsFresh(_current)) { _cacheHits++; return Task.CompletedTask; }
+            if (_stopping.IsCancellationRequested) return (Task.CompletedTask, null, false);
+            if (_inFlight is not null) { _coalesced++; return (_inFlight, _inFlightReadId, true); }
+            if (automatic && (_subscribers == 0 || _clock.GetUtcNow() < _retryAfter)) return (Task.CompletedTask, null, false);
+            if (!force && _invalidationVersion == _publishedVersion && IsFresh(_current))
+            {
+                _cacheHits++;
+                return (Task.CompletedTask, null, false);
+            }
             // Queue outside the caller's scope and cancellation lifetime. Assignment happens before execution.
-            _inFlight = Task.Run(() => RefreshCoreAsync(automatic));
-            return _inFlight;
+            var readId = _inFlightReadId = Guid.NewGuid();
+            var queuedAt = Stopwatch.GetTimestamp();
+            _inFlight = Task.Run(() => RefreshCoreAsync(automatic, readId, queuedAt));
+            return (_inFlight, readId, false);
         }
     }
 
@@ -116,12 +129,13 @@ public sealed class OverviewSnapshotCoordinator : IAsyncDisposable
         value.Projection?.Activity.ReadStartedAtUtc is { } started && started != default
             ? started : value.PublishedAtUtc ?? DateTimeOffset.MinValue;
 
-    private async Task RefreshCoreAsync(bool automatic)
+    private async Task RefreshCoreAsync(bool automatic, Guid readId, long queuedAt)
     {
         var succeeded = false;
+        var outcome = "cancelled";
         long attemptNumber = 0;
         DateTimeOffset attemptStarted = default;
-        System.Diagnostics.Stopwatch? elapsed = null;
+        Stopwatch? elapsed = null;
         long sampledVersion = 0;
         try
         {
@@ -133,7 +147,9 @@ public sealed class OverviewSnapshotCoordinator : IAsyncDisposable
             }
             if (wait > TimeSpan.Zero) await Task.Delay(wait, _clock, _stopping.Token).ConfigureAwait(false);
             lock (_sync) { _lastStart = attemptStarted = _clock.GetUtcNow(); sampledVersion = _invalidationVersion; attemptNumber = ++_attempts; }
-            elapsed = System.Diagnostics.Stopwatch.StartNew();
+            elapsed = Stopwatch.StartNew();
+            _logger?.LogInformation("Overview read {ReadId} started: startedUtc={StartedUtc:O}; queueMs={QueueMs}; automatic={Automatic}.",
+                readId, attemptStarted, Stopwatch.GetElapsedTime(queuedAt).TotalMilliseconds, automatic);
             using var deadline = new CancellationTokenSource(OverviewReadOptions.ReadBudget, _clock);
             using var budget = CancellationTokenSource.CreateLinkedTokenSource(_stopping.Token, deadline.Token);
             try
@@ -146,7 +162,10 @@ public sealed class OverviewSnapshotCoordinator : IAsyncDisposable
                 }
                 budget.Token.ThrowIfCancellationRequested();
                 if (!next.Activity.IsConsistent)
+                {
+                    outcome = "inconsistent";
                     RecordFailure("Status changed during the read. Waiting for a consistent sample.");
+                }
                 else
                 {
                     // Records are immutable; detach mutable backing collections too.
@@ -166,12 +185,13 @@ public sealed class OverviewSnapshotCoordinator : IAsyncDisposable
                         if (next.RuntimeAdmissionChanged) _invalidationVersion++;
                     }
                     succeeded = true;
+                    outcome = "published";
                 }
             }
             catch (OperationCanceledException) when (!_stopping.IsCancellationRequested && budget.IsCancellationRequested)
-            { RecordFailure("Status is busy. Waiting for a consistent sample."); }
+            { outcome = "timeout"; RecordFailure("Status is busy. Waiting for a consistent sample."); }
             catch (OverviewReadBudgetExceededException)
-            { RecordFailure("Status is busy. Waiting for a consistent sample."); }
+            { outcome = "timeout"; RecordFailure("Status is busy. Waiting for a consistent sample."); }
             catch (SqlException exception) when (budget.IsCancellationRequested &&
                 OverviewReadBudgetExceededException.HasCommandCancellationErrors(exception))
             {
@@ -179,11 +199,15 @@ public sealed class OverviewSnapshotCoordinator : IAsyncDisposable
                 // surface its cancellation as SqlException rather than OCE;
                 // the reader deliberately leaves caller cancellation intact.
                 if (!_stopping.IsCancellationRequested)
+                {
+                    outcome = "timeout";
                     RecordFailure("Status is busy. Waiting for a consistent sample.");
+                }
             }
             catch (Exception exception) when (!_stopping.IsCancellationRequested)
             {
-                _logger?.LogWarning(exception, "Shared overview refresh failed.");
+                outcome = "failed";
+                _logger?.LogWarning(exception, "Shared overview refresh failed. ReadId={ReadId}.", readId);
                 RecordFailure("Status refresh failed.");
             }
             if (!_stopping.IsCancellationRequested)
@@ -199,8 +223,10 @@ public sealed class OverviewSnapshotCoordinator : IAsyncDisposable
                 again = succeeded && _invalidationVersion != _publishedVersion && _subscribers > 0 && !_stopping.IsCancellationRequested;
             }
             if (elapsed is not null)
-                _logger?.LogInformation("Overview refresh attempt {Attempt}: startedUtc={StartedUtc:O}; published={Published}; durationMs={DurationMs}; automatic={Automatic}.",
-                    attemptNumber, attemptStarted, succeeded, elapsed.Elapsed.TotalMilliseconds, automatic);
+                _logger?.LogInformation("Overview refresh attempt {Attempt}: startedUtc={StartedUtc:O}; published={Published}; durationMs={DurationMs}; automatic={Automatic}; readId={ReadId}; outcome={Outcome}.",
+                    attemptNumber, attemptStarted, succeeded, elapsed.Elapsed.TotalMilliseconds, automatic, readId, outcome);
+            else
+                _logger?.LogInformation("Overview read {ReadId} ended before starting: outcome={Outcome}.", readId, outcome);
             if (again) _ = RequestRefresh(force: true, automatic: true);
         }
     }

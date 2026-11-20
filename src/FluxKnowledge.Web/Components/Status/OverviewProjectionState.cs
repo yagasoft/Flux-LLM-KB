@@ -40,11 +40,11 @@ public sealed class OverviewProjectionState(IProjectionReader reader, ILogger<Ov
         GpuSchedulerStatus = GpuSchedulerStatusProjection.Empty
     };
 
-    public async ValueTask ReloadAsync(CancellationToken cancellationToken)
+    public async ValueTask ReloadAsync(CancellationToken cancellationToken, Guid? clickId = null)
     {
         if (shared is not null)
         {
-            await shared.RefreshAsync(cancellationToken, force: true).ConfigureAwait(false);
+            await shared.RefreshAsync(cancellationToken, force: true, clickId: clickId).ConfigureAwait(false);
             SynchronizeFromShared();
             return;
         }

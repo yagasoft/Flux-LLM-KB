@@ -5,11 +5,13 @@ using FluxKnowledge.Infrastructure.SqlServer.Persistence;
 using FluxKnowledge.Infrastructure.SqlServer.Persistence.Entities;
 using FluxKnowledge.Integration.Tests.Support;
 using FluxKnowledge.Web.Components.Status;
+using FluxKnowledge.Web.Tests.Components;
 using Microsoft.EntityFrameworkCore;
 using Microsoft.EntityFrameworkCore.Diagnostics;
 using Microsoft.Extensions.DependencyInjection;
 using Microsoft.Extensions.DependencyInjection.Extensions;
 using Microsoft.Extensions.Hosting;
+using Microsoft.Extensions.Logging;
 using Microsoft.Playwright;
 using Xunit;
 
@@ -29,7 +31,8 @@ public sealed class OverviewSqlTimeoutBrowserTests
         {
             var delay = new DelayNextSourceRead();
             var factory = new Factory(sql.ConnectionString, delay);
-            await using var host = await StartAsync(sql.ConnectionString, root, factory, snapshot: false);
+            var refreshLog = new OverviewRefreshLog();
+            await using var host = await StartAsync(sql.ConnectionString, root, factory, snapshot: false, refreshLog);
             using var playwright = await Playwright.CreateAsync();
             await using var browser = await playwright.Chromium.LaunchAsync(BrowserLaunchOptions.Create());
             await using var page = await browser.NewPageAsync();
@@ -49,6 +52,11 @@ public sealed class OverviewSqlTimeoutBrowserTests
             await Assertions.Expect(page.GetByRole(AriaRole.Alert)).ToHaveCountAsync(0);
             Assert.NotEqual(timestamp, await page.Locator(".status-freshness time").GetAttributeAsync("datetime"));
             Assert.Empty(errors);
+            var clicks = refreshLog.Entries.Where(entry => entry.ContainsKey("ClickId")).ToArray();
+            Assert.Equal(2, clicks.Length);
+            var timedOutReadId = Assert.IsType<Guid>(clicks[0]["ReadId"]);
+            Assert.Contains(refreshLog.Entries, entry => Equals(entry.GetValueOrDefault("ReadId"), timedOutReadId) &&
+                Equals(entry.GetValueOrDefault("Outcome"), "timeout"));
         }
         finally { Directory.Delete(root, recursive: true); }
     }
@@ -126,7 +134,7 @@ public sealed class OverviewSqlTimeoutBrowserTests
     }
 
     private static Task<PhaseOneVerticalSliceBrowserTests.BrowserHost> StartAsync(string connectionString,
-        string root, Factory factory, bool snapshot) =>
+        string root, Factory factory, bool snapshot, OverviewRefreshLog? refreshLog = null) =>
         PhaseOneVerticalSliceBrowserTests.BrowserHost.StartAsync(
             connectionString, root, Path.Combine(root, "indexes"), services =>
             {
@@ -135,6 +143,7 @@ public sealed class OverviewSqlTimeoutBrowserTests
                 services.AddSingleton<IDbContextFactory<FluxKnowledgeDbContext>>(factory);
                 services.RemoveAll<OverviewReadOptions>();
                 services.AddSingleton(new OverviewReadOptions(snapshot));
+                if (refreshLog is not null) services.AddSingleton<ILogger<OverviewSnapshotCoordinator>>(refreshLog);
             });
 
     private sealed class DelayNextSourceRead : DbCommandInterceptor
