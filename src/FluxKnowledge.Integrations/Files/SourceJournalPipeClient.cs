@@ -24,11 +24,34 @@ public sealed class SourceJournalPipeClient : ISourceChangeJournalReader
     public async ValueTask<JournalPage> ReadAsync(JournalCursor cursor, int maximumBytes, CancellationToken cancellationToken)
         => (await SendAsync("read", cursor, maximumBytes, cancellationToken).ConfigureAwait(false)).Page
             ?? throw new IOException("SourceJournalPageMissing");
-    private async Task<SourceJournalPipeProtocol.Response> SendAsync(string operation, JournalCursor cursor, int bytes, CancellationToken ct)
+    /// <summary>Checks that the trusted helper explicitly refuses a volume excluded by the app.</summary>
+    public async ValueTask<bool> IsVolumeRefusedAsync(string volumeIdentity, CancellationToken cancellationToken)
+    {
+        if (volumeIdentity.Length != 49 || !volumeIdentity.StartsWith(@"\\?\VOLUME{", StringComparison.Ordinal) ||
+            !volumeIdentity.EndsWith(@"}\", StringComparison.Ordinal) ||
+            !Guid.TryParseExact(volumeIdentity.AsSpan(11, 36), "D", out _) ||
+            volumeIdentity != volumeIdentity.ToUpperInvariant() ||
+            _options.ApprovedVolumes.Contains(volumeIdentity, StringComparer.OrdinalIgnoreCase))
+            return false;
+
+        try
+        {
+            _ = await SendAsync("query", new(volumeIdentity, 0, 0), 65536, cancellationToken, requireApproved: false)
+                .ConfigureAwait(false);
+            return false;
+        }
+        catch (IOException failure)
+        {
+            return failure.Message == "SourceJournalHelperRefused";
+        }
+    }
+
+    private async Task<SourceJournalPipeProtocol.Response> SendAsync(string operation, JournalCursor cursor, int bytes,
+        CancellationToken ct, bool requireApproved = true)
     {
         var pipeName = _options.PipeName ?? throw new IOException("SourceJournalPipeNotConfigured");
         SourceJournalPipeProtocol.ValidatePipeName(pipeName);
-        if (!_options.ApprovedVolumes.Contains(cursor.VolumeIdentity, StringComparer.OrdinalIgnoreCase))
+        if (requireApproved && !_options.ApprovedVolumes.Contains(cursor.VolumeIdentity, StringComparer.OrdinalIgnoreCase))
             throw new UnauthorizedAccessException("SourceJournalVolumeNotApproved");
         using var deadline = CancellationTokenSource.CreateLinkedTokenSource(ct);
         var absoluteDeadline = DateTimeOffset.UtcNow.Add(SourceJournalPipeProtocol.Timeout).UtcTicks;

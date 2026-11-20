@@ -125,6 +125,25 @@ public sealed class SourceJournalPipeClientTests
             started + SourceJournalPipeProtocol.Timeout.Ticks + TimeSpan.FromMilliseconds(100).Ticks);
     }
 
+    [Theory]
+    [InlineData("not-approved", true)]
+    [InlineData(null, false)]
+    [InlineData("volume-unavailable", false)]
+    public async Task Removed_volume_probe_requires_an_explicit_refusal_from_the_trusted_helper(string? wireError, bool expected)
+    {
+        const string removed = @"\\?\VOLUME{22222222-2222-2222-2222-222222222222}\";
+        var options = Options();
+        var client = new SourceJournalPipeClient(options, WindowsIdentity.GetCurrent().User!);
+        using var deadline = new CancellationTokenSource(TimeSpan.FromSeconds(10));
+        using var pipe = CreateUserOwnedServer(options.PipeName!);
+        SourceJournalPipeProtocol.Request? request = null;
+        var server = ReplyAsync(pipe, deadline.Token, value => request = value, wireError);
+        Assert.Equal(expected, await client.IsVolumeRefusedAsync(removed, deadline.Token));
+        Assert.True(await server > 0);
+        Assert.NotNull(request);
+        Assert.Equal("query", request.Operation);
+        Assert.Equal(removed, request.Cursor.VolumeIdentity);
+    }
     private static SourceJournalOptions Options() => new()
     {
         Enabled = true,

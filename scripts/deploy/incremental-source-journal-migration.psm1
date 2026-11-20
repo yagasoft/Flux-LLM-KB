@@ -407,6 +407,7 @@ function Get-SourceJournalHeldMigrationIntent {
 function Get-SourceJournalHeldReleaseId {
     param([Parameter(Mandatory)][string]$HoldPath)
     $value=Read-SourceJournalEvidenceJson ([IO.Path]::GetFullPath($HoldPath)) 4096
+    if($value -is [string] -and $value -cmatch '\Aweb-bootstrap-[a-f0-9]{32}\z'){return $value}
     if($value -is [Collections.IDictionary]){
         $operation=[Guid]::Empty
         if($value.Count -ne 3 -or @($value.Keys|Where-Object {$_ -cnotin @('version','releaseId','corpusRebuildOperationId')}).Count -or

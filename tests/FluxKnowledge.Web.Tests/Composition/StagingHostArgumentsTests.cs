@@ -13,6 +13,7 @@ public sealed class StagingHostArgumentsTests
     [InlineData("--expanded-gpu-qualification", "ExpandedGpuQualification")]
     [InlineData("--expanded-gpu-indexing", "ExpandedGpuIndexing")]
     [InlineData("--payload-readiness", "PayloadReadiness")]
+    [InlineData("--journal-iis", "JournalIis")]
     public void Optional_modes_are_explicit_and_quality_never_selects_migration(string? flag, string expected)
     {
         string[] args = flag is null ? ["--settings-file", "owned"] : ["--settings-file", "owned", flag];
@@ -49,5 +50,18 @@ public sealed class StagingHostArgumentsTests
     {
         string[] args = second is null ? ["--settings-file", "owned", first] : ["--settings-file", "owned", first, second];
         Assert.Throws<ArgumentException>(() => StagingHostArguments.ParseMode(args));
+    }
+
+    [Theory]
+    [InlineData("5137")]
+    [InlineData("56137")]
+    [InlineData("0")]
+    [InlineData(null)]
+    public void Journal_IIS_requires_a_separate_backend_port_supplied_by_the_host(string? port)
+    {
+        Assert.Throws<InvalidOperationException>(() => StagingHostArguments.RequireJournalIisPort("host-token", port, "/", 56137));
+        Assert.Throws<InvalidOperationException>(() => StagingHostArguments.RequireJournalIisPort(null, "23000", "/", 56137));
+        Assert.Throws<InvalidOperationException>(() => StagingHostArguments.RequireJournalIisPort("host-token", "23000", "/nested", 56137));
+        Assert.Equal(23000, StagingHostArguments.RequireJournalIisPort("host-token", "23000", "/", 56137));
     }
 }

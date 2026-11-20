@@ -34,6 +34,7 @@ internal sealed class StagingHostSettings
     internal string SourcesRoot => Path.Combine(Layout.Root, "Sources");
     internal string CatalogName => Sql.CatalogName;
     internal string RuntimeConnectionString => Sql.Options.ConnectionString;
+    private string? ProvisionedConnectionString { get; init; }
     internal string IndexPublicationMode { get; }
     internal bool DashboardReadBenchmark { get; }
     internal bool CpuSemantic { get; private init; }
@@ -110,6 +111,7 @@ internal sealed class StagingHostSettings
         return new(loaded.Layout, loaded.Sql, loaded.Origin, loaded.IndexPublicationMode, loaded.DashboardReadBenchmark,
             document.DashboardReadConsistency)
         {
+            ProvisionedConnectionString = document.SqlConnectionString,
             CpuSemantic = document.CpuSemantic,
             GpuModelWarming = document.GpuModelWarming,
             CpuRerankerShards = document.CpuRerankerShards,
@@ -152,6 +154,54 @@ internal sealed class StagingHostSettings
             throw new InvalidOperationException("Staging SQL files do not match the exact owned layout.");
     }
 
+    private IReadOnlyDictionary<string, string?> JournalIisSettings { get; set; } = new Dictionary<string, string?>();
+
+    internal IReadOnlyList<Components.Sources.JournalVolume>? JournalIisVolumes { get; private set; }
+
+    internal void BindJournalIis()
+    {
+        var stage = Path.GetFileName(Layout.Root);
+        if (!DashboardReadBenchmark || CpuSemantic || SourceJournalEnabled ||
+            !string.Equals(Path.GetDirectoryName(Layout.Root), WorkingBaseRoot, StringComparison.OrdinalIgnoreCase) ||
+            !Regex.IsMatch(stage, @"\A[A-Za-z0-9]{1,40}\z") ||
+            CatalogName != $"FluxKnowledge_Staging_{stage}")
+            throw new InvalidOperationException("The journal IIS trial requires isolated read-only staging and an exact stage catalogue.");
+
+        var path = Path.Combine(Layout.ConfigRoot, "appsettings.Production.json");
+        new LiveRootStorageSafety(Layout, FileSystemLiveRootPathInspector.Instance).ValidateBeforeIo(path);
+        using var file = new FileStream(path, FileMode.Open, FileAccess.Read, FileShare.Read);
+        if (file.Length is < 1 or > 64 * 1024) throw new InvalidDataException("Invalid journal trial settings length.");
+        var configuration = new ConfigurationBuilder().AddJsonStream(file).Build();
+        var journal = configuration.GetSection("SourceJournal").Get<SourceJournalOptions>();
+        var stageVolumes = configuration.GetSection("SourceJournalAllowlistOperator:StageVolumeIds").Get<string[]>() ?? [];
+        var stageDrives = configuration.GetSection("SourceJournalAllowlistOperator:StageVolumeMounts").Get<string[]>() ?? [];
+        var operatorOrigin = new Components.Sources.SourceJournalAllowlistHandoff(configuration["SourceJournalAllowlistOperator:Origin"]);
+        if (journal is null || !journal.Enabled || journal.SealingEnabled ||
+            journal.PipeName != $"FluxKnowledge.SourceJournal.Staging-{stage}" ||
+            string.IsNullOrEmpty(ProvisionedConnectionString) ||
+            !string.Equals(configuration.GetConnectionString("FluxKnowledge"), ProvisionedConnectionString, StringComparison.Ordinal) ||
+            operatorOrigin.ReviewUrl is not { } reviewUrl || !Uri.TryCreate(reviewUrl, UriKind.Absolute, out var uri) ||
+            uri.Scheme != "http" || uri.Port == 5137 || uri.Port == Origin.Port ||
+            stageVolumes.Length != 2 || stageVolumes.Distinct(StringComparer.OrdinalIgnoreCase).Count() != 2 ||
+            stageDrives.Length != 2 || stageDrives.Distinct(StringComparer.OrdinalIgnoreCase).Count() != 2 ||
+            stageDrives.Any(drive => !Regex.IsMatch(drive, @"\A[A-Z]:\\\z") || drive is @"C:\" or @"E:\" or @"I:\" or @"J:\") ||
+            journal.ApprovedVolumes.Any(volume => !stageVolumes.Contains(volume, StringComparer.OrdinalIgnoreCase)) ||
+            journal.ApprovedVolumes.Length is < 1 or > 2 ||
+            journal.ApprovedVolumes.Distinct(StringComparer.OrdinalIgnoreCase).Count() != journal.ApprovedVolumes.Length ||
+            stageVolumes.Any(volume => !Regex.IsMatch(volume, @"\A\\\\\?\\VOLUME\{[0-9A-F]{8}(?:-[0-9A-F]{4}){3}-[0-9A-F]{12}\}\\\z")))
+            throw new InvalidOperationException("The journal trial settings do not match the isolated deployment.");
+
+        var values = new Dictionary<string, string?>
+        {
+            ["SourceJournal:Enabled"] = "true",
+            ["SourceJournal:PipeName"] = journal.PipeName,
+            ["SourceJournalAllowlistOperator:Origin"] = uri.GetLeftPart(UriPartial.Authority)
+        };
+        for (var i = 0; i < journal.ApprovedVolumes.Length; i++)
+            values[$"SourceJournal:ApprovedVolumes:{i}"] = journal.ApprovedVolumes[i];
+        JournalIisSettings = values;
+        JournalIisVolumes = stageDrives.Zip(stageVolumes, (drive, volume) => new Components.Sources.JournalVolume(drive, volume)).ToArray();
+    }
     internal IConfiguration Configuration => new ConfigurationBuilder().AddInMemoryCollection(new Dictionary<string, string?>
     {
         [$"{UsearchIndexOptions.ConfigurationSectionName}:RootPath"] = Layout.IndexRoot,
@@ -187,7 +237,7 @@ internal sealed class StagingHostSettings
             [$"SourceJournal:SealQualifications:{index}:QualificationId"] = qualification.QualificationId,
             [$"SourceJournal:SealQualifications:{index}:ProviderName"] = qualification.ProviderName,
             [$"SourceJournal:SealQualifications:{index}:ProviderVersion"] = qualification.ProviderVersion
-        }))).Build();
+        }))).AddInMemoryCollection(JournalIisSettings).Build();
 
     private sealed record SettingsDocument(string SqlConnectionString, string Origin, string IndexPublicationMode = "Legacy",
         bool DashboardReadBenchmark = false, string DashboardReadConsistency = "LegacyFenced",

@@ -93,6 +93,7 @@ app.MapStaticAssets();
 app.MapRazorComponents<App>()
     .AddInteractiveServerRenderMode();
 app.MapFluxKnowledgeHealth();
+app.MapSourceJournalAllowlistPreview();
 app.MapFluxKnowledgeIndexHealth();
 app.MapFluxKnowledgeGpuStatus();
 app.MapFluxKnowledgeSearch();

@@ -1,6 +1,7 @@
 using System.Security.Principal;
 using FluxKnowledge.Application.Ports;
 using FluxKnowledge.Application.Sources;
+using FluxKnowledge.Integrations.Files;
 
 namespace FluxKnowledge.Web.Endpoints;
 
@@ -26,6 +27,13 @@ public static class SourceJournalHelperHealthEndpoints
             reader is null || repairEnabled && repair is null)
             return Results.StatusCode(StatusCodes.Status503ServiceUnavailable);
 
+        var removed = context.Request.Query["removedVolume"];
+        if (removed.Count > 16 || removed.Distinct(StringComparer.OrdinalIgnoreCase).Count() != removed.Count ||
+            removed.Any(volume => string.IsNullOrEmpty(volume) || options.ApprovedVolumes.Contains(volume, StringComparer.OrdinalIgnoreCase)))
+            return Results.BadRequest();
+        if (removed.Count > 0 && (!OperatingSystem.IsWindows() || reader is not SourceJournalPipeClient))
+            return Results.StatusCode(StatusCodes.Status503ServiceUnavailable);
+
         using var deadline = CancellationTokenSource.CreateLinkedTokenSource(cancellationToken);
         deadline.CancelAfter(TimeSpan.FromSeconds(10));
         try
@@ -43,6 +51,15 @@ public static class SourceJournalHelperHealthEndpoints
                     return Results.StatusCode(StatusCodes.Status503ServiceUnavailable);
             }
             if (!hold.IsHeld) return Results.StatusCode(StatusCodes.Status409Conflict);
+            if (OperatingSystem.IsWindows() && reader is SourceJournalPipeClient protectedReader)
+            {
+                foreach (var volume in removed)
+                {
+                    if (!hold.IsHeld) return Results.StatusCode(StatusCodes.Status409Conflict);
+                    if (!await protectedReader.IsVolumeRefusedAsync(volume!, deadline.Token).ConfigureAwait(false))
+                        return Results.StatusCode(StatusCodes.Status503ServiceUnavailable);
+                }
+            }
             // No valid policy can approve an empty root. Resolve refuses this
             // before opening a source or creating/retiring an ACL-repair intent.
             var repairTransport = "Disabled";
@@ -62,7 +79,7 @@ public static class SourceJournalHelperHealthEndpoints
                 callerSid = identity.User?.Value;
             }
             return Results.Ok(new { Version = 1, VolumesChecked = options.ApprovedVolumes.Length,
-                ApprovedVolumes = options.ApprovedVolumes, options.PipeName, RepairTransport = repairTransport, CallerSid = callerSid });
+                ApprovedVolumes = options.ApprovedVolumes, RemovedVolumes = removed.ToArray(), options.PipeName, RepairTransport = repairTransport, CallerSid = callerSid });
         }
         catch (OperationCanceledException) when (!cancellationToken.IsCancellationRequested)
         {

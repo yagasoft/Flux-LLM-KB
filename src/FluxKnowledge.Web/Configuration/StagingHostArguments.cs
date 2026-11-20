@@ -1,6 +1,6 @@
 namespace FluxKnowledge.Web.Configuration;
 
-internal enum StagingHostMode { Run, Migrate, Cli, CandidateQuality, ExpandedGpu, PayloadReadiness, ExpandedGpuQualification, ExpandedGpuIndexing, IndexFixtureCleanup, NormalRuntime, CheckNormalRuntime, ModelWarmingTrial }
+internal enum StagingHostMode { Run, Migrate, Cli, CandidateQuality, ExpandedGpu, PayloadReadiness, ExpandedGpuQualification, ExpandedGpuIndexing, IndexFixtureCleanup, NormalRuntime, CheckNormalRuntime, ModelWarmingTrial, JournalIis }
 
 internal static class StagingHostArguments
 {
@@ -25,8 +25,18 @@ internal static class StagingHostArguments
                 if (args[2] == "--expanded-gpu-qualification") return StagingHostMode.ExpandedGpuQualification;
                 if (args[2] == "--expanded-gpu-indexing") return StagingHostMode.ExpandedGpuIndexing;
                 if (args[2] == "--payload-readiness") return StagingHostMode.PayloadReadiness;
+                if (args[2] == "--journal-iis") return StagingHostMode.JournalIis;
             }
         }
-        throw new ArgumentException("Use --settings-file <owned Config\\staging.json> [--migrate | --model-warming-trial | --candidate-quality | --expanded-gpu | --expanded-gpu-qualification | --payload-readiness | --cli <native command>].");
+        throw new ArgumentException("Use --settings-file <owned Config\\staging.json> [--migrate | --model-warming-trial | --candidate-quality | --expanded-gpu | --expanded-gpu-qualification | --payload-readiness | --journal-iis | --cli <native command>].");
+    }
+
+    internal static int RequireJournalIisPort(string? token, string? port, string? applicationPath, int dashboardPort)
+    {
+        if (string.IsNullOrWhiteSpace(token) || applicationPath != "/" ||
+            !int.TryParse(port, System.Globalization.NumberStyles.None, System.Globalization.CultureInfo.InvariantCulture, out var value) ||
+            value is < 1024 or > 65535 or 5137 || value == dashboardPort)
+            throw new InvalidOperationException("The journal trial requires out-of-process ASP.NET Core IIS hosting on a separate backend port.");
+        return value;
     }
 }

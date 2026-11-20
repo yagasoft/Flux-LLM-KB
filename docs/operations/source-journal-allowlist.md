@@ -17,7 +17,17 @@ an inactive journal, an administrator needs to check journal provisioning
 on the host. If Windows is deleting the journal, wait for it to finish before
 checking again.
 
-## Review a volume change
+## Save from the dashboard
+
+An installation with the separately approved Windows operator can apply an allowlist change from the dashboard. Select the desired volumes, choose **Review allowlist change**, then **Save allowlist**. Confirm the exact change in the same tab. The operator uses the signed-in Windows account, checks it against the configured operator SIDs, and rechecks the source impact before beginning. When the operation finishes, the receipt links back to the dashboard.
+
+The dashboard and operator use distinct loopback ports. The operator is addressed as `http://localhost:<port>` so a Windows browser can use the existing Windows session under its intranet authentication policy. Use a regular browser profile that supports integrated Windows authentication. If a credential prompt appears, cancel it and check the operator configuration and browser profile with the administrator.
+
+Save updates the app configuration and helper policy under a durable hold. IIS and the helper restart, and the held app verifies journal transport. The operation preserves the installed payloads and does not run migration DDL or retire verification requests. The receipt distinguishes an applied change, a verified reversal and a hold requiring recovery.
+
+The one-time operator setup pins the installed payloads, helper task, database incarnation and operator SIDs. The setup script provides a hash-bound installation plan. A subsequent app release changes the relevant fingerprints and blocks further saves until the operator binding is reviewed and refreshed. Keep the protected receipt directory when planning that refresh. The plain HTTP loopback handoff assumes other local processes are trusted with the information already available in the local dashboard. Where that assumption does not hold, qualify a browser-authenticated transport before enabling Save.
+
+## Review and download a proposal
 
 1. Open **Manage USN journal allowlist**. Select fixed NTFS drives by their
    canonical volume identities. A volume can affect multiple saved sources.

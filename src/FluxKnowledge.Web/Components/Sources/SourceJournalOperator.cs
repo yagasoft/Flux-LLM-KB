@@ -146,6 +146,11 @@ internal sealed class WindowsSourceJournalVolumeInventory : ISourceJournalVolume
     }
 }
 
+internal sealed class StagingJournalVolumeInventory(IReadOnlyList<JournalVolume> volumes) : ISourceJournalVolumeInventory
+{
+    public IReadOnlyList<JournalVolume> ReadLocalVolumes() => volumes;
+}
+
 internal sealed record JournalProbe(string Message, string? JournalId = null);
 internal sealed record JournalSourceRoot(Guid Id, string DisplayName, string CanonicalPath, string State, string? StoredVolume = null);
 internal sealed record JournalRootImpact(JournalSourceRoot Root, string Volume, bool Added);

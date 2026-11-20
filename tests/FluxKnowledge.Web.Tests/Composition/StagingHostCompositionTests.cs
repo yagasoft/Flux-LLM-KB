@@ -23,6 +23,43 @@ public sealed class StagingHostCompositionTests : IDisposable
     private const string Root = @"I:\Codex Workspaces\Staging\FluxKnowledge\CompositionTests";
     private const string Connection = "Server=localhost;Initial Catalog=FluxKnowledge_Staging_CompositionTests;User ID=stage_test;Password=synthetic-only;Encrypt=True;TrustServerCertificate=True";
     private readonly string _ownedRoot = Root + "-" + Guid.NewGuid().ToString("N");
+    private readonly string _journalOwnedRoot = Root + Guid.NewGuid().ToString("N")[..12];
+
+    [Theory]
+    [InlineData(false)]
+    [InlineData(true)]
+    public void Journal_IIS_accepts_only_the_exact_provisioned_SQL_connection(bool drift)
+    {
+        var stageName = Path.GetFileName(_journalOwnedRoot);
+        var config = Path.Combine(_journalOwnedRoot, "Config");
+        Directory.CreateDirectory(config);
+        var connection = Connection.Replace("FluxKnowledge_Staging_CompositionTests", $"FluxKnowledge_Staging_{stageName}", StringComparison.Ordinal);
+        var settingsPath = Path.Combine(config, "staging.json");
+        File.WriteAllText(settingsPath, System.Text.Json.JsonSerializer.Serialize(new
+        {
+            SqlConnectionString = connection, Origin = "http://127.0.0.1:5147", DashboardReadBenchmark = true
+        }));
+        const string first = @"\\?\VOLUME{10000000-0000-0000-0000-000000000001}\";
+        const string second = @"\\?\VOLUME{10000000-0000-0000-0000-000000000002}\";
+        File.WriteAllText(Path.Combine(config, "appsettings.Production.json"), System.Text.Json.JsonSerializer.Serialize(new
+        {
+            ConnectionStrings = new { FluxKnowledge = drift ? connection + ";Application Name=other" : connection },
+            SourceJournal = new { Enabled = true, PipeName = $"FluxKnowledge.SourceJournal.Staging-{stageName}", ApprovedVolumes = new[] { first } },
+            SourceJournalAllowlistOperator = new { Origin = "http://localhost:5148", StageVolumeIds = new[] { first, second }, StageVolumeMounts = new[] { @"K:\", @"L:\" } }
+        }));
+
+        var settings = StagingHostSettings.Load(settingsPath);
+        if (drift)
+        {
+            Assert.Throws<InvalidOperationException>(settings.BindJournalIis);
+            return;
+        }
+
+        Assert.NotEqual(connection, settings.RuntimeConnectionString);
+        settings.BindJournalIis();
+        Assert.Equal(first, settings.Configuration["SourceJournal:ApprovedVolumes:0"]);
+        Assert.Equal("http://localhost:5148", settings.Configuration["SourceJournalAllowlistOperator:Origin"]);
+    }
 
     [Theory]
     [InlineData(@"I:\Codex Workspaces\Staging\FluxKnowledge\DashboardTests")]
@@ -181,9 +218,12 @@ public sealed class StagingHostCompositionTests : IDisposable
 
     public void Dispose()
     {
-        if (Directory.Exists(_ownedRoot) &&
-            LiveRootLayout.CreateForIsolatedTests(_ownedRoot).ValidateOwnedPath(_ownedRoot, FileSystemLiveRootPathInspector.Instance).IsValid)
-            Directory.Delete(_ownedRoot, recursive: true);
+        foreach (var root in new[] { _ownedRoot, _journalOwnedRoot })
+        {
+            if (Directory.Exists(root) &&
+                LiveRootLayout.CreateForIsolatedTests(root).ValidateOwnedPath(root, FileSystemLiveRootPathInspector.Instance).IsValid)
+                Directory.Delete(root, recursive: true);
+        }
     }
 
     [Theory]

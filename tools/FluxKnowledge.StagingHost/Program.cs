@@ -39,6 +39,8 @@ var controllerNonce=Guid.Empty;
 if((indexingTrial || fixtureCleanup) && (!Guid.TryParse(Console.ReadLine(),out controllerNonce) || controllerNonce==Guid.Empty))
     throw new InvalidOperationException("Private indexing requires its bound controller nonce.");
 var settings = StagingHostSettings.Load(args[1]);
+var journalIis = mode == StagingHostMode.JournalIis;
+if (journalIis) settings.BindJournalIis();
 settings.ValidateBeforeStart();
 if ((candidateQuality || payloadReadiness || indexingTrial || fixtureCleanup) && (!settings.CpuSemantic || !settings.DashboardReadBenchmark))
     throw new ArgumentException("Candidate quality requires isolated CPU semantic staging with application writers disabled.");
@@ -113,7 +115,23 @@ var builder = WebApplication.CreateBuilder(new WebApplicationOptions
 });
 builder.Configuration.Sources.Clear();
 builder.Configuration.AddConfiguration(settings.Configuration);
-builder.WebHost.ConfigureKestrel(options => options.Listen(IPAddress.Loopback, settings.Origin.Port));
+var listenPort = journalIis
+    ? StagingHostArguments.RequireJournalIisPort(Environment.GetEnvironmentVariable("ASPNETCORE_TOKEN"),
+        Environment.GetEnvironmentVariable("ASPNETCORE_PORT"), Environment.GetEnvironmentVariable("ASPNETCORE_APPL_PATH"), settings.Origin.Port)
+    : settings.Origin.Port;
+builder.WebHost.ConfigureKestrel(options => options.Listen(IPAddress.Loopback, listenPort));
+const string pairedPeerHeader = "X-Flux-Staging-Iis-Peer";
+const string pairedSchemeHeader = "X-Flux-Staging-Iis-Scheme";
+if (journalIis)
+{
+    // IIS integration adds these bookkeeping headers after validating its pairing token.
+    // Keep external forwarding headers visible to the strict dashboard gate.
+    builder.Services.PostConfigure<ForwardedHeadersOptions>(options =>
+    {
+        options.OriginalForHeaderName = pairedPeerHeader;
+        options.OriginalProtoHeaderName = pairedSchemeHeader;
+    });
+}
 WebHostComposition.AddStagingFluxKnowledgeServices(builder.Services, settings);
 // Index ownership also needs the current process identity in model-free staging.
 builder.Services.TryAddSingleton<IGpuInteractiveOwnerProbe, WindowsInteractiveGpuOwnerProbe>();
@@ -136,7 +154,7 @@ if(indexingTrial || fixtureCleanup)
         ()=>controllerNonce!=Guid.Empty && settings.DashboardReadBenchmark && !settings.SourceJournalEnabled &&
             !provider.GetRequiredService<IHostApplicationLifetime>().ApplicationStopping.IsCancellationRequested,
         normalBinding is null ? null : (normalBinding.Generation, normalBinding.Version), gpuIndexing: normalRuntime));
-var sourceDiagnostics = StagingSourceDiagnostics.Register(builder.Services, builder.Logging);
+var sourceDiagnostics = journalIis ? null : StagingSourceDiagnostics.Register(builder.Services, builder.Logging);
 builder.Services.AddRazorComponents().AddInteractiveServerComponents();
 builder.Services.AddScoped<OverviewProjectionState>();
 builder.Services.AddScoped<CircuitHandler, StatusEventCircuitHandler>();
@@ -192,6 +210,17 @@ if(indexingTrial)
 app.UseNativeRequestResources();
 app.Use(async (context, next) =>
 {
+    if (journalIis)
+    {
+        var peer = context.Request.Headers[pairedPeerHeader];
+        var scheme = context.Request.Headers[pairedSchemeHeader];
+        if (peer.Count != 1 || peer[0] is not { } address || !IPEndPoint.TryParse(address, out var original) || !IPAddress.IsLoopback(original.Address) ||
+            scheme.Count > 1 || scheme.Count > 0 && scheme[0] != "http")
+        {
+            context.Response.StatusCode = StatusCodes.Status403Forbidden;
+            return;
+        }
+    }
     if (!LocalOperatorLoopbackGate.IsDirectLoopback(context) ||
         context.Request.Host.Host != "127.0.0.1" || context.Request.Host.Port != settings.Origin.Port)
     {
@@ -208,6 +237,7 @@ app.UseAntiforgery();
 app.MapStaticAssets(Path.Combine(AppContext.BaseDirectory, "FluxKnowledge.StagingHost.staticwebassets.endpoints.json"));
 app.MapRazorComponents<StagingApp>().AddInteractiveServerRenderMode();
 app.MapFluxKnowledgeHealth();
+if (journalIis) app.MapSourceJournalAllowlistPreview();
 app.MapFluxKnowledgeIndexHealth();
 app.MapFluxKnowledgeGpuStatus();
 app.MapFluxKnowledgeSearch();
@@ -281,7 +311,7 @@ if(indexingTrial)
     {RequireIndexPermit(gate);return Results.Ok(await fixture.PublishAsync(ct));});
     app.MapPost("/staging/indexing/stop",async(StagingRootedIndexFixture fixture)=>Results.Ok(await fixture.StopBacklogAsync()));
 }
-app.MapGet("/staging/source-diagnostics", sourceDiagnostics.Read);
+if (sourceDiagnostics is not null) app.MapGet("/staging/source-diagnostics", sourceDiagnostics.Read);
 app.MapGet("/staging", async (ISqlServerReadinessValidator validator, SqlServerOptions options, CancellationToken ct) =>
 {
     var readiness = await validator.ValidateAsync(options, ct);

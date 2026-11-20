@@ -90,12 +90,22 @@ param(
     [switch]$SourceJournalAllowlistOnly,
     [string]$SourceJournalPolicyOperatorRoot = '',
     [string]$ExpectedSourceJournalPolicyOperatorSha256 = '',
+    [string]$SourceJournalWebBootstrapPacket = '',
+    [string]$ExpectedSourceJournalWebBootstrapPacketSha256 = '',
+    [string]$ResumeSourceJournalWebBootstrap = '',
     [switch]$InspectIndexAdmissionPayloads,
     [switch]$PlanOnly,
     [switch]$Apply
 )
 
 $ErrorActionPreference = "Stop"
+
+if ($SourceJournalWebBootstrapPacket -or $ExpectedSourceJournalWebBootstrapPacketSha256 -or $ResumeSourceJournalWebBootstrap) {
+    $allowed = @('SourceJournalWebBootstrapPacket','ExpectedSourceJournalWebBootstrapPacketSha256','ResumeSourceJournalWebBootstrap','PlanOnly','Apply','ReadinessTimeoutSeconds')
+    if (@($PSBoundParameters.Keys | Where-Object { $_ -cnotin $allowed }).Count -or $PlanOnly -eq $Apply) {
+        throw 'web-bootstrap-requires-exclusive-plan-or-apply'
+    }
+}
 $CanonicalLiveRoot = "I:\FluxKnowledge"
 $CanonicalDeployRoot = "$CanonicalLiveRoot\App"
 $CanonicalRecoveryRoot = "$CanonicalLiveRoot\Recovery"
@@ -2828,6 +2838,12 @@ $offlineCodeState = $null
 Import-Module (Join-Path $PSScriptRoot 'incremental-hybrid-passage-rebuild.psm1') -Force -ErrorAction Stop
 Import-Module (Join-Path $PSScriptRoot 'incremental-repository-recovery-migration.psm1') -Force -ErrorAction Stop
 Import-Module (Join-Path $PSScriptRoot 'incremental-repository-recovery-release.psm1') -Force -ErrorAction Stop
+if ($SourceJournalWebBootstrapPacket -or $ExpectedSourceJournalWebBootstrapPacketSha256 -or $ResumeSourceJournalWebBootstrap) {
+    . (Join-Path $PSScriptRoot 'incremental-source-journal-web-bootstrap.ps1')
+    Invoke-IncrementalSourceJournalWebBootstrap -PacketPath $SourceJournalWebBootstrapPacket `
+        -ExpectedPacketSha256 $ExpectedSourceJournalWebBootstrapPacketSha256 -Execute:$Apply -ResumeReleaseId $ResumeSourceJournalWebBootstrap
+    return
+}
 $typedRecoveryModes = @('RecoverUnattemptedPassageWindowRelease','RecoverUnattemptedOutlookRelease','RecoverUnattemptedCodexWorkspaceNotesRelease','RecoverUnattemptedMediaTranscriptionRelease','RecoverUnattemptedGpuModelResidencyRelease' |
     Where-Object { $PSBoundParameters[$_] })
 if($typedRecoveryModes.Count){

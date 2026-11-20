@@ -105,6 +105,8 @@ public static class WebHostComposition
         var existingHostedServices = services.Where(descriptor => descriptor.ServiceType == typeof(IHostedService)).ToHashSet();
         AddFluxKnowledgeServicesCore(services, settings.Configuration, settings.Layout,
             strictProductionPaths: false, productionStorageBindings: null, stagingSql: settings.Sql);
+        if (settings.JournalIisVolumes is { } volumes)
+            services.Replace(ServiceDescriptor.Singleton<ISourceJournalVolumeInventory>(new StagingJournalVolumeInventory(volumes)));
         if (settings.DashboardReadBenchmark)
         {
             // Benchmark the real read path against stable rows. Core application services
@@ -521,6 +523,7 @@ public static class WebHostComposition
                 ? new SourceJournalPipeClient(sourceJournalOptions) : throw new PlatformNotSupportedException("Source journal helper requires Windows."));
         services.AddSingleton<ISourceJournalVolumeInventory, WindowsSourceJournalVolumeInventory>();
         services.AddSingleton<SourceJournalOperator>();
+        services.AddSingleton(new SourceJournalAllowlistHandoff(configuration["SourceJournalAllowlistOperator:Origin"]));
         services.AddSingleton<ISourceObservationReader, WindowsSourceObservationReader>();
         services.AddSingleton<SourceWorkAdmission>();
         services.AddSingleton<ISourceWorkAdmission>(provider => provider.GetRequiredService<SourceWorkAdmission>());

@@ -2,6 +2,7 @@
 @implements IDisposable
 @using FluxKnowledge.Web.Components.Sources
 @inject SourceJournalOperator Journal
+@inject SourceJournalAllowlistHandoff Handoff
 @inject SourceRootProjectionReader Sources
 
 <PageTitle>USN journal allowlist | Flux Knowledge</PageTitle>
@@ -77,17 +78,34 @@
                 @foreach (var root in proposal.Unmapped) { <li><a href="@($"/sources/{root.Id:D}")">@root.DisplayName</a></li> }
             </ul>
         }
-        <p>The reviewed incremental IIS updater applies the change to the app and helper together. It requires an operator review, a protected activation and an app and helper restart.</p>
-        @if (!_confirmed)
+        @if (Handoff.ReviewUrl is { } reviewUrl)
         {
-            <button type="button" @onclick="ConfirmAsync" disabled="@_busy">Confirm proposal for download</button>
+            <p>Saving requires Windows operator confirmation and briefly restarts the app and Source Access helper.</p>
+            @if (_impact is { } impact)
+            {
+                <form method="post" action="@reviewUrl">
+                    <input type="hidden" name="proposal" value="@proposal.Base64" />
+                    <input type="hidden" name="sha256" value="@proposal.Sha256" />
+                    <input type="hidden" name="impact" value="@impact.Base64" />
+                    <input type="hidden" name="impactSha256" value="@impact.Sha256" />
+                    <button type="submit">Save allowlist</button>
+                </form>
+            }
         }
         else
         {
-            <p role="status">Proposal confirmed for download. The running allowlist is unchanged until activation.</p>
-            <p><a href="@($"data:application/json;base64,{proposal.Base64}")" download="source-journal-allowlist.json">Download allowlist proposal</a></p>
-            <p class="diagnostic-value">Proposal SHA-256 <code>@proposal.Sha256</code></p>
-            <p>Use the proposal and hash with <code>-SourceJournalAllowlistOnly</code> in the incremental IIS updater. Review its <code>-PlanOnly</code> output before the authorised activation.</p>
+            <p>The reviewed incremental IIS updater applies the change to the app and helper together. It requires an operator review, a protected activation and an app and helper restart.</p>
+            @if (!_confirmed)
+            {
+                <button type="button" @onclick="ConfirmAsync" disabled="@_busy">Confirm proposal for download</button>
+            }
+            else
+            {
+                <p role="status">Proposal confirmed for download. The running allowlist is unchanged until activation.</p>
+                <p><a href="@($"data:application/json;base64,{proposal.Base64}")" download="source-journal-allowlist.json">Download allowlist proposal</a></p>
+                <p class="diagnostic-value">Proposal SHA-256 <code>@proposal.Sha256</code></p>
+                <p>Use the proposal and hash with <code>-SourceJournalAllowlistOnly</code> in the incremental IIS updater. Review its <code>-PlanOnly</code> output before the authorised activation.</p>
+            }
         }
     </section>
 }
@@ -101,6 +119,7 @@
     private string? _error;
     private bool _busy;
     private bool _confirmed;
+    private (string Base64, string Sha256)? _impact;
     private bool CanEdit => Journal.Enabled && Journal.UsesProtectedHelper;
     private IEnumerable<string> VolumeIdentities =>
         Journal.ApprovedVolumes.Union(_volumes.Select(x => x.Identity), VolumeComparer).Order(VolumeComparer);
@@ -127,6 +146,7 @@
     {
         _proposal = null;
         _confirmed = false;
+        _impact = null;
         _error = null;
     }
 
@@ -143,6 +163,7 @@
             var roots = await Sources.ReadJournalRootsAsync(_stopping.Token);
             _volumes = Journal.ReadLocalVolumes();
             _proposal = Journal.Preview(_selection, _volumes, roots);
+            if (Handoff.ReviewUrl is not null) _impact = SourceJournalAllowlistHandoff.BuildImpact(_proposal);
             if (prior is null) return;
             _confirmed = prior.Sha256 == _proposal.Sha256 &&
                 prior.Impacts.Select(x => (x.Root.Id, x.Root.DisplayName, x.Root.State, x.Root.CanonicalPath, x.Volume, x.Added))
