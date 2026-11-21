@@ -7,6 +7,9 @@ public sealed record SourceAccessRepairRequest(
 {
     [JsonIgnore(Condition = JsonIgnoreCondition.WhenWritingNull)]
     public Guid? SourceRegistrationId { get; init; }
+
+    [JsonIgnore(Condition = JsonIgnoreCondition.WhenWritingNull)]
+    public string? DeniedFileIdentity { get; init; }
 }
 
 public enum SourceAccessRepairOutcome
@@ -31,5 +34,6 @@ public sealed class SourceAccessDeniedException(
 {
     public string DeniedPath { get; } = deniedPath;
     public bool IsDirectory { get; } = isDirectory;
+    public string? DeniedFileIdentity { get; set; }
     public string ReasonCode { get; } = reasonCode;
 }

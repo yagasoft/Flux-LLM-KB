@@ -11,7 +11,8 @@ public sealed class WindowsSourceObservationReader(ISourceAccessRepairClient? ac
     public ValueTask<ISourceObservationLease> OpenForScanAsync(SourceRootConfiguration root, string relativePath,
         SourceAccessRepairAdmission admitRepair, CancellationToken cancellationToken) =>
         SourceAccessRecovery.RunAsync(root.CanonicalPath, root.PhysicalIdentityFingerprint, accessRepair,
-            () => Open(root, relativePath), admitRepair, cancellationToken, root.Id.Value);
+            () => OpenCore(root, relativePath, bindCloudDenial: accessRepair is not null), admitRepair, cancellationToken, root.Id.Value,
+            identity => OpenCore(root, relativePath, repairedCloudIdentity: identity));
 
     public ISourceAbsenceLease? OpenAbsence(SourceRootConfiguration root, string relativePath)
     {
@@ -46,13 +47,17 @@ public sealed class WindowsSourceObservationReader(ISourceAccessRepairClient? ac
         }
         catch { parent.Dispose(); throw; }
     }
-    public ISourceObservationLease Open(SourceRootConfiguration root, string relativePath)
+    public ISourceObservationLease Open(SourceRootConfiguration root, string relativePath) => OpenCore(root, relativePath);
+
+    private static ISourceObservationLease OpenCore(SourceRootConfiguration root, string relativePath,
+        bool bindCloudDenial = false, string? repairedCloudIdentity = null)
     {
         var path = Path.GetFullPath(relativePath, root.CanonicalPath);
         if (path == root.CanonicalPath || !WindowsSourcePathAccess.IsWithin(root.CanonicalPath, path))
             throw new UnauthorizedAccessException("SourceObservationOutsideRoot");
         // Request read access to honour explicit denies, but never read content for this observation.
-        var source = WindowsSourcePathAccess.OpenRead(root.CanonicalPath, path, root.PhysicalIdentityFingerprint);
+        var source = WindowsSourcePathAccess.OpenRead(root.CanonicalPath, path, root.PhysicalIdentityFingerprint,
+            repairedCloudIdentity, bindCloudDenial: bindCloudDenial, verifyRepairedCloud: repairedCloudIdentity is not null);
         try { return new ObservationLease(source, root, relativePath, Describe(source)); }
         catch { source.Dispose(); throw; }
     }

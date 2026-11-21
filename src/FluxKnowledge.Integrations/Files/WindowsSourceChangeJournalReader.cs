@@ -142,21 +142,11 @@ public sealed class WindowsSourceChangeJournalReader : ISourceChangeJournalReade
     {
         // Metadata only; names outside admitted sources are transient routing inputs.
         if (identity.Length != 16) return null;
-        var descriptor = new FileIdDescriptor { Size = 24, Id = Convert.ToUInt64(identity, 16) };
-        using var handle = OpenFileById(volume, ref descriptor, 0x80, 7, IntPtr.Zero, ParentMetadataOpenFlags);
+        using var handle = WindowsSourcePathAccess.OpenSourceFileById(volume, Convert.ToUInt64(identity, 16), 0x80, 7, ParentMetadataOpenFlags);
         if (handle.IsInvalid) return null;
         try { return PhysicalFileIdentity.GetFinalPath(handle); }
         catch (IOException) { return null; }
     }
-    [StructLayout(LayoutKind.Explicit, Size = 24)]
-    private struct FileIdDescriptor
-    {
-        [FieldOffset(0)] public uint Size;
-        [FieldOffset(4)] public int Type;
-        [FieldOffset(8)] public ulong Id;
-    }
-    [DllImport("kernel32.dll", SetLastError = true)]
-    private static extern SafeFileHandle OpenFileById(SafeFileHandle volume, ref FileIdDescriptor descriptor, uint access, uint share, IntPtr security, uint flags);
     [DllImport("kernel32.dll", CharSet = CharSet.Unicode, SetLastError = true)]
     private static extern SafeFileHandle CreateFile(string path, uint access, uint share, IntPtr security, uint creation, uint flags, IntPtr template);
     [DllImport("kernel32.dll", SetLastError = true)]

@@ -41,6 +41,30 @@ internal static class WindowsSourcePathAccess
             throw new SourceContentUnavailableException("Source content is not fully available locally. It was not downloaded; make this item available in the sync client before rescanning.");
     }
 
+    internal static PlaceholderVisibility ExposePlaceholders() => new();
+
+    internal readonly ref struct PlaceholderVisibility
+    {
+        private readonly sbyte _previous;
+        private readonly bool _active;
+
+        public PlaceholderVisibility()
+        {
+            // Cloud Filter can otherwise disguise a placeholder as an ordinary file.
+            try { _previous = RtlSetThreadPlaceholderCompatibilityMode(2); }
+            catch (Exception exception) when (exception is DllNotFoundException or EntryPointNotFoundException)
+            { throw new SourceContentUnavailableException("Windows could not expose placeholder metadata.", exception); }
+            if (_previous < 0)
+                throw new SourceContentUnavailableException("Windows could not expose placeholder metadata.");
+            _active = true;
+        }
+
+        public void Dispose()
+        {
+            if (_active) RtlSetThreadPlaceholderCompatibilityMode(_previous);
+        }
+    }
+
     internal static Metadata ReadMetadata(SafeFileHandle handle)
     {
         if (!GetFileInformationByHandleEx(handle, 9, out var information, 8))
@@ -88,8 +112,9 @@ internal static class WindowsSourcePathAccess
         catch { lease.Dispose(); throw; }
     }
 
-    internal static SourceReadLease OpenRead(string root, string path, string? rootFingerprint = null, string? fileIdentity = null, bool synchronous = false)
+    internal static SourceReadLease OpenRead(string root, string path, string? rootFingerprint = null, string? fileIdentity = null, bool synchronous = false, bool bindCloudDenial = false, bool verifyRepairedCloud = false)
     {
+        using var visibility = bindCloudDenial || verifyRepairedCloud ? ExposePlaceholders() : default;
         var canonicalRoot = Path.TrimEndingDirectorySeparator(Path.GetFullPath(root));
         var canonicalPath = Path.GetFullPath(path);
         if (!IsWithin(canonicalRoot, canonicalPath)) throw new SourcePathSecurityException("SourcePathOutsideRoot", "Source path is outside its authorised root.");
@@ -101,10 +126,21 @@ internal static class WindowsSourcePathAccess
             if (rootFingerprint is not null && rootIdentity.IdentityFingerprint != rootFingerprint)
                 throw new SourceSnapshotChangedException("The admitted source root identity changed.");
             var name = Path.GetFileName(canonicalPath);
-            using (var metadataHandle = OpenRelative(parent.Handle, name, ReadAttributes, 7, NonDirectoryFile, canonicalPath))
-                EnsureContentAvailable(ReadMetadata(metadataHandle));
+            using var metadataHandle = OpenSourceMetadata(parent, name, canonicalPath, bindCloudDenial);
+            var metadata = ReadMetadata(metadataHandle);
+            EnsureContentAvailable(metadata);
             // The same handle supplies readiness, final path, identity and every content byte.
-            handle = OpenRelative(parent.Handle, name, ReadAttributes | Synchronize | 1, 1, NonDirectoryFile | (synchronous ? SynchronousIo : 0), canonicalPath);
+            try
+            {
+                handle = OpenRelative(parent.Handle, name, ReadAttributes | Synchronize | 1, 1,
+                    NonDirectoryFile | (synchronous ? SynchronousIo : 0), canonicalPath);
+            }
+            catch (SourceAccessDeniedException denied) when (bindCloudDenial)
+            {
+                var expected = PhysicalFileIdentity.Get(metadataHandle);
+                if (ConfirmsExactDeniedRead(parent, name, expected)) denied.DeniedFileIdentity = expected;
+                throw;
+            }
             EnsureContentAvailable(ReadMetadata(handle));
             var finalPath = PhysicalFileIdentity.GetFinalPath(handle);
             if (!string.Equals(finalPath, canonicalPath, StringComparison.OrdinalIgnoreCase) || !IsWithin(rootIdentity.CanonicalPath, finalPath))
@@ -112,9 +148,90 @@ internal static class WindowsSourcePathAccess
             var identity = PhysicalFileIdentity.Get(handle);
             if (fileIdentity is not null && fileIdentity != identity)
                 throw new SourceSnapshotChangedException("The source identity changed after discovery.");
+            if (verifyRepairedCloud)
+            {
+                var observed = ReadMetadata(handle);
+                if (OneDriveRepairResidency.IsPlaceholder(handle, observed))
+                    OneDriveRepairResidency.RequireComplete(handle, parent.HandleAt(canonicalRoot), observed);
+            }
             return new SourceReadLease(parent, handle, identity, rootIdentity);
         }
         catch { handle?.Dispose(); parent.Dispose(); throw; }
+    }
+
+    private static SafeFileHandle OpenSourceMetadata(DirectoryPathLease parent, string name, string path, bool bindCloudDenial)
+    {
+        try { return OpenRelative(parent.Handle, name, ReadAttributes, 7, NonDirectoryFile, path); }
+        catch (SourceAccessDeniedException) when (bindCloudDenial)
+        {
+            // READ_ATTRIBUTES can itself be denied. Bracket a second native
+            // denial with exact leaf identity lookups from the held parent.
+            var identity = TryReadDeniedLeafIdentity(parent, name);
+            try { return OpenRelative(parent.Handle, name, ReadAttributes, 7, NonDirectoryFile, path); }
+            catch (SourceAccessDeniedException denied)
+            {
+                if (identity is not null && ConfirmsExactDeniedRead(parent, name, identity))
+                    denied.DeniedFileIdentity = identity;
+                throw;
+            }
+        }
+    }
+
+    private static bool ConfirmsExactDeniedRead(DirectoryPathLease parent, string name, string identity)
+    {
+        // The guarded path failed with error 5. Require the scanner's own
+        // token to receive the same result against the observed ID as well.
+        using var probe = OpenFileReadByIdentity(parent.Handle, identity);
+        return probe.IsInvalid && Marshal.GetLastPInvokeError() == 5 &&
+            TryReadDeniedLeafIdentity(parent, name) == identity;
+    }
+
+    internal static SafeFileHandle OpenFileReadByIdentity(SafeFileHandle volumeHint, string identity)
+    {
+        const uint noFollowNoRecall = 0x00300000; // Win32 flags, distinct from NT create options.
+        var fileId = Convert.ToUInt64(identity[(identity.LastIndexOf(':') + 1)..], 16);
+        return OpenSourceFileById(volumeHint, fileId, ReadAttributes | Synchronize | 1, 1, noFollowNoRecall);
+    }
+
+    internal static SafeFileHandle OpenSourceFileById(SafeFileHandle volumeHint, ulong fileId, uint access, uint share, uint flags)
+    {
+        var descriptor = new FileIdDescriptor { Size = 24, Id = fileId };
+        return OpenFileById(volumeHint, ref descriptor, access, share, IntPtr.Zero, flags);
+    }
+
+    private static string? TryReadDeniedLeafIdentity(DirectoryPathLease parent, string name)
+    {
+        if (name.IndexOfAny(['*', '?']) >= 0) return null;
+        try
+        {
+            using var listed = OpenDirectoryPath(parent.Path, enumerate: true);
+            if (listed.Identity != parent.Identity) return null;
+            const int size = 4096;
+            const int fileNameOffset = 104; // FILE_ID_BOTH_DIR_INFORMATION
+            var buffer = Marshal.AllocHGlobal(size);
+            var text = Marshal.StringToHGlobalUni(name);
+            var pattern = Marshal.AllocHGlobal(Marshal.SizeOf<UnicodeString>());
+            try
+            {
+                var length = checked((ushort)(name.Length * 2));
+                Marshal.StructureToPtr(new UnicodeString { Length = length, MaximumLength = checked((ushort)(length + 2)), Buffer = text }, pattern, false);
+                var status = NtQueryDirectoryFileEx(listed.Handle, IntPtr.Zero, IntPtr.Zero, IntPtr.Zero, out var io,
+                    buffer, size, 37, DirectoryQueryFlags(restart: true) | 2, pattern);
+                if (status != 0 || io.Information < fileNameOffset || io.Information > size || Marshal.ReadInt32(buffer) != 0) return null;
+                var actualNameBytes = Marshal.ReadInt32(buffer, 60);
+                var attributes = Marshal.ReadInt32(buffer, 56);
+                if (actualNameBytes != length || fileNameOffset + actualNameBytes > (int)io.Information ||
+                    (attributes & 0x10) != 0 ||
+                    !string.Equals(Marshal.PtrToStringUni(IntPtr.Add(buffer, fileNameOffset), name.Length), name, StringComparison.OrdinalIgnoreCase))
+                    return null;
+                listed.ValidateCurrent();
+                var id = unchecked((ulong)Marshal.ReadInt64(buffer, 96));
+                var parentId = PhysicalFileIdentity.Get(listed.Handle);
+                return id == 0 ? null : $"{parentId[..(parentId.LastIndexOf(':') + 1)]}{id:X16}";
+            }
+            finally { Marshal.FreeHGlobal(pattern); Marshal.FreeHGlobal(text); Marshal.FreeHGlobal(buffer); }
+        }
+        catch (Exception exception) when (exception is IOException or UnauthorizedAccessException) { return null; }
     }
 
     internal static bool IsWithin(string root, string path) =>
@@ -124,8 +241,10 @@ internal static class WindowsSourcePathAccess
     // Broker-only open. No data bytes are requested; callers must hold independent
     // policy authority before requesting WRITE_DAC on this exact physical target.
     internal static PermissionTargetLease OpenPermissionTarget(ApprovedSourceAccessRoot root, string relativePath, bool directory,
-        bool repairInheritance = false)
+        bool repairInheritance = false, string? deniedFileIdentity = null, bool allowCloudInheritance = false,
+        OneDriveRepairResidency.OnDiskRangeQuery? rangeQuery = null)
     {
+        using var visibility = repairInheritance ? ExposePlaceholders() : default;
         var target = SourceAccessPolicy.ResolveTarget(root.Path, relativePath, directory);
         var parent = OpenDirectoryPath(Path.GetDirectoryName(target)!, readFinalPermissions: repairInheritance);
         SafeFileHandle? handle = null;
@@ -138,7 +257,29 @@ internal static class WindowsSourcePathAccess
                 directory ? 3u : 1u, directory ? SynchronousIo : NonDirectoryFile, target, directory);
             var metadata = ReadMetadata(handle);
             ValidateTag(metadata);
-            if (repairInheritance) RequireOrdinaryFile(metadata);
+            var identity = PhysicalFileIdentity.Get(handle);
+            if (!string.Equals(PhysicalFileIdentity.GetFinalPath(handle), target, StringComparison.OrdinalIgnoreCase))
+                throw new SourcePathSecurityException("SourcePhysicalPathMismatch", "The permission target escaped its held parent.");
+            if (deniedFileIdentity is not null && deniedFileIdentity != identity)
+                throw new SourceSnapshotChangedException("The denied file was replaced before repair.");
+            var cloudRepair = repairInheritance && OneDriveRepairResidency.IsPlaceholder(handle, metadata);
+            if (cloudRepair)
+            {
+                if (!allowCloudInheritance || deniedFileIdentity is null)
+                    throw new SourcePathSecurityException("SourceInheritanceCloudAuthorityMissing", "Cloud repair requires an exact source and denied file identity.");
+                OneDriveRepairResidency.RequireComplete(handle, parent.HandleAt(root.Path), metadata, rangeQuery);
+                // FILE_READ_DATA activates share exclusion against writers and
+                // dehydration. No content is read or opened for recall.
+                var held = OpenRelative(parent.Handle, Path.GetFileName(target), ReadAttributes | Synchronize | 0x60001,
+                    1, NonDirectoryFile, target);
+                handle.Dispose();
+                handle = held;
+                if (PhysicalFileIdentity.Get(handle) != identity ||
+                    !string.Equals(PhysicalFileIdentity.GetFinalPath(handle), target, StringComparison.OrdinalIgnoreCase))
+                    throw new SourceSnapshotChangedException("The denied OneDrive file changed during the guarded reopen.");
+                metadata = ReadMetadata(handle);
+                OneDriveRepairResidency.RequireComplete(handle, parent.HandleAt(root.Path), metadata, rangeQuery);
+            }
             if (metadata.IsDirectory != directory) throw new SourceSnapshotChangedException("The permission target type changed.");
             if (!directory)
             {
@@ -146,27 +287,19 @@ internal static class WindowsSourcePathAccess
                 if (PhysicalFileIdentity.GetLinkCount(handle) != 1)
                     throw new SourcePathSecurityException("SourceMultipleLinks", "A read grant cannot be confined to one hard-link path.");
             }
-            var identity = PhysicalFileIdentity.Get(handle);
-            if (!string.Equals(PhysicalFileIdentity.GetFinalPath(handle), target, StringComparison.OrdinalIgnoreCase))
-                throw new SourcePathSecurityException("SourcePhysicalPathMismatch", "The permission target escaped its held parent.");
             if (string.Equals(target, root.Path, StringComparison.OrdinalIgnoreCase) && Fingerprint(identity) != root.IdentityFingerprint)
                 throw new SourceSnapshotChangedException("The approved source root identity changed.");
-            return new(parent, handle, target, identity, directory, root, repairInheritance);
+            return new(parent, handle, target, identity, directory, root, repairInheritance, cloudRepair, rangeQuery);
         }
         catch { handle?.Dispose(); parent.Dispose(); throw; }
-    }
-
-    private static void RequireOrdinaryFile(Metadata metadata)
-    {
-        if (metadata.IsDirectory || (metadata.Attributes & (uint)FileAttributes.ReparsePoint) != 0)
-            throw new SourcePathSecurityException("SourceInheritanceTargetNotOrdinary", "Inheritance repair requires an ordinary file.");
     }
 
     private static string Fingerprint(string identity) =>
         Convert.ToHexStringLower(SHA256.HashData(Encoding.UTF8.GetBytes(identity["ntfs:".Length..])));
 
     internal sealed class PermissionTargetLease(DirectoryPathLease parent, SafeFileHandle handle, string path, string identity,
-        bool directory, ApprovedSourceAccessRoot root, bool repairInheritance) : IDisposable
+        bool directory, ApprovedSourceAccessRoot root, bool repairInheritance, bool cloudRepair,
+        OneDriveRepairResidency.OnDiskRangeQuery? rangeQuery) : IDisposable
     {
         private readonly long _length = directory ? 0 : RandomAccess.GetLength(handle);
         private readonly DateTime _lastWrite = File.GetLastWriteTimeUtc(handle);
@@ -174,6 +307,15 @@ internal static class WindowsSourcePathAccess
         internal string Identity { get; } = identity;
         internal SafeFileHandle ParentHandle => parent.Handle;
         internal string ParentIdentity => parent.Identity.IdentityFingerprint;
+        internal void ValidateCloudResidency()
+        {
+            if (!repairInheritance) return;
+            using var visibility = ExposePlaceholders();
+            var observed = ReadMetadata(Handle);
+            if (OneDriveRepairResidency.IsPlaceholder(Handle, observed) != cloudRepair)
+                throw new SourceSnapshotChangedException("The file's reparse state changed during repair.");
+            if (cloudRepair) OneDriveRepairResidency.RequireComplete(Handle, parent.HandleAt(root.Path), observed, rangeQuery);
+        }
         internal void ValidateCurrent()
         {
             parent.ValidateCurrent();
@@ -185,7 +327,7 @@ internal static class WindowsSourcePathAccess
                 throw new SourceSnapshotChangedException("The approved root or held permission parent changed.");
             var metadata = ReadMetadata(Handle);
             ValidateTag(metadata);
-            if (repairInheritance) RequireOrdinaryFile(metadata);
+            ValidateCloudResidency();
             if (!directory) EnsureContentAvailable(metadata);
             if (metadata.IsDirectory != directory || PhysicalFileIdentity.Get(Handle) != Identity ||
                 !string.Equals(PhysicalFileIdentity.GetFinalPath(Handle), path, StringComparison.OrdinalIgnoreCase) ||
@@ -244,6 +386,9 @@ internal static class WindowsSourcePathAccess
         public Metadata Metadata => ReadMetadata(Handle);
         public PhysicalDirectoryIdentity IdentityAt(string canonicalPath) =>
             _chain.First(item => string.Equals(item.Path, canonicalPath, StringComparison.OrdinalIgnoreCase)).Identity;
+
+        internal SafeFileHandle HandleAt(string canonicalPath) =>
+            _chain.First(item => string.Equals(item.Path, canonicalPath, StringComparison.OrdinalIgnoreCase)).Handle;
 
         internal void ValidateCurrent()
         {
@@ -384,17 +529,27 @@ internal static class WindowsSourcePathAccess
         public void Dispose() { Handle.Dispose(); Parent.Dispose(); }
     }
 
+    [StructLayout(LayoutKind.Explicit, Size = 24)]
+    private struct FileIdDescriptor
+    {
+        [FieldOffset(0)] public uint Size;
+        [FieldOffset(8)] public ulong Id;
+    }
+
     [StructLayout(LayoutKind.Sequential)] private struct AttributeTagInfo { public uint Attributes; public uint Tag; }
     [StructLayout(LayoutKind.Sequential)] private struct UnicodeString { public ushort Length; public ushort MaximumLength; public IntPtr Buffer; }
     [StructLayout(LayoutKind.Sequential)] private struct ObjectAttributes { public uint Length; public IntPtr RootDirectory; public IntPtr ObjectName; public uint Attributes; public IntPtr SecurityDescriptor; public IntPtr SecurityQualityOfService; }
     [StructLayout(LayoutKind.Sequential)] private struct IoStatusBlock { public IntPtr Status; public nuint Information; }
 
 #pragma warning disable SYSLIB1054
+    [DllImport("kernel32.dll", SetLastError = true)]
+    private static extern SafeFileHandle OpenFileById(SafeFileHandle volume, ref FileIdDescriptor descriptor, uint access, uint share, IntPtr security, uint flags);
     [DllImport("kernel32.dll", EntryPoint = "CreateFileW", CharSet = CharSet.Unicode, SetLastError = true)]
     private static extern SafeFileHandle CreateFile(string path, uint access, uint share, IntPtr security, uint disposition, uint flags, IntPtr template);
     [DllImport("kernel32.dll", SetLastError = true)] [return: MarshalAs(UnmanagedType.Bool)]
     private static extern bool GetFileInformationByHandleEx(SafeFileHandle handle, int informationClass, out AttributeTagInfo information, uint size);
     [DllImport("cldapi.dll")] private static extern uint CfGetPlaceholderStateFromAttributeTag(uint attributes, uint tag);
+    [DllImport("ntdll.dll")] private static extern sbyte RtlSetThreadPlaceholderCompatibilityMode(sbyte mode);
     [DllImport("ntdll.dll")] private static extern int NtCreateFile(out SafeFileHandle handle, uint access, ref ObjectAttributes attributes, out IoStatusBlock ioStatus, IntPtr allocationSize, uint fileAttributes, uint share, uint disposition, uint options, IntPtr eaBuffer, uint eaLength);
     [DllImport("ntdll.dll")] private static extern uint RtlNtStatusToDosError(int status);
     [DllImport("ntdll.dll")] private static extern int NtQueryInformationFile(SafeFileHandle handle, out IoStatusBlock ioStatus, out uint information, uint length, int informationClass);

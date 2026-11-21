@@ -47,9 +47,14 @@ read denial for the authenticated indexer and a protected DACL. It projects the
 exact file's inherited DACL from its held immediate parent, preserves explicit
 ACEs and owner/group, and refuses any applicable read deny or projected ACL
 that still fails the read check. The file-only DACL write can change rights for
-other accounts through parent inheritance. Reparse points, including cloud
-placeholders, are excluded from this mode. An opted-in file that fails the
-inheritance checks stays deferred. Existing directory recovery is unchanged.
+other accounts through parent inheritance. A OneDrive placeholder is eligible
+only under the exact enabled registration, after a guarded read returns access
+denied against the same NTFS file ID. The helper confirms the registered OneDrive
+sync root and checks that on-disk ranges cover every byte through the end of the
+file. It holds the exact file against competing data writes while checking and
+applying the ACL. These metadata checks do not download content. Cloud-only,
+partially resident, empty and indeterminate placeholders stay deferred. Other
+reparse points remain excluded. Existing directory recovery is unchanged.
 
 The next automatic metadata reconciliation uses the same guarded file read.
 It can recover a previously deferred file during that scan, including one with

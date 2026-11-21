@@ -10,7 +10,8 @@ namespace FluxKnowledge.Integrations.Files;
 
 [SupportedOSPlatform("windows")]
 internal sealed class WindowsSourceAccessBroker(SourceAccessPolicy policy, string journalRoot,
-    Action<SourceAccessRepairPhase>? beforeVerification = null, SourceAccessBrokerStorage? storage = null)
+    Action<SourceAccessRepairPhase>? beforeVerification = null, SourceAccessBrokerStorage? storage = null,
+    OneDriveRepairResidency.OnDiskRangeQuery? stagingRangeQuery = null)
 {
     private readonly object _gate = new();
 
@@ -48,7 +49,8 @@ internal sealed class WindowsSourceAccessBroker(SourceAccessPolicy policy, strin
                 var repairInheritance = root.RepairFileInheritance && !request.IsDirectory;
                 if (repairInheritance && request.RootIdentityFingerprint != root.IdentityFingerprint)
                     return SourceAccessRepairOutcome.NotApproved;
-                using var target = WindowsSourcePathAccess.OpenPermissionTarget(root, request.RelativePath, request.IsDirectory, repairInheritance);
+                using var target = WindowsSourcePathAccess.OpenPermissionTarget(root, request.RelativePath, request.IsDirectory, repairInheritance,
+                    request.DeniedFileIdentity, allowCloudInheritance: lease?.Grant.Enabled == true, rangeQuery: stagingRangeQuery);
                 var before = SourceReadGrant.Read(target.Handle);
                 var journalPath = JournalPath(root.IdentityFingerprint, target.Identity);
                 var relativePath = request.RelativePath.Replace('/', Path.DirectorySeparatorChar);
@@ -86,6 +88,7 @@ internal sealed class WindowsSourceAccessBroker(SourceAccessPolicy policy, strin
                 CheckBudget();
                 _ = SourceReadGrant.ApplyDacl(target.Handle, before, proposed, () =>
                 {
+                    target.ValidateCloudResidency();
                     CheckBudget();
                     writeAttempted = true;
                 }, unprotect: repairInheritance);

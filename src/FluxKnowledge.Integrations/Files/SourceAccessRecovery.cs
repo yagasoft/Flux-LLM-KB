@@ -9,16 +9,18 @@ internal static class SourceAccessRecovery
         RunAsync(rootPath, rootIdentity, client, open, null, cancellationToken).GetAwaiter().GetResult();
 
     internal static async ValueTask<T> RunAsync<T>(string rootPath, string? rootIdentity, ISourceAccessRepairClient? client,
-        Func<T> open, SourceAccessRepairAdmission? admitRepair, CancellationToken cancellationToken, Guid? sourceRegistrationId = null)
+        Func<T> open, SourceAccessRepairAdmission? admitRepair, CancellationToken cancellationToken, Guid? sourceRegistrationId = null,
+        Func<string, T>? reopenCloudFile = null)
     {
         cancellationToken.ThrowIfCancellationRequested();
         if (client is null) return open();
         var root = Path.TrimEndingDirectorySeparator(Path.GetFullPath(rootPath));
         var attempted = new HashSet<string>(StringComparer.OrdinalIgnoreCase);
+        string? repairedFileIdentity = null;
         while (true)
         {
             cancellationToken.ThrowIfCancellationRequested();
-            try { return open(); }
+            try { return repairedFileIdentity is null ? open() : reopenCloudFile!(repairedFileIdentity); }
             catch (SourceAccessDeniedException denied)
             {
                 var target = Path.GetFullPath(denied.DeniedPath);
@@ -29,7 +31,10 @@ internal static class SourceAccessRecovery
                 if (!attempted.Add(target)) throw WithReason(denied, "SourceAccessRepairUnconfirmed");
 
                 var request = new SourceAccessRepairRequest(root, rootIdentity, Path.GetRelativePath(root, target), denied.IsDirectory)
-                { SourceRegistrationId = denied.IsDirectory || admitRepair is null ? null : sourceRegistrationId };
+                {
+                    SourceRegistrationId = denied.IsDirectory || admitRepair is null ? null : sourceRegistrationId,
+                    DeniedFileIdentity = admitRepair is not null && reopenCloudFile is not null ? denied.DeniedFileIdentity : null
+                };
                 SourceAccessRepairOutcome Dispatch()
                 {
                     cancellationToken.ThrowIfCancellationRequested();
@@ -38,7 +43,11 @@ internal static class SourceAccessRecovery
                     { return SourceAccessRepairOutcome.Unavailable; }
                 }
                 var outcome = admitRepair is null ? Dispatch() : await admitRepair(Dispatch, cancellationToken).ConfigureAwait(false);
-                if (outcome is SourceAccessRepairOutcome.Repaired or SourceAccessRepairOutcome.AlreadyReadable) continue;
+                if (outcome is SourceAccessRepairOutcome.Repaired or SourceAccessRepairOutcome.AlreadyReadable)
+                {
+                    repairedFileIdentity ??= request.DeniedFileIdentity;
+                    continue;
+                }
                 if (outcome == SourceAccessRepairOutcome.ContentUnavailable)
                     throw new SourceContentUnavailableException("Source content is not available for a guarded local read. No download was requested.", denied);
                 throw WithReason(denied, outcome switch
