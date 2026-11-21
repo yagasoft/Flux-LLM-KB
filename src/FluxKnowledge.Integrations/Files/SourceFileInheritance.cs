@@ -2,16 +2,52 @@ using System.ComponentModel;
 using System.Runtime.InteropServices;
 using System.Runtime.Versioning;
 using System.Security.AccessControl;
+using Microsoft.Win32.SafeHandles;
 
 namespace FluxKnowledge.Integrations.Files;
 
 [SupportedOSPlatform("windows")]
 internal static class SourceFileInheritance
 {
-    internal static byte[] Propose(byte[] fileDescriptor, byte[] parentDescriptor)
+    private const ControlFlags LegacyFlags = ControlFlags.SelfRelative | ControlFlags.DiscretionaryAclPresent;
+    private const ControlFlags ProtectedFlag = ControlFlags.DiscretionaryAclProtected;
+
+    internal static bool HasLegacyDisabledInheritance(SafeFileHandle handle, byte[] rawBytes)
+    {
+        var raw = new RawSecurityDescriptor(rawBytes, 0);
+        if (raw.ControlFlags != LegacyFlags || raw.Owner is null || raw.Group is null ||
+            raw.DiscretionaryAcl is not { Count: > 0 } acl || acl.Cast<GenericAce>().Any(ace => ace.IsInherited))
+            return false;
+
+        // Win32 reports the Windows Security inheritance state, while the
+        // raw descriptor remains authoritative for the compare and write.
+        const uint fileObject = 1;
+        const uint ownerGroupDacl = 7;
+        var status = GetSecurityInfo(handle, fileObject, ownerGroupDacl, IntPtr.Zero, IntPtr.Zero,
+            IntPtr.Zero, IntPtr.Zero, out var descriptor);
+        try
+        {
+            if (status != 0 || descriptor == IntPtr.Zero) return false;
+            var length = GetSecurityDescriptorLength(descriptor);
+            if (length is < 20 or > 1024 * 1024) return false;
+            var bytes = new byte[length];
+            Marshal.Copy(descriptor, bytes, 0, bytes.Length);
+            var view = new RawSecurityDescriptor(bytes, 0);
+            if (view.ControlFlags != (LegacyFlags | ProtectedFlag)) return false;
+            view.SetFlags(LegacyFlags);
+            return SourceReadGrant.Bytes(view).AsSpan().SequenceEqual(rawBytes) &&
+                SourceReadGrant.Read(handle).AsSpan().SequenceEqual(rawBytes);
+        }
+        finally
+        {
+            if (descriptor != IntPtr.Zero) _ = LocalFree(descriptor);
+        }
+    }
+
+    internal static byte[] Propose(byte[] fileDescriptor, byte[] parentDescriptor, bool legacyDisabledInheritance = false)
     {
         var file = new RawSecurityDescriptor(fileDescriptor, 0);
-        if (!file.ControlFlags.HasFlag(ControlFlags.DiscretionaryAclProtected))
+        if (!file.ControlFlags.HasFlag(ProtectedFlag) && !(legacyDisabledInheritance && file.ControlFlags == LegacyFlags))
             throw new InvalidDataException("SourceAclNotProtected");
 
         var fileAcl = RequireSupportedDacl(file, isDirectory: false);
@@ -79,6 +115,13 @@ internal static class SourceFileInheritance
     private static extern bool CreatePrivateObjectSecurityEx(byte[] parentDescriptor, byte[] creatorDescriptor,
         out IntPtr descriptor, IntPtr objectType, [MarshalAs(UnmanagedType.Bool)] bool isDirectory,
         uint autoInheritFlags, IntPtr token, ref GenericMapping mapping);
+
+    [DllImport("advapi32.dll")]
+    private static extern uint GetSecurityInfo(SafeFileHandle handle, uint objectType, uint securityInfo,
+        IntPtr owner, IntPtr group, IntPtr dacl, IntPtr sacl, out IntPtr descriptor);
+
+    [DllImport("kernel32.dll")]
+    private static extern IntPtr LocalFree(IntPtr memory);
 
     [DllImport("advapi32.dll")]
     private static extern uint GetSecurityDescriptorLength(IntPtr descriptor);

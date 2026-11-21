@@ -21,7 +21,47 @@ public sealed class OneDriveRepairNativeTests
     public Task Fully_local_flags_with_a_reported_on_disk_gap_defer_the_actual_denied_read() =>
         RunResidentScenario(missingRange: true);
 
-    private static async Task RunResidentScenario(bool missingRange)
+    [OneDriveStagingFact("FLUXKNOWLEDGE_TEST_ONEDRIVE_RESIDENT")]
+    public Task Real_resident_placeholder_repairs_the_legacy_explicit_only_dacl() =>
+        RunResidentScenario(missingRange: false, legacyDacl: true);
+
+    [OneDriveStagingFact("FLUXKNOWLEDGE_TEST_ONEDRIVE_RESIDENT")]
+    public void Windows_propagates_parent_changes_to_the_active_child_and_leaves_legacy_inheritance_disabled()
+    {
+        using var fixture = new SourceAccessBrokerStorageTests.Fixture();
+        var parent = Directory.CreateDirectory(Path.Combine(fixture.Root, "acl-propagation"));
+        var legacyPath = Path.Combine(parent.FullName, "legacy.txt");
+        var activePath = Path.Combine(parent.FullName, "active.txt");
+        File.WriteAllText(legacyPath, "staging");
+        File.WriteAllText(activePath, "staging");
+        using (var guard = WindowsSourcePathAccess.OpenDirectoryPath(parent.FullName))
+        using (var legacy = WindowsSourcePathAccess.OpenRelative(guard.Handle, "legacy.txt", 0x60080, 7, 0x40))
+        {
+            var raw = new RawSecurityDescriptor(SourceReadGrant.Read(legacy), 0);
+            var explicitAcl = new RawAcl(2, 1);
+            explicitAcl.InsertAce(0, new CommonAce(AceFlags.None, AceQualifier.AccessAllowed, 0x1f01ff,
+                new SecurityIdentifier("S-1-5-32-544"), false, null));
+            raw.DiscretionaryAcl = explicitAcl;
+            raw.SetFlags((ControlFlags)0x8004);
+            SetDacl(legacy, raw);
+            Assert.Equal((ControlFlags)0x8004, new RawSecurityDescriptor(SourceReadGrant.Read(legacy), 0).ControlFlags);
+        }
+
+        Assert.True(new FileInfo(legacyPath).GetAccessControl().AreAccessRulesProtected);
+        Assert.False(new FileInfo(activePath).GetAccessControl().AreAccessRulesProtected);
+        var marker = new SecurityIdentifier(WellKnownSidType.LocalServiceSid, null);
+        var rules = parent.GetAccessControl();
+        rules.AddAccessRule(new FileSystemAccessRule(marker, FileSystemRights.ReadAttributes, InheritanceFlags.ObjectInherit,
+            PropagationFlags.InheritOnly, AccessControlType.Allow));
+        parent.SetAccessControl(rules);
+        bool HasMarker(string path) => new FileInfo(path).GetAccessControl()
+            .GetAccessRules(includeExplicit: true, includeInherited: true, typeof(SecurityIdentifier))
+            .Cast<FileSystemAccessRule>().Any(rule => rule.IdentityReference == marker);
+        Assert.True(HasMarker(activePath));
+        Assert.False(HasMarker(legacyPath));
+    }
+
+    private static async Task RunResidentScenario(bool missingRange, bool legacyDacl = false)
     {
         var path = FixturePath("FLUXKNOWLEDGE_TEST_ONEDRIVE_RESIDENT");
         var source = Path.GetDirectoryName(path)!;
@@ -47,7 +87,17 @@ public sealed class OneDriveRepairNativeTests
             protectedAcl.AddAccessRule(new(new SecurityIdentifier(admin), FileSystemRights.FullControl, AccessControlType.Allow));
         try
         {
-            SetDacl(exactFile, new RawSecurityDescriptor(protectedAcl.GetSecurityDescriptorBinaryForm(), 0));
+            var stagedDescriptor = new RawSecurityDescriptor(protectedAcl.GetSecurityDescriptorBinaryForm(), 0);
+            if (legacyDacl)
+                stagedDescriptor.SetFlags(ControlFlags.SelfRelative | ControlFlags.DiscretionaryAclPresent);
+            SetDacl(exactFile, stagedDescriptor);
+            if (legacyDacl)
+            {
+                var raw = new RawSecurityDescriptor(SourceReadGrant.Read(exactFile), 0);
+                Assert.Equal((ControlFlags)0x8004, raw.ControlFlags);
+                Assert.All(raw.DiscretionaryAcl!.Cast<GenericAce>(), ace => Assert.False(ace.IsInherited));
+                Assert.True(new FileInfo(path).GetAccessControl().AreAccessRulesProtected);
+            }
             using var deadline = new CancellationTokenSource(TimeSpan.FromSeconds(15));
             using var token = SourceAccessBrokerTests.RestrictedToken();
             string expected;
@@ -108,8 +158,9 @@ public sealed class OneDriveRepairNativeTests
                     ace.GetBinaryForm(data, 0);
                     return Convert.ToHexString(data);
                 }).ToArray();
-            var stagedDescriptor = new RawSecurityDescriptor(protectedAcl.GetSecurityDescriptorBinaryForm(), 0);
             Assert.Equal(ExplicitAces(stagedDescriptor), ExplicitAces(after));
+            Assert.False(new FileInfo(path).GetAccessControl().AreAccessRulesProtected);
+            Assert.Contains(after.DiscretionaryAcl!.Cast<GenericAce>(), ace => ace.IsInherited);
             using var indexer = new WindowsIdentity(token.DangerousGetHandle());
             Assert.Equal(SourceAccessRepairOutcome.AlreadyReadable, broker.Repair(new(source, fingerprint, relative, false)
             {

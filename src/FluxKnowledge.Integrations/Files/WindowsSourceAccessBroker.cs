@@ -62,9 +62,11 @@ internal sealed class WindowsSourceAccessBroker(SourceAccessPolicy policy, strin
                 }
                 if (SourceAccessTokenPermissions.HasApplicableDeny(before, indexer)) return SourceAccessRepairOutcome.ExplicitDeny;
                 var inherited = request.IsDirectory && root.InheritableRead;
+                var legacyDisabledInheritance = target.IsCloudInheritanceRepair &&
+                    SourceFileInheritance.HasLegacyDisabledInheritance(target.Handle, before);
                 var proposed = parentDescriptor is null
                     ? SourceReadGrant.Propose(before, new SecurityIdentifier(policy.IndexerSid), inherited)
-                    : SourceFileInheritance.Propose(before, parentDescriptor);
+                    : SourceFileInheritance.Propose(before, parentDescriptor, legacyDisabledInheritance);
                 if (repairInheritance && SourceAccessTokenPermissions.HasApplicableDeny(proposed, indexer))
                     return SourceAccessRepairOutcome.ExplicitDeny;
                 if (!SourceAccessTokenPermissions.CanRead(proposed, indexer)) return SourceAccessRepairOutcome.UnsupportedPermissions;
@@ -89,6 +91,10 @@ internal sealed class WindowsSourceAccessBroker(SourceAccessPolicy policy, strin
                 _ = SourceReadGrant.ApplyDacl(target.Handle, before, proposed, () =>
                 {
                     target.ValidateCloudResidency();
+                    if (legacyDisabledInheritance &&
+                        (!SourceFileInheritance.HasLegacyDisabledInheritance(target.Handle, before) ||
+                            !SourceReadGrant.Read(target.ParentHandle).AsSpan().SequenceEqual(parentDescriptor)))
+                        throw new InvalidDataException("SourcePermissionsChanged");
                     CheckBudget();
                     writeAttempted = true;
                 }, unprotect: repairInheritance);

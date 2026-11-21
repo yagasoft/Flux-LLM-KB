@@ -305,6 +305,7 @@ internal static class WindowsSourcePathAccess
         private readonly DateTime _lastWrite = File.GetLastWriteTimeUtc(handle);
         internal SafeFileHandle Handle { get; } = handle;
         internal string Identity { get; } = identity;
+        internal bool IsCloudInheritanceRepair => cloudRepair;
         internal SafeFileHandle ParentHandle => parent.Handle;
         internal string ParentIdentity => parent.Identity.IdentityFingerprint;
         internal void ValidateCloudResidency()

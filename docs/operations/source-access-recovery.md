@@ -54,7 +54,12 @@ sync root and checks that on-disk ranges cover every byte through the end of the
 file. It holds the exact file against competing data writes while checking and
 applying the ACL. These metadata checks do not download content. Cloud-only,
 partially resident, empty and indeterminate placeholders stay deferred. Other
-reparse points remain excluded. Existing directory recovery is unchanged.
+reparse points remain excluded. For a fully resident OneDrive file, the
+helper also recognises the legacy explicit-only DACL that Windows displays as
+protected. The native and Windows Security views must describe the same held
+file with identical owner, group and ordered ACEs. The displayed protection bit
+must be their only difference. Both views must still agree immediately before
+the write. Existing directory recovery is unchanged.
 
 The next automatic metadata reconciliation uses the same guarded file read.
 It can recover a previously deferred file during that scan, including one with
