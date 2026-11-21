@@ -102,6 +102,61 @@ public sealed class SourceAccessBrokerStorageTests
         Assert.Empty(Directory.EnumerateFiles(fixture.Journal));
     }
 
+    [Fact]
+    public void Protected_live_grant_is_registration_bound_and_revoked_without_restart()
+    {
+        using var fixture = new Fixture();
+        var sid = WindowsIdentity.GetCurrent().User!;
+        var sourceRoot = fixture.Policy.Roots[0];
+        var parent = new DirectoryInfo(fixture.Source);
+        var parentAcl = parent.GetAccessControl();
+        parentAcl.AddAccessRule(new(sid, FileSystemRights.ReadAndExecute, InheritanceFlags.ObjectInherit,
+            PropagationFlags.None, AccessControlType.Allow));
+        parent.SetAccessControl(parentAcl);
+        var policy = fixture.Policy with { IndexerSid = sid.Value, Roots = [new(fixture.Root + "-unrelated", new string('a', 64))] };
+        File.WriteAllBytes(fixture.PolicyPath, JsonSerializer.SerializeToUtf8Bytes(policy));
+        using var storage = new SourceAccessBrokerStorage(fixture.Helper);
+        var broker = new WindowsSourceAccessBroker(storage.ReadPolicy(), fixture.Journal, storage: storage);
+        using var token = SourceAccessBrokerTests.RestrictedToken();
+        using var indexer = new WindowsIdentity(token.DangerousGetHandle());
+        var source = Guid.NewGuid();
+        var request = new SourceAccessRepairRequest(fixture.Source, sourceRoot.IdentityFingerprint, "first.txt", false) { SourceRegistrationId = source };
+        foreach (var name in new[] { "first.txt", "second.txt" })
+        {
+            var path = Path.Combine(fixture.Source, name);
+            File.WriteAllText(path, "Protected file");
+            var acl = new FileSecurity();
+            var administrators = new SecurityIdentifier("S-1-5-32-544");
+            acl.SetOwner(administrators);
+            acl.SetAccessRuleProtection(true, false);
+            foreach (var principal in new[] { administrators, new SecurityIdentifier("S-1-5-18") })
+                acl.AddAccessRule(new(principal, FileSystemRights.FullControl, AccessControlType.Allow));
+            new FileInfo(path).SetAccessControl(acl);
+        }
+        Assert.Equal(SourceAccessRepairOutcome.NotApproved, broker.Repair(request, indexer, default));
+        var grant = storage.ChangeFileInheritanceGrant(source, Guid.Empty, true, fixture.Source, sourceRoot.IdentityFingerprint, []);
+        Assert.True(grant.Enabled);
+        Assert.Throws<InvalidDataException>(() => storage.ChangeFileInheritanceGrant(source, Guid.Empty, false, null, null, []));
+        Assert.Equal(SourceAccessRepairOutcome.NotApproved, broker.Repair(request with { SourceRegistrationId = Guid.NewGuid() }, indexer, default));
+        Assert.Equal(SourceAccessRepairOutcome.NotApproved, broker.Repair(request with { IsDirectory = true, RelativePath = "." }, indexer, default));
+        Assert.Equal(SourceAccessRepairOutcome.Repaired, broker.Repair(request, indexer, default));
+        Assert.False(new FileInfo(Path.Combine(fixture.Source, "first.txt")).GetAccessControl().AreAccessRulesProtected);
+
+        using (var held = storage.OpenFileInheritanceGrant(source))
+            Assert.Throws<UnauthorizedAccessException>(() => storage.ChangeFileInheritanceGrant(source, grant.Generation, false, null, null, []));
+        using (var secondOperator = new SourceAccessBrokerStorage(fixture.Helper))
+        using (File.Open(Path.Combine(fixture.Helper, "inheritance-writer.lock"), FileMode.Open, FileAccess.Read, FileShare.None))
+            Assert.Equal(32, Assert.IsType<Win32Exception>(Assert.Throws<IOException>(() =>
+                secondOperator.ChangeFileInheritanceGrant(source, grant.Generation, false, null, null, [])).InnerException).NativeErrorCode);
+        var revoked = storage.ChangeFileInheritanceGrant(source, grant.Generation, false, null, null, []);
+        Assert.False(revoked.Enabled);
+        Assert.Equal(SourceAccessRepairOutcome.NotApproved, broker.Repair(request with { RelativePath = "second.txt" }, indexer, default));
+        Assert.True(new FileInfo(Path.Combine(fixture.Source, "second.txt")).GetAccessControl().AreAccessRulesProtected);
+        using var reopened = new SourceAccessBrokerStorage(fixture.Helper);
+        using var observed = reopened.OpenFileInheritanceGrant(source);
+        Assert.Equal(revoked, observed?.Grant);
+    }
+
     internal sealed class Fixture : IDisposable
     {
         public string Root { get; } = Path.Combine(FixtureVolume(), "FluxKnowledgeAccessFixture-" + Guid.NewGuid().ToString("N"));

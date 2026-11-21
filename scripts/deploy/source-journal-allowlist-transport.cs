@@ -17,12 +17,12 @@ public static class FluxSourceJournalOperatorTransport
         if (request.HttpMethod == "POST")
             return path switch
             {
-                "/review" => request.Headers["Origin"] == dashboardOrigin,
-                "/activate" => request.Headers["Origin"] == operatorOrigin,
+                "/review" or "/review-source-repair" => request.Headers["Origin"] == dashboardOrigin,
+                "/activate" or "/activate-source-repair" => request.Headers["Origin"] == operatorOrigin,
                 _ => false
             };
 
-        const string statusPrefix = "/status/";
+        var statusPrefix = path?.StartsWith("/source-repair/", StringComparison.Ordinal) == true ? "/source-repair/" : "/status/";
         return request.HttpMethod == "GET" && path is not null &&
             path.StartsWith(statusPrefix, StringComparison.Ordinal) &&
             Guid.TryParseExact(path.AsSpan(statusPrefix.Length), "D", out var operationId) &&

@@ -26,6 +26,14 @@ public static class SourceAccessCommand
             }
             else if (args is ["apply-root-read", "--broker-root", var root, "--plan-sha256", var sha])
                 result = WindowsSourceAccessAdministration.ApplyRootReadGrant(root, sha);
+            else if (args is ["configure-file-inheritance", "--broker-root", var grantRoot])
+            {
+                using var input = Console.OpenStandardInput();
+                var request = new byte[8193];
+                var count = await input.ReadAtLeastAsync(request, request.Length, false, cancellationToken);
+                if (count is <= 0 or > 8192) throw new InvalidDataException("SourceInheritanceRequestInvalid");
+                result = WindowsSourceAccessAdministration.ConfigureFileInheritance(grantRoot, request[..count]);
+            }
             else if (args is ["serve", "--broker-root", var brokerRoot])
             {
                 using var lifetime = CancellationTokenSource.CreateLinkedTokenSource(cancellationToken);
@@ -37,7 +45,7 @@ public static class SourceAccessCommand
             }
             else
             {
-                await error.WriteLineAsync("Usage: source-access plan-root-read --request <json> | apply-root-read --broker-root <protected folder> --plan-sha256 <approved hash> | serve --broker-root <protected folder>");
+                await error.WriteLineAsync("Usage: source-access plan-root-read --request <json> | apply-root-read --broker-root <protected folder> --plan-sha256 <approved hash> | configure-file-inheritance --broker-root <protected folder> < request.json | serve --broker-root <protected folder>");
                 return 2;
             }
             await output.WriteLineAsync(Encoding.UTF8.GetString(result));

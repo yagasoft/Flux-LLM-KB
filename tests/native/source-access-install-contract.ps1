@@ -18,8 +18,8 @@ try {
     })
     $manifest=Join-Path $fixture 'manifest.json'; @{version=1;commit=('a'*40);files=$files} | ConvertTo-Json -Depth 8 | Set-Content -LiteralPath $manifest -Encoding utf8
     $policy=Join-Path $fixture 'policy.json'; $source=Join-Path $fixture 'source'
-    @{Version=1;IndexerSid='S-1-5-21-1-2-3-1001';PipeName='FluxKnowledge.SourceAccess.isolated-install';Roots=@(@{Path=$source;IdentityFingerprint=('b'*64);InheritableRead=$true});ProtectedRoots=@($payload)} |
-        ConvertTo-Json -Depth 8 | Set-Content -LiteralPath $policy -Encoding utf8
+    $policyObject=@{Version=1;IndexerSid='S-1-5-21-1-2-3-1001';PipeName='FluxKnowledge.SourceAccess.isolated-install';Roots=@(@{Path=$source;IdentityFingerprint=('b'*64);InheritableRead=$true});ProtectedRoots=@($payload)}
+    $policyObject | ConvertTo-Json -Depth 8 | Set-Content -LiteralPath $policy -Encoding utf8
     $rootPlan=Join-Path $fixture 'root-read-plan.json'
     @{Version=1;RootPath=$source;RootIdentityFingerprint=('b'*64);IndexerSid='S-1-5-21-1-2-3-1001';ActualIndexerReadVerified=$false} |
         ConvertTo-Json | Set-Content -LiteralPath $rootPlan -Encoding utf8
@@ -32,7 +32,14 @@ try {
     if ($plan.mode -ne 'plan-only' -or $plan.principal -ne 'NT AUTHORITY\SYSTEM' -or $plan.source_root -cne $source -or
         $plan.existing_children_rewritten -ne $false -or $plan.source_contents_changed -ne $false -or
         $plan.onedrive_configuration_changed -ne $false -or (Test-Path -LiteralPath $argsMap.InstallRoot) -or
-        $plan.task -cne $argsMap.TaskName) { throw 'Plan-only did not remain within the isolated observational contract.' }
+        $plan.task -cne $argsMap.TaskName -or @($plan.file_inheritance_repair_roots).Count -ne 0) { throw 'Plan-only did not remain within the isolated observational contract.' }
+    $policyObject.Roots[0]['RepairFileInheritance']=$true
+    $policyObject | ConvertTo-Json -Depth 8 | Set-Content -LiteralPath $policy -Encoding utf8
+    $argsMap.ExpectedPolicySha256=(Get-FileHash -LiteralPath $policy).Hash
+    $optInPlan=(& $installer @argsMap -PlanOnly | Out-String) | ConvertFrom-Json
+    if (@($optInPlan.file_inheritance_repair_roots).Count -ne 1 -or
+        $optInPlan.file_inheritance_repair_roots[0].Path -cne $source -or
+        $optInPlan.file_inheritance_repair_roots[0].IdentityFingerprint -cne ('b'*64)) { throw 'Plan-only did not identify the exact opted-in root.' }
     $private=[Security.AccessControl.RawSecurityDescriptor]::new('O:BAG:BAD:P(A;OICI;FA;;;SY)(A;OICI;FA;;;BA)')
     $privateBytes=[byte[]]::new($private.BinaryLength); $private.GetBinaryForm($privateBytes,0)
     $created=Join-Path $fixture 'exclusive'
@@ -71,7 +78,7 @@ try {
     $rejected=$false
     try { & $installer @argsMap -PlanOnly | Out-Null } catch { $rejected=$_.Exception.Message -like '*checksum*' -or $_.Exception.Message -like '*Unsafe candidate*' }
     if (-not $rejected) { throw 'Changed payload was accepted.' }
-    [pscustomobject]@{passed=11;source_bytes_changed=0;source_folder_acl_changes=0;scheduled_tasks_created=0;production_calls=0} | ConvertTo-Json
+    [pscustomobject]@{passed=12;source_bytes_changed=0;source_folder_acl_changes=0;scheduled_tasks_created=0;production_calls=0} | ConvertTo-Json
 } finally {
     $resolved=[IO.Path]::GetFullPath($fixture)
     if (-not $resolved.StartsWith([IO.Path]::GetFullPath([IO.Path]::GetTempPath()),[StringComparison]::OrdinalIgnoreCase)) { throw 'Fixture escaped its isolated temporary root.' }

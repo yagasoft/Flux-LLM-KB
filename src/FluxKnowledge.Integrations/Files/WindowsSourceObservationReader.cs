@@ -6,8 +6,13 @@ using Microsoft.Win32.SafeHandles;
 
 namespace FluxKnowledge.Integrations.Files;
 
-public sealed class WindowsSourceObservationReader : ISourceObservationReader
+public sealed class WindowsSourceObservationReader(ISourceAccessRepairClient? accessRepair = null) : ISourceObservationReader
 {
+    public ValueTask<ISourceObservationLease> OpenForScanAsync(SourceRootConfiguration root, string relativePath,
+        SourceAccessRepairAdmission admitRepair, CancellationToken cancellationToken) =>
+        SourceAccessRecovery.RunAsync(root.CanonicalPath, root.PhysicalIdentityFingerprint, accessRepair,
+            () => Open(root, relativePath), admitRepair, cancellationToken, root.Id.Value);
+
     public ISourceAbsenceLease? OpenAbsence(SourceRootConfiguration root, string relativePath)
     {
         var full = Path.GetFullPath(relativePath, root.CanonicalPath);

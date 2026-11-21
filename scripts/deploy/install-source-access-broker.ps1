@@ -88,6 +88,8 @@ $plan = [ordered]@{
     task_arguments=('source-access serve --broker-root "{0}"' -f $brokerInstallRoot); task_working_directory=(Join-Path $brokerInstallRoot 'payload')
     pipe=$policy.PipeName; indexer_sid=$policy.IndexerSid; source_root=$rootReadPlan.RootPath; physical_identity=$rootReadPlan.RootIdentityFingerprint
     source_grant='One root only: add missing 0x100081 read rights with object/container inheritance; preserve all existing ACEs, owner, group and inheritance/protection flags.'
+    file_inheritance_repair_roots=@($policy.Roots | Where-Object { $_.PSObject.Properties['RepairFileInheritance']?.Value -eq $true } |
+        Select-Object Path,IdentityFingerprint)
     existing_children_rewritten=$false; source_contents_changed=$false; onedrive_configuration_changed=$false
     payload_manifest_sha256=$ExpectedManifestSha256; policy_sha256=$ExpectedPolicySha256; root_read_plan_sha256=$ExpectedRootReadPlanSha256
     activation='Register and start one protected startup task. IIS client activation is a separate approved incremental application/configuration update.'

@@ -41,12 +41,14 @@ internal static class SourceReadGrant
 
     internal static byte[] Apply(SafeFileHandle handle, byte[] expectedBefore, SecurityIdentifier reader, bool inherit,
         Action? beforeWriteAttempt = null)
+        => ApplyDacl(handle, expectedBefore, Propose(expectedBefore, reader, inherit), beforeWriteAttempt);
+
+    internal static byte[] ApplyDacl(SafeFileHandle handle, byte[] expectedBefore, byte[] proposed,
+        Action? beforeWriteAttempt = null, bool unprotect = false)
     {
         var before = Read(handle);
         if (!before.AsSpan().SequenceEqual(expectedBefore)) throw new InvalidDataException("SourcePermissionsChanged");
-        var proposed = Propose(before, reader, inherit);
         if (proposed.AsSpan().SequenceEqual(before)) return before;
-
         var native = new RawSecurityDescriptor(proposed, 0);
         // The native setter otherwise drops AI. AR requests retention of the existing
         // inheritance model; this handle call does not recursively walk child objects.
@@ -54,7 +56,10 @@ internal static class SourceReadGrant
         if (native.ControlFlags.HasFlag(ControlFlags.DiscretionaryAclAutoInherited))
             native.SetFlags(native.ControlFlags | ControlFlags.DiscretionaryAclAutoInheritRequired);
         beforeWriteAttempt?.Invoke();
-        var status = NtSetSecurityObject(handle, 4, Bytes(native)); // DACL only, no owner/group/SACL/protection change.
+        const uint DaclSecurityInformation = 4;
+        const uint UnprotectedDaclSecurityInformation = 0x20000000;
+        var information = DaclSecurityInformation | (unprotect ? UnprotectedDaclSecurityInformation : 0);
+        var status = NtSetSecurityObject(handle, information, Bytes(native));
         if (status < 0) throw new Win32Exception(unchecked((int)RtlNtStatusToDosError(status)));
         var after = Read(handle);
         if (!after.AsSpan().SequenceEqual(proposed)) throw new InvalidDataException("SourceRepairUnconfirmed");
@@ -87,7 +92,7 @@ internal static class SourceReadGrant
         return mapped;
     }
 
-    private static byte[] Bytes(RawSecurityDescriptor descriptor)
+    internal static byte[] Bytes(RawSecurityDescriptor descriptor)
     {
         var bytes = new byte[descriptor.BinaryLength];
         descriptor.GetBinaryForm(bytes, 0);

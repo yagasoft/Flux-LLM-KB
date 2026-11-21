@@ -5,7 +5,11 @@ namespace FluxKnowledge.Integrations.Files;
 internal static class SourceAccessRecovery
 {
     internal static T Run<T>(string rootPath, string? rootIdentity, ISourceAccessRepairClient? client, Func<T> open,
-        CancellationToken cancellationToken = default)
+        CancellationToken cancellationToken = default) =>
+        RunAsync(rootPath, rootIdentity, client, open, null, cancellationToken).GetAwaiter().GetResult();
+
+    internal static async ValueTask<T> RunAsync<T>(string rootPath, string? rootIdentity, ISourceAccessRepairClient? client,
+        Func<T> open, SourceAccessRepairAdmission? admitRepair, CancellationToken cancellationToken, Guid? sourceRegistrationId = null)
     {
         cancellationToken.ThrowIfCancellationRequested();
         if (client is null) return open();
@@ -24,11 +28,16 @@ internal static class SourceAccessRecovery
                 if (attempted.Count >= 16) throw WithReason(denied, "SourceAccessRepairLimit");
                 if (!attempted.Add(target)) throw WithReason(denied, "SourceAccessRepairUnconfirmed");
 
-                SourceAccessRepairOutcome outcome;
-                cancellationToken.ThrowIfCancellationRequested();
-                try { outcome = client.TryRepair(new(root, rootIdentity, Path.GetRelativePath(root, target), denied.IsDirectory), cancellationToken); }
-                catch (Exception exception) when (exception is IOException or TimeoutException or UnauthorizedAccessException)
-                { outcome = SourceAccessRepairOutcome.Unavailable; }
+                var request = new SourceAccessRepairRequest(root, rootIdentity, Path.GetRelativePath(root, target), denied.IsDirectory)
+                { SourceRegistrationId = denied.IsDirectory || admitRepair is null ? null : sourceRegistrationId };
+                SourceAccessRepairOutcome Dispatch()
+                {
+                    cancellationToken.ThrowIfCancellationRequested();
+                    try { return client.TryRepair(request, cancellationToken); }
+                    catch (Exception exception) when (exception is IOException or TimeoutException or UnauthorizedAccessException)
+                    { return SourceAccessRepairOutcome.Unavailable; }
+                }
+                var outcome = admitRepair is null ? Dispatch() : await admitRepair(Dispatch, cancellationToken).ConfigureAwait(false);
                 if (outcome is SourceAccessRepairOutcome.Repaired or SourceAccessRepairOutcome.AlreadyReadable) continue;
                 if (outcome == SourceAccessRepairOutcome.ContentUnavailable)
                     throw new SourceContentUnavailableException("Source content is not available for a guarded local read. No download was requested.", denied);

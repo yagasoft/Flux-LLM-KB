@@ -280,12 +280,127 @@ function Receive-SourceJournalOperatorActivation($State) {
     }
 }
 
+function Read-SourceRepairAuthority($State, [guid]$SourceId) {
+    $deadline=[Threading.CancellationTokenSource]::new([TimeSpan]::FromSeconds(4))
+    $uri=$State.Binding.DashboardOrigin + '/sources/' + $SourceId.ToString('D') + '/repair-authority'
+    try {
+        $reply=$State.Dashboard.GetAsync($uri,[Net.Http.HttpCompletionOption]::ResponseHeadersRead,$deadline.Token).GetAwaiter().GetResult()
+        try {
+            if($reply.StatusCode -eq [Net.HttpStatusCode]::NotFound){return $null}
+            if($reply.StatusCode -ne [Net.HttpStatusCode]::OK){throw 'source-inheritance-authority-unavailable'}
+            $body=$reply.Content.ReadAsStream($deadline.Token)
+            try {
+                $bytes=[byte[]]::new(8193)
+                $count=0
+                while($count -lt $bytes.Length){
+                    $read=$body.ReadAsync($bytes,$count,$bytes.Length-$count,$deadline.Token).WaitAsync($deadline.Token).GetAwaiter().GetResult()
+                    if($read -eq 0){break}
+                    $count+=$read
+                }
+                if($count -le 0 -or $count -gt 8192){throw 'source-inheritance-authority-invalid'}
+                $root=ConvertFrom-UniqueConfigurationJson $bytes[0..($count-1)]
+            } finally { $body.Dispose() }
+            if($root.Count -ne 5 -or $root.sourceId -cne $SourceId.ToString('D') -or $root.path -isnot [string] -or
+               $root.displayName -isnot [string] -or $root.fingerprint -cnotmatch '\A[0-9a-f]{64}\z' -or $root.revision -isnot [long]){
+                throw 'source-inheritance-authority-invalid'
+            }
+            return $root
+        } finally { $reply.Dispose() }
+    } finally { $deadline.Dispose() }
+}
+
+function Invoke-SourceRepairOperatorRequest($State,$Context,[string]$Sid) {
+    $request=$Context.Request
+    $response=$Context.Response
+    $activate=$request.RawUrl -ceq '/activate-source-repair'
+    try {
+        if ($activate) {
+            if ($request.Headers['Origin'] -cne $State.Binding.OperatorOrigin) { throw 'origin' }
+            $form=Read-SourceJournalOperatorForm $request 256 @('token')
+            $preview=Use-SourceJournalOperatorConfirmation $State.SourceRepairReferences $Sid $form.token ([DateTimeOffset]::UtcNow)
+            if (!$preview) { throw 'token' }
+            $id=$preview.Id
+        } elseif ($request.HttpMethod -ceq 'POST') {
+            if ($request.Headers['Origin'] -cne $State.Binding.DashboardOrigin) { throw 'origin' }
+            $form=Read-SourceJournalOperatorForm $request 256 @('sourceId')
+            $id=[guid]::ParseExact($form.sourceId,'N')
+        } else {
+            $id=[guid]::ParseExact($request.RawUrl.Substring('/source-repair/'.Length),'D')
+        }
+        if($id -eq [guid]::Empty){throw 'source'}
+    } catch {
+        Write-SourceJournalOperatorPage $response 403 'Confirmation unavailable' '<p>Open a fresh review from the source page.</p>'
+        return
+    }
+
+    $bookmark='/source-repair/'+$id.ToString('D')
+    $sourceUrl=$State.Binding.DashboardOrigin+'/sources/'+$id.ToString('D')
+    $links="<p><a href='$bookmark'>Review current repair setting</a> · <a href='$sourceUrl'>Return to source</a></p>"
+    try {
+        if ($activate) {
+            if ($null -ne $State.Active) { throw 'journal-change-active' }
+            $change=@{ SourceId=$id; ExpectedGeneration=$preview.Generation; Enabled=$preview.Enable; OperatorSid=$Sid }
+            if ($preview.Enable) {
+                $live=Read-SourceRepairAuthority $State $id
+                if (!$live -or $live.path -cne $preview.Path -or $live.fingerprint -cne $preview.Fingerprint -or
+                    $live.revision -ne $preview.Revision) { throw 'source-changed' }
+                $change.Path=$live.path
+                $change.Fingerprint=$live.fingerprint
+            }
+            $result=Invoke-ConfiguredSourceRepairPolicy -Binding $State.Binding -Request $change
+            if ($result.Grant.SourceId -cne $id.ToString('D') -or $result.Grant.Enabled -cne $preview.Enable) { throw 'receipt-invalid' }
+            $message=if($preview.Enable){'Automatic file access repair enabled.'}else{'Automatic file access repair disabled. Previous ACL repairs remain in place.'}
+            Write-SourceJournalOperatorPage $response 200 'Source repair setting saved' ("<p>$message</p>"+$links)
+            return
+        }
+
+        $live=$null
+        try { $live=Read-SourceRepairAuthority $State $id } catch { }
+        $query=@{SourceId=$id}
+        if($live){$query.Path=$live.path}
+        $status=Invoke-ConfiguredSourceRepairPolicy -Binding $State.Binding -Request $query
+        $grant=$status.Grant
+        if (!$live -and (!$grant -or !$grant.Enabled)) {
+            Write-SourceJournalOperatorPage $response 404 'Source unavailable' ('<p>This registration has no active file inheritance grant.</p>'+$links)
+            return
+        }
+        $enabled=$grant -and $grant.Enabled
+        $current=if($enabled){'Enabled'}else{'Off'}
+        if($enabled -and (!$live -or $live.path -cne $grant.Path -or $live.fingerprint -cne $grant.IdentityFingerprint)){
+            $current='Stale source registration'
+        } elseif($status.ManagedByInstallation){ $current='Managed by the installed helper policy' }
+        elseif(!$status.Available){ $current='Helper unavailable for repair' }
+        $name=if($live){$live.displayName}else{'Previous source registration'}
+        $path=if($enabled){$grant.Path}else{$live.path}
+        $message='An eligible file can inherit Windows permissions from its parent folder after a denied read. This can affect other accounts. Folder permissions are unchanged.'
+        $safeName=[Net.WebUtility]::HtmlEncode($name)
+        $safePath=[Net.WebUtility]::HtmlEncode($path)
+        $markup="<p>$safeName</p><p><code>$safePath</code></p><p>$current</p><p>$message</p>"
+        if($enabled -or ($status.Available -and !$status.ManagedByInstallation)){
+            $generation=if($grant){[guid]$grant.Generation}else{[guid]::Empty}
+            $draft=@{ Id=$id; Generation=$generation; Enable=!$enabled }
+            if(!$enabled){$draft.Path=$live.path;$draft.Fingerprint=$live.fingerprint;$draft.Revision=$live.revision}
+            $token=New-SourceJournalOperatorConfirmation $State.SourceRepairReferences $Sid $draft ([DateTimeOffset]::UtcNow)
+            $button=if($enabled){'Disable automatic repair'}else{'Enable automatic repair'}
+            $markup+="<form method='post' action='/activate-source-repair'><input type='hidden' name='token' value='$token'><button type='submit'>$button</button></form>"
+        }
+        Write-SourceJournalOperatorPage $response 200 'Automatic file access repair' ($markup+$links)
+    } catch {
+        Write-SourceJournalOperatorPage $response 409 'Source repair change unavailable' ('<p>The operator could not confirm this setting. Review the current grant before trying again.</p>'+$links)
+    }
+}
+
 function Invoke-SourceJournalOperatorRequest($State, [Net.HttpListenerContext]$Context) {
     $response = $Context.Response
     $request = $Context.Request
     $sid = Get-SourceJournalOperatorSid $Context $State
     if (!$sid) {
         Write-SourceJournalOperatorPage $response 403 'Operator access denied' '<p>Use a Windows account authorised for this local journal operator.</p>'
+        return
+    }
+    if (($request.HttpMethod -ceq 'POST' -and $request.RawUrl -cin @('/review-source-repair','/activate-source-repair')) -or
+        ($request.HttpMethod -ceq 'GET' -and $request.RawUrl -cmatch '\A/source-repair/[0-9a-f]{8}(?:-[0-9a-f]{4}){3}-[0-9a-f]{12}\z')) {
+        Invoke-SourceRepairOperatorRequest $State $Context $sid
         return
     }
     if ($request.HttpMethod -ceq 'GET' -and $request.RawUrl -cmatch '\A/status/([a-f0-9]{8}-[a-f0-9]{4}-[a-f0-9]{4}-[a-f0-9]{4}-[a-f0-9]{12})\z') {
@@ -371,6 +486,7 @@ function Start-SourceJournalAllowlistOperatorListener {
     }
     $activationModule = Join-Path $PSScriptRoot 'source-journal-allowlist-activation.psm1'
     if (!(Test-Path -LiteralPath $activationModule -PathType Leaf)) { throw 'The installed journal activation module is unavailable.' }
+    Import-Module $activationModule -ErrorAction Stop
     $handler = [Net.Http.SocketsHttpHandler]::new()
     $handler.AllowAutoRedirect = $false
     $handler.UseCookies = $false
@@ -380,7 +496,7 @@ function Start-SourceJournalAllowlistOperatorListener {
     $dashboard = [Net.Http.HttpClient]::new($handler, $true)
     $listener = [Net.HttpListener]::new()
     $state = @{ Binding = $Binding; OperatorSids = $sids; Authority = ([uri]$Binding.OperatorOrigin).Authority
-        References = @{}; Active = $null; ActivationModule = $activationModule; Dashboard = $dashboard }
+        References = @{}; SourceRepairReferences = @{}; Active = $null; ActivationModule = $activationModule; Dashboard = $dashboard }
     try {
         $listener.Prefixes.Add($Binding.OperatorOrigin + '/')
         [FluxSourceJournalOperatorTransport]::RequireLocalWindowsAuthentication($listener, $state.Authority, $Binding.DashboardOrigin, $Binding.OperatorOrigin)

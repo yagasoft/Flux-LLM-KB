@@ -307,8 +307,9 @@ public sealed partial class LocalSourceEnumerator : IAuthoritativeSourceFileEnum
     {
         const int bufferSize = 128 * 1024;
         const int signatureLimit = 8192;
-        var lease = SourceAccessRecovery.Run(root.CanonicalPath, rootIdentity, accessRepair,
-            () => WindowsSourcePathAccess.OpenRead(root.CanonicalPath, path, rootIdentity), cancellationToken);
+        var lease = await SourceAccessRecovery.RunAsync(root.CanonicalPath, rootIdentity, accessRepair,
+            () => WindowsSourcePathAccess.OpenRead(root.CanonicalPath, path, rootIdentity), _scope?.AdmitAccessRepair,
+            cancellationToken, root.Id.Value).ConfigureAwait(false);
         FileStream? stream = null;
         try
         {

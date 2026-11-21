@@ -21,9 +21,11 @@ internal sealed class SourceJournalAllowlistHandoff
         }
 
         ReviewUrl = new Uri(origin, "/review").AbsoluteUri;
+        SourceRepairReviewUrl = new Uri(origin, "/review-source-repair").AbsoluteUri;
     }
 
     internal string? ReviewUrl { get; }
+    internal string? SourceRepairReviewUrl { get; }
 
     internal const string ImpactDigestPrefix = "Source impact SHA-256 ";
 

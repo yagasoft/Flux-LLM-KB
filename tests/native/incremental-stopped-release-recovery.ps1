@@ -124,3 +124,121 @@ foreach($boundary in @('after-intent','after-replacement')) {
     foreach($payload in $accepted.Payloads){if((Get-HybridPayloadFingerprint $payload.Root) -cne $payload.Sha256){throw 'Transfer mutated a payload.'}}
 }
 Write-Output 'Incremental stopped-release recovery passed: exact adoption, drift refusal, continuous hold and interrupted-transfer replay refusal.'
+
+# Exercise the refresh binding with the real manifest and hold writer. Native
+# helper replacement is qualified separately with the protected SYSTEM task.
+Import-Module (Join-Path $SourceRoot 'scripts/deploy/incremental-source-access-config.psm1') -Force
+function Get-DeploymentSourceJournalPayloads { $script:Binding.Payloads }
+function Read-SourceJournalHelperFile([string]$Path,[int]$Limit=2097152) { ,([IO.File]::ReadAllBytes($Path)) }
+function Get-SourceJournalHelperPayloadManifest($Root) { @{Sha256='A'*64} }
+function Get-SourceJournalHelperTaskObservation { $script:HelperTask }
+
+foreach($fault in @('none','helper-incomplete','candidate-changed','policy-changed','task-changed')){
+    New-RecoveryFixture
+    $prior=Join-Path $IncrementalRecoveryRoot $PriorReleaseId
+    $checkpoint=Join-Path $SourceJournalHelperRoot ("updates/$PriorReleaseId/state.json")
+    [void][IO.Directory]::CreateDirectory((Split-Path -Parent $checkpoint))
+    $script:HelperTask=@{TaskName='FluxKnowledge.SourceAccess';PrincipalSid='S-1-5-18';Executable='synthetic.exe';
+        Arguments='serve';WorkingDirectory='synthetic';DefinitionSha256='B'*64;SecuritySha256='C'*64;Enabled=$true;Running=$true}
+    $refresh=@{ReleaseId=$PriorReleaseId;Commit=$Binding.PriorCommit;DatabaseIdentity=$Binding.DatabaseIdentity;
+        ConfigurationSha256=$Binding.ConfigurationSha256;Companion=@{IdentityHash=$Binding.TaskIdentityHash;
+            LauncherSha256=$Binding.LauncherSha256;Enabled=$Binding.EnableCompanionAfterValidation};
+        HelperCheckpointPath=$checkpoint;HelperTask=$HelperTask.Clone();
+        CandidatePayloads=@($Binding.Payloads|ForEach-Object {$_.Role+'='+$_.Sha256})}
+    $state=@{ReleaseId=$PriorReleaseId;Phase='Completed';CandidatePayloadSha256='A'*64}
+    foreach($entry in @(@('policy.json','RepairPolicySha256'),@('journal-policy.json','JournalPolicySha256'),@('root-read-plan.json','RootReadPlanSha256'))){
+        $path=Join-Path $SourceJournalHelperRoot $entry[0]
+        [IO.File]::WriteAllText($path,'{}')
+        $digest=(Get-FileHash -LiteralPath $path).Hash
+        $refresh[$entry[1]]=$digest;$state[$entry[1]]=$digest
+    }
+    if($fault -ceq 'helper-incomplete'){$state.Phase='StartIntent'}
+    if($fault -ceq 'candidate-changed'){$refresh.CandidatePayloads[0]='Web='+('D'*64)}
+    if($fault -ceq 'policy-changed'){[IO.File]::WriteAllText((Join-Path $SourceJournalHelperRoot 'journal-policy.json'),'changed')}
+    if($fault -ceq 'task-changed'){$script:HelperTask.SecuritySha256='D'*64}
+    Write-SegmentedUpdateJson $checkpoint $state
+    $savedBinding=Join-Path $prior 'source-access-helper-refresh-binding.json'
+    Write-SegmentedUpdateJson $savedBinding $refresh
+    $manifestPath=Join-Path $prior 'manifest.json'
+    $manifest=Read-SegmentedUpdateJson $manifestPath
+    $manifest.source_access_helper_refresh=@{ReleaseId=$PriorReleaseId;BindingSha256=(Get-FileHash -LiteralPath $savedBinding).Hash}
+    Write-SegmentedUpdateJson $manifestPath $manifest
+    $Binding.PriorManifestSha256=(Get-FileHash -LiteralPath $manifestPath).Hash
+    Write-SegmentedUpdateJson $BindingPath $Binding
+    $script:BindingSha256=(Get-FileHash -LiteralPath $BindingPath).Hash
+    $accepted=Read-FixtureBinding
+    if($fault -ceq 'none'){
+        Assert-IncrementalStoppedRecoveryBinding $accepted
+        if($accepted.SourceAccessHelperRefresh.ReleaseId -cne $PriorReleaseId){throw 'Refresh provenance was lost.'}
+        $next=Join-Path $IncrementalRecoveryRoot $NextReleaseId
+        [void][IO.Directory]::CreateDirectory($next)
+        $script:StatePath=Join-Path $next 'transfer.json'
+        $script:Interrupt='after-replacement'
+        Assert-Fails {Move-IncrementalStoppedRecoveryHold -Binding $accepted -ReleaseId $NextReleaseId -StatePath $StatePath}
+        $script:Interrupt=$null
+        $nextManifest=Read-SegmentedUpdateJson (Join-Path $next 'manifest.json')
+        if((Read-SegmentedUpdateJson $ValidationHoldPath) -cne $NextReleaseId -or
+            $nextManifest.source_access_helper_refresh.BindingSha256 -cne $manifest.source_access_helper_refresh.BindingSha256){
+            throw 'An interruption after transfer lost the exact refresh provenance.'
+        }
+        continue
+    } else {
+        Assert-Fails { Move-IncrementalStoppedRecoveryHold -Binding $accepted -ReleaseId $NextReleaseId -StatePath $StatePath }
+        if(Test-Path -LiteralPath $StatePath){throw "An unsettled refresh reached hold transfer: $fault"}
+    }
+    if((Read-SegmentedUpdateJson $ValidationHoldPath) -cne $PriorReleaseId){throw 'Refresh verification changed the owned hold.'}
+}
+Write-Output 'Source Access refresh recovery binding passed: complete set with exact helper checkpoint, policy and task.'
+
+. (Join-Path $SourceRoot 'scripts/deploy/incremental-source-journal-iis.ps1')
+function Get-SourceAccessHelperRefreshEvidence { @{Sha256='D'*64} }
+function Get-SourceJournalHelperTaskObservation { @{Enabled=$true;Running=$true} }
+function Assert-SourceJournalSchema($Database){ }
+function Get-DeploymentSourceJournalRepairMode { param([switch]$AllowlistOnly) @{} }
+function Assert-SourceAccessConfigurationChange { param($Change,[switch]$Original) }
+function Get-WebAppPoolState { param($Name) @{Value='Stopped'} }
+function Start-IndexCompatibleWebAppPool {
+    param($Name,$RequiredHoldReleaseId)
+    Assert-HybridDeploymentHoldOwner -Path $ValidationHoldPath -ReleaseId $RequiredHoldReleaseId
+    $script:Events.Add('start')
+}
+function Wait-IisAppPoolState { param($Name,$ExpectedState,$TimeoutSeconds) }
+function Invoke-RequiredLoopbackProbes { param($Origin,$TimeoutSeconds) $script:Events.Add('readiness') }
+function Remove-DeploymentValidationHold {
+    param($Path,$ReleaseId,[switch]$RequireOwned)
+    if(!$RequireOwned){throw 'Recovery must require ownership'}
+    Assert-HybridDeploymentHoldOwner -Path $Path -ReleaseId $ReleaseId
+    $script:Events.Add('release')
+    Remove-Item -LiteralPath $Path
+    return $ReleaseId
+}
+function Enable-IndexCompatibleOutlookTask {
+    [CmdletBinding()]param($TaskName,$ReleasedHold,$ExpectedReleaseId)
+    if($ReleasedHold -cne $ExpectedReleaseId){throw 'Companion must bind the released hold'}
+    $script:Events.Add('companion')
+}
+foreach($foreign in @($true,$false)){
+    New-RecoveryFixture
+    $script:Events=[Collections.Generic.List[string]]::new()
+    $ExpectedSourceAccessHelperRefreshPlanSha256='D'*64
+    $ExpectedSourceJournalDatabaseIdentity=$DatabaseIdentity
+    $sourceJournalChange=$null
+    $sourceJournalRelease=@{}
+    $refreshReview=@{Evidence=@{PredecessorPayloads=$Binding.Payloads}}
+    $refreshCompanion=@{IdentityHash=$TaskHash;LauncherSha256='C'*64;Enabled=$true}
+    $releaseId=$PriorReleaseId
+    $deploymentValidation=@{HoldCreated=$true;RefreshPredecessorRestored=$false}
+    $loopbackOrigin=@{Origin='http://127.0.0.1:5401'}
+    $ReadinessTimeoutSeconds=15
+    if($foreign){
+        Write-SegmentedUpdateJson $ValidationHoldPath 'foreign'
+        Assert-Fails { Restore-SourceAccessHelperRefreshBeforeSwap }
+        if($Events.Count -or (Read-SegmentedUpdateJson $ValidationHoldPath) -cne 'foreign'){throw 'Foreign hold was changed'}
+    }else{
+        Restore-SourceAccessHelperRefreshBeforeSwap
+        if(($Events -join '|') -cne 'start|readiness|release|companion' -or !$deploymentValidation.RefreshPredecessorRestored){
+            throw 'Did not restore the exact predecessor after the companion was disabled.'
+        }
+    }
+}
+Write-Output 'Source Access refresh pre-swap recovery passed: owned hold only, readiness before release and exact companion restoration.'

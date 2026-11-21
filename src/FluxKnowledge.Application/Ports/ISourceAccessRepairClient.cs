@@ -1,7 +1,13 @@
+using System.Text.Json.Serialization;
+
 namespace FluxKnowledge.Application.Ports;
 
 public sealed record SourceAccessRepairRequest(
-    string RootPath, string? RootIdentityFingerprint, string RelativePath, bool IsDirectory);
+    string RootPath, string? RootIdentityFingerprint, string RelativePath, bool IsDirectory)
+{
+    [JsonIgnore(Condition = JsonIgnoreCondition.WhenWritingNull)]
+    public Guid? SourceRegistrationId { get; init; }
+}
 
 public enum SourceAccessRepairOutcome
 {
@@ -9,7 +15,10 @@ public enum SourceAccessRepairOutcome
     OutsideScope, IdentityChanged, ContentUnavailable, Unconfirmed
 }
 
-/// <summary>Requests a fixed read grant from a separately authorised broker; conveys no ACL authority.</summary>
+public delegate ValueTask<SourceAccessRepairOutcome> SourceAccessRepairAdmission(
+    Func<SourceAccessRepairOutcome> dispatch, CancellationToken cancellationToken);
+
+/// <summary>Requests scoped read recovery from a separately authorised broker.</summary>
 public interface ISourceAccessRepairClient
 {
     SourceAccessRepairOutcome TryRepair(SourceAccessRepairRequest request, CancellationToken cancellationToken);

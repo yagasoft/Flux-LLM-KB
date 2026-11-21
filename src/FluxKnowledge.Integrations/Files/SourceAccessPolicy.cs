@@ -6,7 +6,10 @@ using FluxKnowledge.Application.Ports;
 
 namespace FluxKnowledge.Integrations.Files;
 
-public sealed record ApprovedSourceAccessRoot(string Path, string IdentityFingerprint, bool InheritableRead = true);
+public sealed record ApprovedSourceAccessRoot(string Path, string IdentityFingerprint, bool InheritableRead = true)
+{
+    public bool RepairFileInheritance { get; init; }
+}
 
 public sealed record SourceAccessPolicy(int Version, string PipeName, string IndexerSid,
     IReadOnlyList<ApprovedSourceAccessRoot> Roots, IReadOnlyList<string> ProtectedRoots)

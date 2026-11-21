@@ -94,6 +94,7 @@ app.MapRazorComponents<App>()
     .AddInteractiveServerRenderMode();
 app.MapFluxKnowledgeHealth();
 app.MapSourceJournalAllowlistPreview();
+app.MapSourceRepairAuthority();
 app.MapFluxKnowledgeIndexHealth();
 app.MapFluxKnowledgeGpuStatus();
 app.MapFluxKnowledgeSearch();

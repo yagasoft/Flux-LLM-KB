@@ -27,16 +27,43 @@ persistent server disconnects completed or broken connections before accepting
 another; an empty or owner-refused request grants no source access.
 
 The administrator policy binds each root's canonical path and physical identity
-to one indexing SID. The helper can add only missing `0x100081` rights: read data
-or list a directory, read attributes and synchronise. Directory grants are
-inheritable by files and subdirectories. It preserves existing ACEs, owner,
-group, inheritance/protection flags and unrelated permissions. It does not reset
-ACLs or refresh old inherited permissions. IIS receives no ACL-changing rights.
+to one indexing SID. The default recovery adds only missing `0x100081` rights for
+reading data or listing a directory, reading attributes and synchronising.
+Directory grants can be inheritable. The default preserves existing ACEs, owner,
+group and inheritance/protection flags. IIS receives no ACL-changing rights.
+
+In the dashboard, open a saved filesystem source and select **Manage automatic
+file access repair**. Confirm enable or disable in the Windows-authenticated local
+operator. New sources start with this permission off. The operator saves a
+protected grant for the exact registration and physical folder. Saves take effect
+without redeploying or restarting the app or helper. Disabling prevents future
+inheritance edits and leaves repaired ACLs in place. Keep the operator review
+link if the source will be deleted, moved or taken offline. The grant can still
+be revoked from that link. A new registration for the same folder starts off.
+
+An ordinary single-link file must fail a guarded read with
+native access denied, and the helper must independently confirm both effective
+read denial for the authenticated indexer and a protected DACL. It projects the
+exact file's inherited DACL from its held immediate parent, preserves explicit
+ACEs and owner/group, and refuses any applicable read deny or projected ACL
+that still fails the read check. The file-only DACL write can change rights for
+other accounts through parent inheritance. Reparse points, including cloud
+placeholders, are excluded from this mode. An opted-in file that fails the
+inheritance checks stays deferred. Existing directory recovery is unchanged.
+
+The next automatic metadata reconciliation uses the same guarded file read.
+It can recover a previously deferred file during that scan, including one with
+unchanged size and modification time, without rehashing content when existing
+metadata can be reused. Partial journal coverage alone grants no repair
+authority. Dispatch on a denied file in an incremental scan requires a current
+source configuration, owned scan and accepted recovery generation.
 
 An exact durable intent precedes each permission write. Physical path, ACL and
 effective access are checked around the write. A confirmed result removes that
-intent and allows a fresh guarded read. A write with an uncertain outcome retains
-its intent and requires verification; it is not blindly replayed. Transport has
+intent and allows a fresh guarded read. An uncertain result retains the intent
+and is recorded as a scan issue without another capture attempt in the same
+scan. The helper compares the held file and parent around the write. Windows
+does not make that comparison and write atomic against external ACL editors. Transport has
 one absolute three-second request budget and never automatically replays a sent
 request. Recovery is limited to 16 distinct components per read attempt; ordinary
 reconciliation can continue deeper progress on a later attempt.
@@ -44,8 +71,8 @@ reconciliation can continue deeper progress on a later attempt.
 | Case | Behaviour after approved activation |
 | --- | --- |
 | Ordinary new file or subfolder | Inherits the root/directory read grant; normal guarded processing. |
-| Moved file retaining older ACLs | Adds the missing read ACE on demand, preserves the old ACL, then retries. |
-| Protected inheritance or synced replacement | Repairs the newly encountered physical item on demand; no recursive ACL reset. |
+| Moved file retaining older ACLs under the default policy | Adds the missing read ACE on demand, preserves the old ACL, then retries. |
+| Inheritance disabled on an ordinary file in an opted-in source | Enables inheritance on the exact file when the parent grants effective read access and the file passes the other safeguards. |
 | Repeated repair or already readable item | Confirms actual access without another write. |
 | Effective explicit/inherited deny, restricted-token exclusion or unsupported ACL | Preserves the restriction and reports administrator review. |
 | Cloud-only, unavailable or actively changing content | Reports the provider/stability problem; does not download, hydrate or edit content. |
@@ -74,11 +101,13 @@ activation need explicit approval for their exact target and scope.
    `ActualIndexerReadVerified: false`; the helper's real caller token and supported
    indexing reads establish that later.
 3. Prepare version 1 policy JSON with `PipeName`, `IndexerSid`, `Roots` (each has
-   `Path`, `IdentityFingerprint`, `InheritableRead`) and `ProtectedRoots`. Include
+   `Path`, `IdentityFingerprint`, `InheritableRead` and optionally
+   `RepairFileInheritance`, which defaults to false) and `ProtectedRoots`. Include
    application/runtime/storage, helper, Windows and model locations as protected.
    Pipe names start with `FluxKnowledge.SourceAccess.`. Hash the policy and plan.
 4. Review `scripts/deploy/install-source-access-broker.ps1 -PlanOnly` using those
-   exact hashes. It makes no installation or scheduled-task changes. The helper
+   exact hashes and verify the listed `file_inheritance_repair_roots`. It makes no
+   installation or scheduled-task changes. The helper
    requires a new private directory directly under a fixed NTFS volume root.
 5. After approval, `-Apply` additionally requires
    `-ConfirmPrivilegedHelper -ConfirmSourceRootReadGrant`. The installer exclusively
@@ -114,7 +143,15 @@ one-off stale-permission batch is not that authority.
 
 The helper policy, payload and journal are writable only by SYSTEM and
 administrators, with no reparse points or multi-link policy/journal files. The
-policy stays pinned until the task stops for a reviewed update. Unexpected
+policy stays pinned until the task stops for a reviewed update. The dashboard
+and helper need a coordinated initial payload update, and the protected local
+operator needs its reviewed package refresh. Use the canonical incremental
+updater’s `-RefreshSourceAccessHelper` mode and the reviewed `-PlanOnly` digest
+for the initial payload change. The release holds both writers until the helper
+and the held IIS process confirm transport. Refresh and verify the installed
+operator package once the payload release has settled. Subsequent per-source saves preserve
+the journal allowlist and the installed legacy repair policy. Existing static
+inheritance opt-ins remain managed by the protected installation. Unexpected
 ownership, permissions, identities or pending intents fail closed.
 
 Disable the client through a reviewed incremental update and stop the exact helper

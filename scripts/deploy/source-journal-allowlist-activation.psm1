@@ -366,4 +366,111 @@ function Invoke-ConfiguredSourceJournalAllowlist {
         if($mutex){$mutex.Dispose()}
     }
 }
-Export-ModuleMember -Function Read-SourceJournalAllowlistOperatorBinding,Invoke-ConfiguredSourceJournalAllowlist,Get-ConfiguredSourceJournalAllowlistResult
+function Invoke-ConfiguredSourceRepairPolicy {
+    param([Parameter(Mandatory)][hashtable]$Binding,[Parameter(Mandatory)][hashtable]$Request)
+    $targets=Get-AllowlistTargets $Binding
+    $gate='Global\FluxKnowledge.IncrementalIisUpdate.v1'
+    if($targets.Stage){$gate+='-Staging-'+$targets.Stage}
+    $mutex=[Threading.Mutex]::new($false,$gate)
+    $locked=$false
+    try {
+        try{$locked=$mutex.WaitOne(0)}catch [Threading.AbandonedMutexException]{$locked=$true}
+        if(!$locked -or (Test-Path -LiteralPath $targets.Hold)){throw 'source-inheritance-deployment-in-progress'}
+        $bindingLease=[FluxSourceAccessInstallFile]::Read($targets.BindingPath,32768)
+        try {
+            $validated=Read-AllowlistBoundInstallation $Binding $targets
+            if($targets.Stage -and $Request.ContainsKey('Enabled') -and $Request.Enabled){
+                $sources=(Join-Path $targets.LiveRoot 'Sources')+'\'
+                if(![IO.Path]::GetFullPath([string]$Request.Path).StartsWith($sources,[StringComparison]::OrdinalIgnoreCase)){
+                    throw 'source-inheritance-outside-staging-sources'
+                }
+            }
+            Invoke-SourceRepairPolicyCommand $validated $targets $Request
+        } finally { $bindingLease.Dispose() }
+    } finally {
+        if($locked){$mutex.ReleaseMutex()}
+        $mutex.Dispose()
+    }
+}
+
+function Invoke-SourceRepairPolicyCommand($Binding,$targets,[hashtable]$Request) {
+    $context=@{Target=$targets;Binding=$Binding;Native=$null}
+    $task=Get-AllowlistTask $context
+    $repair=ConvertFrom-UniqueConfigurationJson (Read-AllowlistFile (Join-Path $targets.Helper 'policy.json') -Private)
+    $settings=ConvertFrom-UniqueConfigurationJson (Read-AllowlistFile $targets.AppConfig)
+    $appAvailable=$settings.Contains('SourceAccess') -and $settings.SourceAccess.Enabled -ceq $true -and
+        $settings.SourceAccess.PipeName -ceq $repair.PipeName -and $task.Enabled -and $task.Running
+    if($Request.ContainsKey('Enabled') -and $Request.Enabled){
+        if(!$appAvailable){throw 'source-inheritance-helper-unavailable'}
+        $database=Get-SourceJournalDatabaseState -ConnectionString (Get-AllowlistConnection $settings $targets)
+        if($database.Identity -cne $Binding.DatabaseIdentity){throw 'database-incarnation-mismatch'}
+        $manager=Get-AllowlistManager
+        try { $null=Get-AllowlistIis $context $manager } finally { $manager.Dispose() }
+        $context.Native=New-SourceJournalHelperNativeTaskPorts -State @{InstallRoot=$targets.Helper;TaskName=$targets.Task;OriginalTask=$task} `
+            -AssertApplicationStopped {throw 'unexpected-update-port'} -Probe {throw 'unexpected-update-port'}
+        try { Assert-AllowlistHelperRunning $context } finally { Close-SourceJournalHelperNativeTaskPorts $context.Native }
+    }
+    $payload=Join-Path $targets.Helper 'payload'
+    $rootLease=[FluxSourceAccessInstallFile]::OpenPrivateDirectory($targets.Helper)
+    try {
+        $payloadLease=[FluxSourceAccessInstallFile]::OpenPrivateDirectory($payload)
+        try {
+            $exe=Join-Path $payload 'FluxKnowledge.Cli.exe'
+            $leases=[Collections.Generic.List[IDisposable]]::new()
+            try {
+                $members=@(Get-ChildItem -LiteralPath $payload -Recurse -Force)
+                if ($members.Count -gt 4096) { throw 'source-inheritance-payload-too-large' }
+                foreach ($item in $members) {
+                    if ($item.Attributes -band [IO.FileAttributes]::ReparsePoint) { throw 'source-inheritance-payload-linked' }
+                    if ($item.PSIsContainer) { $leases.Add([FluxSourceAccessInstallFile]::OpenPrivateDirectory($item.FullName)) }
+                    else {
+                        $leases.Add([FluxSourceAccessInstallFile]::Read($item.FullName,1073741824))
+                        [FluxSourceAccessInstallFile]::ValidateDescriptor((Get-Acl -LiteralPath $item.FullName).GetSecurityDescriptorBinaryForm(),$false)
+                    }
+                }
+                if($Binding.Version -eq 1 -and (Get-HybridPayloadFingerprint $payload) -cne $Binding.HelperSha256){throw 'payload-hash-mismatch'}
+                $configuration=ConvertFrom-UniqueConfigurationJson (Read-AllowlistFile (Join-Path $payload 'FluxKnowledge.Cli.runtimeconfig.json'))
+                if (!$configuration.Contains('runtimeOptions') -or $configuration.runtimeOptions.Contains('additionalProbingPaths') -or
+                    $configuration.runtimeOptions.Contains('startupHooks')) { throw 'source-inheritance-payload-runtime-override' }
+                if($Request.ContainsKey('Enabled')){
+                    $Request.ProtectedRoots=@($targets.Web,$targets.Outlook,[IO.Path]::GetDirectoryName($targets.BindingPath)) +
+                        @('Config','Data','Runtime','Recovery' | ForEach-Object { Join-Path $targets.LiveRoot $_ })
+                }
+                $start=[Diagnostics.ProcessStartInfo]::new($exe)
+                $start.WorkingDirectory=$payload
+                $start.UseShellExecute=$false
+                $start.CreateNoWindow=$true
+                $start.RedirectStandardInput=$true
+                $start.StandardInputEncoding=[Text.UTF8Encoding]::new($false)
+                $start.RedirectStandardOutput=$true
+                $start.StandardOutputEncoding=[Text.UTF8Encoding]::new($false)
+                $start.RedirectStandardError=$true
+                foreach($key in @($start.Environment.Keys)) {
+                    if($key -imatch '^(DOTNET_|CORECLR_|COMPLUS_)'){[void]$start.Environment.Remove($key)}
+                }
+                foreach($arg in @('source-access','configure-file-inheritance','--broker-root',$targets.Helper)) {
+                    $start.ArgumentList.Add($arg)
+                }
+                $process=[Diagnostics.Process]::Start($start)
+                try {
+                    $output=$process.StandardOutput.ReadToEndAsync()
+                    $errorText=$process.StandardError.ReadToEndAsync()
+                    $process.StandardInput.WriteLine((ConvertTo-Json -InputObject $Request -Depth 5 -Compress))
+                    $process.StandardInput.Close()
+                    if(!$process.WaitForExit(8000)){
+                        if(!$process.HasExited){$process.Kill()}
+                        throw 'source-inheritance-operator-timeout'
+                    }
+                    if($process.ExitCode -ne 0){throw 'source-inheritance-command-rejected'}
+                    $result=$output.GetAwaiter().GetResult()
+                    if(!$result -or $result.Length -gt 8192){throw 'source-inheritance-receipt-invalid'}
+                    $receipt=ConvertFrom-UniqueConfigurationJson ([Text.Encoding]::UTF8.GetBytes($result))
+                    $receipt.Available=$receipt.Available -and $appAvailable
+                    return $receipt
+                } finally { $process.Dispose() }
+            } finally { foreach($lease in $leases){$lease.Dispose()} }
+        } finally { $payloadLease.Dispose() }
+    } finally { $rootLease.Dispose() }
+}
+
+Export-ModuleMember -Function Read-SourceJournalAllowlistOperatorBinding,Invoke-ConfiguredSourceJournalAllowlist,Get-ConfiguredSourceJournalAllowlistResult,Invoke-ConfiguredSourceRepairPolicy

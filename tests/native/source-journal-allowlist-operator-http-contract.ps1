@@ -123,7 +123,19 @@ function Get-ConfiguredSourceJournalAllowlistResult([hashtable]$Binding, [guid]$
         return @{ Status = 'succeeded'; Code = 'fixture-verified-native-receipt' }
     }
 }
-Export-ModuleMember -Function Invoke-ConfiguredSourceJournalAllowlist,Get-ConfiguredSourceJournalAllowlistResult
+function Invoke-ConfiguredSourceRepairPolicy([hashtable]$Binding,[hashtable]$Request) {
+    $path=Join-Path $Binding.ReceiptDirectory 'repair-fixture.json'
+    $grant=if(Test-Path -LiteralPath $path){Get-Content -LiteralPath $path -Raw | ConvertFrom-Json -AsHashtable}else{$null}
+    if($Request.ContainsKey('Enabled')){
+        $prior=if($grant){[guid]$grant.Generation}else{[guid]::Empty}
+        if([guid]$Request.ExpectedGeneration -ne $prior){throw 'stale fixture grant'}
+        $grant=@{SourceId=$Request.SourceId.ToString('D');Generation=[guid]::NewGuid().ToString('D');Enabled=$Request.Enabled
+            Path='I:\Synthetic\Source';IdentityFingerprint=('a'*64)}
+        [IO.File]::WriteAllText($path,(ConvertTo-Json -InputObject $grant -Compress))
+    }
+    return @{Available=$true;Grant=$grant;ManagedByInstallation=$false}
+}
+Export-ModuleMember -Function Invoke-ConfiguredSourceJournalAllowlist,Get-ConfiguredSourceJournalAllowlistResult,Invoke-ConfiguredSourceRepairPolicy
 '@
     Set-Content -LiteralPath (Join-Path $fixture 'fixture.ps1') -Value @'
 param($Fixture, $OperatorOrigin, $DashboardOrigin, $AllowedSid)
@@ -152,6 +164,18 @@ $dashboard = Start-ThreadJob -ArgumentList $DashboardOrigin,$Fixture,$OperatorOr
                     $ctx.Response.ContentType = 'text/html; charset=utf-8'
                     $ctx.Response.ContentLength64 = $bytes.Length
                     $ctx.Response.OutputStream.Write($bytes)
+                } elseif ($ctx.Request.HttpMethod -ceq 'GET' -and
+                    $ctx.Request.RawUrl -ceq '/sources/2b014fd9-007d-412d-8a46-8ed710372600/repair-authority') {
+                    $ctx.Response.StatusCode=404
+                    if(!(Test-Path -LiteralPath (Join-Path $Fixture 'source-deleted'))){
+                        $revision=if(Test-Path -LiteralPath (Join-Path $Fixture 'source-changed')){2}else{1}
+                        $body=@{sourceId='2b014fd9-007d-412d-8a46-8ed710372600';path='I:\Synthetic\Source'
+                            displayName='Source <fixture>';fingerprint=('a'*64);revision=$revision}
+                        $data=[Text.Encoding]::UTF8.GetBytes((ConvertTo-Json -InputObject $body -Compress))
+                        $ctx.Response.ContentType='application/json'
+                        $ctx.Response.StatusCode=200
+                        $ctx.Response.OutputStream.Write($data)
+                    }
                 } elseif ($ctx.Request.RawUrl -ceq '/return-no-content') {
                     $ctx.Response.StatusCode = 204
                 } elseif ($ctx.Request.HttpMethod -ceq 'POST' -and $ctx.Request.RawUrl -ceq '/sources/journal/verify-preview' -and
@@ -186,6 +210,33 @@ try {
 '@
 
     $worker = Start-OperatorFixture $currentSid
+    $sourceId='2b014fd9-007d-412d-8a46-8ed710372600'
+    $repairForm=@{sourceId=$sourceId.Replace('-','')}
+    Assert-Equal 401 (Invoke-OperatorRequest '/review-source-repair' 'POST' @{Origin=$dashboardOrigin} $repairForm -Anonymous).StatusCode 'Repair review requires Windows authentication'
+    Assert-Equal 403 (Invoke-OperatorRequest '/review-source-repair' 'POST' @{Origin=$operatorOrigin} $repairForm).StatusCode 'Repair review requires the exact dashboard Origin'
+    $repairReview=Invoke-OperatorRequest '/review-source-repair' 'POST' @{Origin=$dashboardOrigin} $repairForm
+    Assert-Equal 200 $repairReview.StatusCode 'An existing source can review file repair'
+    if(!$repairReview.Content.Contains('Enable automatic repair') -or !$repairReview.Content.Contains('&lt;fixture&gt;')){
+        throw 'Repair review did not present a safe exact source summary.'
+    }
+    $repairToken=[regex]::Match($repairReview.Content,"name='token' value='([A-F0-9]{64})'").Groups[1].Value
+    $repairActivate=@{token=$repairToken}
+    Assert-Equal 403 (Invoke-OperatorRequest '/activate' 'POST' @{Origin=$operatorOrigin} $repairActivate).StatusCode 'A repair token is not a journal token'
+    [IO.File]::WriteAllText((Join-Path $fixture 'source-changed'), 'true')
+    Assert-Equal 409 (Invoke-OperatorRequest '/activate-source-repair' 'POST' @{Origin=$operatorOrigin} $repairActivate).StatusCode 'Stale repair preview does not reach the writer'
+    Remove-Item -LiteralPath (Join-Path $fixture 'source-changed')
+
+    $repairReview=Invoke-OperatorRequest '/review-source-repair' 'POST' @{Origin=$dashboardOrigin} $repairForm
+    $repairActivate.token=[regex]::Match($repairReview.Content,"name='token' value='([A-F0-9]{64})'").Groups[1].Value
+    Assert-Equal 200 (Invoke-OperatorRequest '/activate-source-repair' 'POST' @{Origin=$operatorOrigin} $repairActivate).StatusCode 'Enable saves from the protected confirmation'
+    Assert-Equal 403 (Invoke-OperatorRequest '/activate-source-repair' 'POST' @{Origin=$operatorOrigin} $repairActivate).StatusCode 'The repair confirmation is single-use'
+    [IO.File]::WriteAllText((Join-Path $fixture 'source-deleted'), 'true')
+    $staleRepair=Invoke-OperatorRequest ('/source-repair/'+$sourceId)
+    if(!$staleRepair.Content.Contains('Stale source registration') -or !$staleRepair.Content.Contains('Disable automatic repair')){
+        throw 'A grant on a deleted or replaced registration could not be reviewed for revocation.'
+    }
+    $repairActivate.token=[regex]::Match($staleRepair.Content,"name='token' value='([A-F0-9]{64})'").Groups[1].Value
+    Assert-Equal 200 (Invoke-OperatorRequest '/activate-source-repair' 'POST' @{Origin=$operatorOrigin} $repairActivate).StatusCode 'A stale grant can be revoked without an active registration'
     if ($HeadlessChromiumPath) {
         $browser = Get-Item -LiteralPath $HeadlessChromiumPath
         if ($browser.Name -cne 'chrome-headless-shell.exe' -or

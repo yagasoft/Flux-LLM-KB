@@ -5,7 +5,7 @@ using Microsoft.Win32.SafeHandles;
 namespace FluxKnowledge.Integrations.Files;
 
 [SupportedOSPlatform("windows")]
-internal sealed class SourceAccessBrokerStorage : IDisposable
+internal sealed partial class SourceAccessBrokerStorage : IDisposable
 {
     private readonly WindowsSourcePathAccess.DirectoryPathLease _root;
     private readonly WindowsSourcePathAccess.DirectoryPathLease _journal;

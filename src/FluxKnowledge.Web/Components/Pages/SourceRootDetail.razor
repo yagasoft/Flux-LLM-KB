@@ -4,6 +4,7 @@
 @using FluxKnowledge.Web.Components.Sources
 @using FluxKnowledge.Web.Components.Status
 @inject SourceRootDetailPageState PageState
+@inject SourceJournalAllowlistHandoff OperatorHandoff
 @inject StatusEventFeed StatusEvents
 
 <PageTitle>Source root | Flux Knowledge</PageTitle>
@@ -17,6 +18,13 @@ else
     <section aria-labelledby="source-root-heading">
         <h1 id="source-root-heading">@PageState.Detail.DisplayName</h1>
         <p class="diagnostic-value">@PageState.Detail.CanonicalPath</p>
+        @if (PageState.Detail.EditableScope is not null && OperatorHandoff.SourceRepairReviewUrl is { } repairUrl)
+        {
+            <form method="post" action="@repairUrl" target="_top" data-enhance="false">
+                <input type="hidden" name="sourceId" value="@PageState.Detail.Id.ToString("N")" />
+                <button type="submit">Manage automatic file access repair</button>
+            </form>
+        }
         <SourceLifecycleControls RootId="PageState.Detail.Id" State="@PageState.Detail.State" DisplayName="@PageState.Detail.DisplayName" CanonicalPath="@PageState.Detail.CanonicalPath" OwnedItemEstimate="@PageState.Detail.DiscoveredCount" DeletionPhase="@PageState.Detail.DeletionPhase" DeletionReason="@PageState.Detail.DeletionReason" DeletionProgress="@PageState.Detail.DeletionProgress" OnCommitted="ReloadAsync" />
         @if (PageState.Detail.EditableScope is { } scope)
         {

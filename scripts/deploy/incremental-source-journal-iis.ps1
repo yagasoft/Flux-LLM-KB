@@ -1,5 +1,63 @@
 # Loaded by the canonical incremental updater. Targets and lifecycle state come
 # from that script; this file has no standalone production action.
+function Get-SourceAccessHelperRefreshEvidence {
+    $before=@(foreach($role in Get-DeploymentSourceJournalPayloads){
+        [ordered]@{Role=$role.Role;Sha256=Get-HybridPayloadFingerprint $role.Root}
+    })
+    $evidence=[ordered]@{
+        DatabaseIdentity=$ExpectedSourceJournalDatabaseIdentity;SchemaSha256=$refreshDatabase.SchemaSha256
+        ConfigurationSha256=$sourceJournalChange.BeforeHash;PredecessorPayloads=$before
+        CandidatePayloads=@($ReviewedSourceJournalPayloads|Sort-Object)
+        TaskDefinitionSha256=$refreshHelperTask.DefinitionSha256;TaskSecuritySha256=$refreshHelperTask.SecuritySha256
+        RepairPolicySha256=(Get-FileHash -LiteralPath (Join-Path $SourceJournalHelperRoot 'policy.json')).Hash
+        JournalPolicySha256=$sourceJournalRelease.RepairMode.ExpectedJournalPolicySha256
+        RootReadPlanSha256=(Get-FileHash -LiteralPath (Join-Path $SourceJournalHelperRoot 'root-read-plan.json')).Hash
+    }
+    $digest=[Convert]::ToHexString([Security.Cryptography.SHA256]::HashData(
+        [Text.Encoding]::UTF8.GetBytes((ConvertTo-Json -InputObject $evidence -Depth 5 -Compress))))
+    [pscustomobject]@{Sha256=$digest;Evidence=$evidence}
+}
+
+function Restore-SourceAccessHelperRefreshBeforeSwap {
+    # No installed payload or policy has been touched. Restore availability only
+    # after proving the exact three predecessors and the original task binding.
+    $refreshHelperTask=Get-SourceJournalHelperTaskObservation -InstallRoot $SourceJournalHelperRoot -TaskName 'FluxKnowledge.SourceAccess'
+    $refreshDatabase=Get-SourceJournalDatabaseState -ConnectionString (Get-DeploymentSqlConnectionString)
+    Assert-SourceJournalSchema $refreshDatabase
+    if(!$refreshHelperTask.Enabled -or !$refreshHelperTask.Running -or $refreshDatabase.Identity -cne $ExpectedSourceJournalDatabaseIdentity){
+        throw 'source-access-refresh-predecessor-helper-or-database-drift'
+    }
+    $sourceJournalRelease.RepairMode=Get-DeploymentSourceJournalRepairMode -AllowlistOnly
+    $restoredReview=Get-SourceAccessHelperRefreshEvidence
+    if($restoredReview.Sha256 -ine $ExpectedSourceAccessHelperRefreshPlanSha256){throw 'source-access-refresh-predecessor-drift'}
+    Assert-SourceAccessConfigurationChange $sourceJournalChange -Original
+    $task=Get-RepositoryRecoveryTaskObservation
+    if($task.IdentityHash -cne $refreshCompanion.IdentityHash -or $task.LauncherSha256 -cne $refreshCompanion.LauncherSha256){
+        throw 'source-access-refresh-predecessor-companion-drift'
+    }
+    $hasHold=Test-Path -LiteralPath $ValidationHoldPath
+    if($hasHold){Assert-HybridDeploymentHoldOwner -Path $ValidationHoldPath -ReleaseId $releaseId}
+    $pool=(Get-WebAppPoolState -Name $SiteName).Value
+    $ReviewedSourceJournalPayloads=@($refreshReview.Evidence.PredecessorPayloads|ForEach-Object {$_.Role+'='+$_.Sha256})
+    if($pool -ceq 'Stopped'){
+        if(!$hasHold){throw 'source-access-refresh-stopped-predecessor-hold-unproved'}
+        Assert-StoppedPoolRecoveryBaseline
+        Start-IndexCompatibleWebAppPool -Name $SiteName -RequiredHoldReleaseId $releaseId
+        Wait-IisAppPoolState -Name $SiteName -ExpectedState Started -TimeoutSeconds $ReadinessTimeoutSeconds
+    } elseif($pool -cne 'Started'){throw 'source-access-refresh-predecessor-pool-state-unproved'}
+    Invoke-RequiredLoopbackProbes -Origin $loopbackOrigin.Origin -TimeoutSeconds $ReadinessTimeoutSeconds
+    $release=@{}
+    if($hasHold){
+        $receipt=Remove-DeploymentValidationHold -Path $ValidationHoldPath -ReleaseId $releaseId -RequireOwned
+        $deploymentValidation.HoldCreated=$false
+        $release=@{ReleasedHold=$receipt;ExpectedReleaseId=$releaseId}
+    }
+    if($refreshCompanion.Enabled -and !$task.Enabled){
+        Enable-IndexCompatibleOutlookTask -TaskName $InteractiveHostTaskName @release -ErrorAction Stop | Out-Null
+    }
+    $deploymentValidation.RefreshPredecessorRestored=$true
+}
+
 function Get-DeploymentSourceJournalReviewedHash([string]$Role) {
     $values=@($ReviewedSourceJournalPayloads|Where-Object {$_ -cmatch ('^'+$Role+'=')})
     if($ReviewedSourceJournalPayloads.Count -ne 3 -or $values.Count -ne 1){throw 'journal-release-complete-reviewed-set-required'}

@@ -84,6 +84,9 @@ param(
     [ValidatePattern('^(Web|OutlookHost|Cli)=[A-Fa-f0-9]{64}$')]
     [string[]]$ReviewedSourceJournalPayloads = @(),
     [string]$ExpectedSourceJournalDatabaseIdentity = '',
+    [switch]$RefreshSourceAccessHelper,
+    [string]$ExpectedSourceAccessHelperBeforeSha256='',
+    [string]$ExpectedSourceAccessHelperRefreshPlanSha256='',
     [switch]$ApplyIncrementalSourceScanning,
     [switch]$DisableIncrementalSourceScanning,
     [string]$SourceJournalOptionsPath = '',
@@ -2658,6 +2661,17 @@ if(($OfflineProjectionMaintenance -or $ResumeOfflineProjectionMaintenance) -and 
 if($ResumeOfflineProjectionMaintenance -and !$Apply){throw 'index-update-offline-resume-requires-apply'}
 $sourceAccessRequested = ![string]::IsNullOrEmpty($SourceAccessPipeName) -or $DisableSourceAccessRecovery
 $sourceJournalMode = $ApplyIncrementalSourceScanning -or $DisableIncrementalSourceScanning
+if($RefreshSourceAccessHelper -or $ExpectedSourceAccessHelperBeforeSha256 -or $ExpectedSourceAccessHelperRefreshPlanSha256){
+    $allowed=@('SourceRoot','SiteName','SiteUrl','DeployRoot','ReadinessTimeoutSeconds','PlanOnly','Apply',
+        'RefreshSourceAccessHelper','ExpectedSourceAccessHelperBeforeSha256','ExpectedSourceAccessHelperRefreshPlanSha256','ExpectedSourceJournalDatabaseIdentity',
+        'ReviewedSourceJournalPayloads','ReviewedLegacyIndexPayloads','InspectIndexAdmissionPayloads')
+    if(!$RefreshSourceAccessHelper -or $PlanOnly -eq $Apply -or
+        $ExpectedSourceAccessHelperBeforeSha256 -cnotmatch '^[a-fA-F0-9]{64}$' -or !$ExpectedSourceJournalDatabaseIdentity -or
+        $ReviewedSourceJournalPayloads.Count -ne 3 -or ($Apply -and $ExpectedSourceAccessHelperRefreshPlanSha256 -cnotmatch '^[A-Fa-f0-9]{64}$') -or
+        @($PSBoundParameters.Keys|Where-Object {$_ -cnotin $allowed}).Count){
+        throw 'source-access-helper-refresh-requires-exclusive-hash-bound-mode'
+    }
+}
 Assert-VectorPublicationMetadataUpdateOptions $PSBoundParameters
 Assert-SourceDeletionPendingQueueUpdateOptions $PSBoundParameters
 Assert-PassageWindowEligibilityUpdateOptions $PSBoundParameters
@@ -2845,7 +2859,31 @@ Import-Module (Join-Path $PSScriptRoot 'incremental-source-journal-release.psm1'
 Import-Module (Join-Path $PSScriptRoot 'incremental-source-journal-helper.psm1') -Force -ErrorAction Stop
 Import-Module (Join-Path $PSScriptRoot 'incremental-source-journal-helper-task.psm1') -Force -ErrorAction Stop
 Import-Module (Join-Path $PSScriptRoot 'incremental-projection-operator.psm1') -Force -ErrorAction Stop
+Import-Module (Join-Path $PSScriptRoot 'incremental-hybrid-passage-rebuild.psm1') -Force -ErrorAction Stop
 . (Join-Path $PSScriptRoot 'incremental-source-journal-iis.ps1')
+if($RefreshSourceAccessHelper){
+    $path=Join-Path $CanonicalLiveRoot 'Config/appsettings.Production.json'
+    $bytes=Get-SourceAccessConfigurationBytes $path
+    $hash=[Convert]::ToHexString([Security.Cryptography.SHA256]::HashData($bytes))
+    $sourceJournalChange=[pscustomobject]@{Path=$path;Before=$bytes;After=$bytes;BeforeHash=$hash;AfterHash=$hash;Attempted=$false}
+    $sourceJournalRelease.RepairMode=Get-DeploymentSourceJournalRepairMode -AllowlistOnly
+    if(!$sourceJournalRelease.RepairMode.AppEnabled -or !$sourceJournalRelease.RepairMode.HelperEnabled){
+        throw 'source-access-helper-refresh-requires-existing-enabled-repair'
+    }
+    $refreshDatabase=Get-SourceJournalDatabaseState -ConnectionString (Get-DeploymentSqlConnectionString)
+    Assert-SourceJournalSchema $refreshDatabase
+    if($refreshDatabase.Identity -cne $ExpectedSourceJournalDatabaseIdentity -or
+        (Get-HybridPayloadFingerprint (Join-Path $SourceJournalHelperRoot 'payload')) -ine $ExpectedSourceAccessHelperBeforeSha256){
+        throw 'source-access-helper-refresh-predecessor-unreviewed'
+    }
+    foreach($role in @('Web','Cli','OutlookHost')){[void](Get-DeploymentSourceJournalReviewedHash $role)}
+    $refreshHelperTask=Get-SourceJournalHelperTaskObservation -InstallRoot $SourceJournalHelperRoot -TaskName 'FluxKnowledge.SourceAccess'
+    if(!$refreshHelperTask.Enabled -or !$refreshHelperTask.Running){throw 'source-access-helper-refresh-requires-running-predecessor'}
+    $refreshReview=Get-SourceAccessHelperRefreshEvidence
+    if($ExpectedSourceAccessHelperRefreshPlanSha256 -and $refreshReview.Sha256 -ine $ExpectedSourceAccessHelperRefreshPlanSha256){
+        throw 'source-access-helper-refresh-plan-drift'
+    }
+}
 if ($sourceJournalMode) {
     $sourceJournalChange=New-SourceJournalConfigurationChange -Path (Join-Path $CanonicalLiveRoot 'Config/appsettings.Production.json') `
         -OptionsPath $SourceJournalOptionsPath -ExpectedOptionsSha256 $ExpectedSourceJournalOptionsSha256 -Disable:$DisableIncrementalSourceScanning -AllowlistOnly:$SourceJournalAllowlistOnly
@@ -2859,7 +2897,6 @@ Import-Module (Join-Path $PSScriptRoot 'incremental-segmented-index-update.psm1'
 . (Join-Path $PSScriptRoot 'incremental-stopped-release-recovery.ps1')
 $stoppedRecoveryBinding=$null
 $offlineCodeState = $null
-Import-Module (Join-Path $PSScriptRoot 'incremental-hybrid-passage-rebuild.psm1') -Force -ErrorAction Stop
 Import-Module (Join-Path $PSScriptRoot 'incremental-repository-recovery-migration.psm1') -Force -ErrorAction Stop
 Import-Module (Join-Path $PSScriptRoot 'incremental-repository-recovery-release.psm1') -Force -ErrorAction Stop
 if ($SourceJournalWebBootstrapPacket -or $ExpectedSourceJournalWebBootstrapPacketSha256 -or $ResumeSourceJournalWebBootstrap) {
@@ -3276,6 +3313,8 @@ if ($PlanOnly) {
         source_deletion_pending_queue = $pendingQueuePlan
         clean_slate = $false
         preserved = @("Config", "Data", "Runtime", "Recovery", "CodexPlugin")
+        source_access_helper_refresh = if($RefreshSourceAccessHelper){@{NoMigrations=$true;Task=$refreshHelperTask;
+            PlanSha256=$refreshReview.Sha256;ReviewedBindings=$refreshReview.Evidence;RepairPolicyPreserved=$true;JournalPolicyPreserved=$true}}else{$null}
         recover_stopped_pool = [bool]$RecoverStoppedPool
         stopped_release_recovery = if ($stoppedRecoveryBinding) {
             @{ binding=$StoppedRecoveryBindingPath; sha256=$ExpectedStoppedRecoveryBindingSha256;
@@ -3420,6 +3459,8 @@ $interactiveHostPreviousRoot = $null
 $interactiveHostRollbackVerified = $true
 $holdReleaseAttempted = $false
 $holdReleased = $false
+$issuedHelperRecovery=$false
+$refreshPreparationStarted=$false
 $hostingChange = @{ Original=$null; Desired=@{ StartMode='AlwaysRunning'; IdleTimeout='00:00:00'; PreloadEnabled=$true }
     Attempted=$false; RollbackVerified=$true; PreloadReceipt=$null }
 try {
@@ -3435,7 +3476,23 @@ try {
     if ($ApplyAncestorReconciliationMigration -and (Test-AncestorReconciliationRequiresOperatorRefresh)) {
         throw 'ancestor-reconciliation-installed-allowlist-operator-requires-supported-refresh'
     }
-    if ($stoppedRecoveryBinding) { Assert-IncrementalStoppedRecoveryBinding $stoppedRecoveryBinding }
+    if($RefreshSourceAccessHelper){
+        Assert-SourceAccessConfigurationChange $sourceJournalChange -Original
+        $sourceJournalRelease.RepairMode=Get-DeploymentSourceJournalRepairMode -AllowlistOnly
+        $refreshHelperTask=Get-SourceJournalHelperTaskObservation -InstallRoot $SourceJournalHelperRoot -TaskName 'FluxKnowledge.SourceAccess'
+        $refreshDatabase=Get-SourceJournalDatabaseState -ConnectionString (Get-DeploymentSqlConnectionString)
+        Assert-SourceJournalSchema $refreshDatabase
+        if(!$refreshHelperTask.Enabled -or !$refreshHelperTask.Running -or $refreshDatabase.Identity -cne $ExpectedSourceJournalDatabaseIdentity -or
+            (Get-SourceAccessHelperRefreshEvidence).Sha256 -ine $ExpectedSourceAccessHelperRefreshPlanSha256){
+            throw 'source-access-helper-refresh-plan-drift'
+        }
+    }
+    if ($stoppedRecoveryBinding) {
+        Assert-IncrementalStoppedRecoveryBinding $stoppedRecoveryBinding
+        if($stoppedRecoveryBinding.SourceAccessHelperRefresh -and $commit -cne $stoppedRecoveryBinding.PriorCommit){
+            throw 'helper-refresh-recovery-source-commit-changed'
+        }
+    }
     if($ApplyVectorPublicationMetadataMigration -and $stoppedRecoveryBinding -and $commit -cne $stoppedRecoveryBinding.PriorCommit){throw 'vector-metadata-resume-source-commit-changed'}
     if(!$RecoverStoppedPool -and !$applyAnyMigration){
         Assert-HybridGpuDrainPreflight -ConnectionString (Get-DeploymentSqlConnectionString)
@@ -3574,6 +3631,43 @@ try {
             ConfigurationAfterSha256=$sourceJournalChange.AfterHash;OptionsSha256=$sourceJournalChange.OptionsSha256;
             SqlSha256=$(if($ApplyIncrementalSourceScanning){(Get-SourceJournalMigrationContract).UpSha256}else{''});
             Disable=[bool]$DisableIncrementalSourceScanning;AllowlistOnly=[bool]$SourceJournalAllowlistOnly
+        }
+    }
+    if($RefreshSourceAccessHelper){
+        $sourceJournalHelperCandidateRoot=Join-Path $releaseRoot 'candidate-source-helper'
+        $security=[Security.AccessControl.RawSecurityDescriptor]::new('O:BAG:BAD:P(A;OICI;FA;;;SY)(A;OICI;FA;;;BA)')
+        $descriptor=[byte[]]::new($security.BinaryLength);$security.GetBinaryForm($descriptor,0)
+        $privateRoot=[FluxSourceAccessInstallFile]::CreatePrivateDirectory($sourceJournalHelperCandidateRoot,$descriptor)
+        try {
+            & dotnet publish (Join-Path $SourceRoot 'src/FluxKnowledge.Cli/FluxKnowledge.Cli.csproj') -c Release --no-restore --nologo -o $sourceJournalHelperCandidateRoot
+            if($LASTEXITCODE -ne 0){throw 'source-access-helper-refresh-publish-failed'}
+        } finally { $privateRoot.Dispose() }
+        $refreshCandidates=@{Web=$candidateRoot;Cli=$sourceJournalHelperCandidateRoot;OutlookHost=$interactiveHostCandidateRoot}
+        $refreshOriginal=@{}
+        foreach($payload in Get-DeploymentSourceJournalPayloads){
+            if((Get-HybridPayloadFingerprint $refreshCandidates[$payload.Role]) -cne (Get-DeploymentSourceJournalReviewedHash $payload.Role)){
+                throw 'source-access-helper-refresh-candidate-unreviewed'
+            }
+            $refreshOriginal[$payload.Role]=Get-HybridPayloadFingerprint $payload.Root
+        }
+        if($refreshOriginal.Cli -ine $ExpectedSourceAccessHelperBeforeSha256){throw 'source-access-helper-refresh-predecessor-changed'}
+        Assert-SourceAccessConfigurationChange $sourceJournalChange -Original
+        $journal=(ConvertFrom-UniqueConfigurationJson $sourceJournalChange.Before).SourceJournal
+        $sourceJournalHelperState=New-SourceJournalHelperUpdate -InstallRoot $SourceJournalHelperRoot -TaskName 'FluxKnowledge.SourceAccess' `
+            -ReleaseId $releaseId -CandidatePath $sourceJournalHelperCandidateRoot `
+            -ExpectedCandidateSha256 (Get-SourceJournalHelperPayloadManifest $sourceJournalHelperCandidateRoot).Sha256 `
+            -TaskObservation $refreshHelperTask -PipeName $journal.PipeName -ApprovedVolumes $journal.ApprovedVolumes `
+            -PreserveJournalPolicy -ExpectedJournalPolicySha256 $sourceJournalRelease.RepairMode.ExpectedJournalPolicySha256
+        $sourceJournalNativePorts=New-SourceJournalHelperNativeTaskPorts -State $sourceJournalHelperState `
+            -AssertApplicationStopped {Assert-DeploymentSourceJournalReleaseStopped} `
+            -Probe {param($candidate) Test-DeploymentSourceJournalHelperNativeState $candidate}
+        $refreshCompanion=Get-RepositoryRecoveryTaskObservation
+        Write-SegmentedUpdateJson (Join-Path $releaseRoot 'source-access-helper-refresh-binding.json') @{
+            Version=1;ReleaseId=$releaseId;Commit=$commit;DatabaseIdentity=$ExpectedSourceJournalDatabaseIdentity
+            ConfigurationSha256=$sourceJournalChange.BeforeHash;PredecessorPayloads=$refreshOriginal
+            CandidatePayloads=@($ReviewedSourceJournalPayloads);HelperCheckpointPath=$sourceJournalHelperState.CheckpointPath
+            Companion=$refreshCompanion;HelperTask=$refreshHelperTask;RepairPolicySha256=$sourceJournalHelperState.RepairPolicySha256
+            JournalPolicySha256=$sourceJournalHelperState.Policy.BeforeHash;RootReadPlanSha256=$sourceJournalHelperState.RootReadPlanSha256
         }
     }
     if (-not (Test-Path -LiteralPath $InteractiveHostRoot -PathType Container)) {
@@ -3805,8 +3899,33 @@ try {
         $vectorMetadataPreparationStarted=$true
         Invoke-VectorPublicationMetadataPreparation $vectorMetadataMigrationState $vectorMetadataReleaseBinding $migrationPlan.Up.Path
     }
+    if($RefreshSourceAccessHelper){
+        Write-SegmentedUpdateJson (Join-Path $releaseRoot 'manifest.json') @{
+            commit=$commit;application_root=$CanonicalDeployRoot;migrations=$false;clean_slate=$false
+            source_access_helper_refresh=@{ReleaseId=$releaseId;BindingSha256=(Get-FileHash -LiteralPath (Join-Path $releaseRoot 'source-access-helper-refresh-binding.json')).Hash}
+        }
+        Write-SegmentedUpdateJson (Join-Path $releaseRoot 'source-access-helper-refresh-intent.json') @{
+            ReleaseId=$releaseId;BindingSha256=(Get-FileHash -LiteralPath (Join-Path $releaseRoot 'source-access-helper-refresh-binding.json')).Hash
+            State='PreparingOwnedHold'
+        }
+        $refreshTask=Get-RepositoryRecoveryTaskObservation
+        if($refreshTask.IdentityHash -cne $refreshCompanion.IdentityHash -or $refreshTask.LauncherSha256 -cne $refreshCompanion.LauncherSha256 -or
+           $refreshTask.Enabled -cne $refreshCompanion.Enabled){throw 'source-access-helper-refresh-companion-changed'}
+        if(Test-Path -LiteralPath $ValidationHoldPath){throw 'source-access-refresh-refuses-existing-hold'}
+        $interactiveHostTaskWasEnabled=$refreshCompanion.Enabled
+        $refreshPreparationStarted=$true
+        Stop-HybridIisAfterGpuDrain -OnStopRequested {
+            [void](New-DeploymentValidationHold -Path $ValidationHoldPath -ReleaseId $releaseId)
+            $deploymentValidation.HoldCreated=$true
+        }
+        Assert-HybridDeploymentHoldOwner -Path $ValidationHoldPath -ReleaseId $releaseId
+        if($refreshTask.Enabled){Disable-ScheduledTask -TaskName $InteractiveHostTaskName -ErrorAction Stop|Out-Null}
+        Wait-InteractiveHostStopped -TaskName $InteractiveHostTaskName -TimeoutSeconds $ReadinessTimeoutSeconds
+        Assert-DeploymentSourceJournalReleaseStopped
+        $deploymentValidation.Baseline=Get-RetainedPipelineStateBaseline
+    }
     $interactiveHostTask = Get-ScheduledTask -TaskName $InteractiveHostTaskName -ErrorAction Stop
-    $interactiveHostTaskWasEnabled = if($ApplyTypedSchemaMigration){$windowEligibilityReleaseBinding.EnableCompanionAfterValidation} elseif($EnsureSourceDeletionPendingQueueIndex){$pendingQueueIndexBinding.EnableCompanionAfterValidation} elseif($ApplyVectorPublicationMetadataMigration){$vectorMetadataReleaseBinding.EnableCompanionAfterValidation} elseif ($stoppedRecoveryBinding) { $stoppedRecoveryBinding.EnableCompanionAfterValidation } elseif ($null -ne $sourceDeletionMaintenance) { [bool]$sourceDeletionMaintenance.Original.Task.Enabled } else { [bool]$interactiveHostTask.Settings.Enabled }
+    $interactiveHostTaskWasEnabled = if($RefreshSourceAccessHelper){$refreshCompanion.Enabled}elseif($ApplyTypedSchemaMigration){$windowEligibilityReleaseBinding.EnableCompanionAfterValidation} elseif($EnsureSourceDeletionPendingQueueIndex){$pendingQueueIndexBinding.EnableCompanionAfterValidation} elseif($ApplyVectorPublicationMetadataMigration){$vectorMetadataReleaseBinding.EnableCompanionAfterValidation} elseif ($stoppedRecoveryBinding) { $stoppedRecoveryBinding.EnableCompanionAfterValidation } elseif ($null -ne $sourceDeletionMaintenance) { [bool]$sourceDeletionMaintenance.Original.Task.Enabled } else { [bool]$interactiveHostTask.Settings.Enabled }
     if ($interactiveHostTask.Settings.Enabled) {
         Disable-ScheduledTask -TaskName $InteractiveHostTaskName -ErrorAction Stop | Out-Null
     }
@@ -3842,7 +3961,8 @@ try {
             @{Target=$vectorMetadataMigrationState.Target;SqlSha256=$vectorMetadataMigrationState.SqlSha256;ReleaseBindingSha256=$vectorBindingSha256}
         }else{$null}
     } | ConvertTo-Json
-    if(!$ApplyVectorPublicationMetadataMigration -and !$EnsureSourceDeletionPendingQueueIndex -and !$ApplyTypedSchemaMigration){[IO.File]::WriteAllText((Join-Path $releaseRoot "manifest.json"), $manifest, [Text.UTF8Encoding]::new($false))}
+    if(!$RefreshSourceAccessHelper -and !($stoppedRecoveryBinding -and $stoppedRecoveryBinding.SourceAccessHelperRefreshReference) -and
+        !$ApplyVectorPublicationMetadataMigration -and !$EnsureSourceDeletionPendingQueueIndex -and !$ApplyTypedSchemaMigration){[IO.File]::WriteAllText((Join-Path $releaseRoot "manifest.json"), $manifest, [Text.UTF8Encoding]::new($false))}
 
     $swap = Invoke-IncrementalApplicationPayloadSwap `
         -ApplicationRoot $CanonicalDeployRoot `
@@ -3877,6 +3997,11 @@ try {
                 Assert-DeploymentSourceJournalReleasePayloadSet $true
                 Set-MediaTranscriptionConfigurationChange $mediaConfigurationChange $windowEligibilityReleaseBinding.MediaConfigurationBackup
             }
+            if($RefreshSourceAccessHelper){
+                Assert-DeploymentSourceJournalReleaseStopped
+                Invoke-SourceJournalHelperUpdate -State $sourceJournalHelperState -Ports $sourceJournalNativePorts
+                Assert-DeploymentSourceJournalReleasePayloadSet $true
+            }
             if ($sourceAccessChange) { Set-SourceAccessConfigurationChange -Change $sourceAccessChange }
             if ($dashboardSnapshotChange) { Set-DashboardSnapshotConfigurationChange $dashboardSnapshotChange }
             if ($EnableUnattendedDiscovery) {
@@ -3899,7 +4024,9 @@ try {
             }
             $deploymentValidation.ApplicationStopFailed=$false
             try {
-                if ($sourceJournalMode) {$sourceJournalRelease.StopProof=Stop-HybridIisAfterGpuDrain -PassThru}
+                if($RefreshSourceAccessHelper -and (Get-WebAppPoolState -Name $SiteName).Value -ceq 'Stopped'){
+                    Assert-DeploymentSourceJournalReleaseStopped
+                } elseif ($sourceJournalMode) {$sourceJournalRelease.StopProof=Stop-HybridIisAfterGpuDrain -PassThru}
                 else {Stop-HybridIisAfterGpuDrain}
             } catch {$deploymentValidation.ApplicationStopFailed=$true;throw}
             [void](New-DeploymentValidationHold -Path $ValidationHoldPath -ReleaseId $releaseId)
@@ -3974,8 +4101,18 @@ try {
                 if ((Get-HybridPayloadFingerprint $CanonicalDeployRoot) -cne $sourceDeletionCleanupState.Binding.WebPayloadSha256 -or
                     (Get-HybridPayloadFingerprint $InteractiveHostRoot) -cne $sourceDeletionCleanupState.Binding.CompanionPayloadSha256) { throw 'Source deletion candidate payload differs from its durable binding.' }
             }
+            if($RefreshSourceAccessHelper){
+                if(!$sourceJournalHelperState.Completed){throw 'source-access-helper-refresh-helper-not-confirmed'}
+                Assert-DeploymentSourceJournalReleasePayloadSet $true
+                Assert-SourceJournalHelperBindings $sourceJournalHelperState $sourceJournalNativePorts
+                Assert-HybridDeploymentHoldOwner -Path $ValidationHoldPath -ReleaseId $releaseId
+            }
+            if($stoppedRecoveryBinding -and $stoppedRecoveryBinding.SourceAccessHelperRefresh){
+                Assert-SourceAccessHelperRefreshRecoveryInstalled $stoppedRecoveryBinding.SourceAccessHelperRefresh
+            }
             $startAttemptUtc = [DateTime]::UtcNow
-            Start-IndexCompatibleWebAppPool -Name $SiteName -RequiredHoldReleaseId $(if ($ApplyTypedSchemaMigration) { $releaseId })
+            Start-IndexCompatibleWebAppPool -Name $SiteName -RequiredHoldReleaseId $(if ($ApplyTypedSchemaMigration -or $RefreshSourceAccessHelper -or
+                ($stoppedRecoveryBinding -and $stoppedRecoveryBinding.SourceAccessHelperRefresh)) { $releaseId })
             Wait-IisAppPoolState -Name $SiteName -ExpectedState "Started" -TimeoutSeconds $ReadinessTimeoutSeconds
             if ($hostingChange.Attempted -and !$hostingChange.RollbackVerified) {
                 $hostingChange.PreloadReceipt = Wait-IncrementalIisPreloadStartup -AfterUtc $startAttemptUtc `
@@ -4001,7 +4138,10 @@ try {
             Assert-RetainedPipelineStateUnchanged `
                 -Baseline $deploymentValidation.Baseline `
                 -Current (Get-RetainedPipelineStateBaseline)
-            if ($ApplyIncrementalSourceScanning) {Confirm-DeploymentSourceJournalHelperTransport}
+            if ($ApplyIncrementalSourceScanning -or $RefreshSourceAccessHelper) {Confirm-DeploymentSourceJournalHelperTransport}
+            if($stoppedRecoveryBinding -and $stoppedRecoveryBinding.SourceAccessHelperRefresh){
+                Confirm-SourceAccessHelperRefreshRecoveryTransport $stoppedRecoveryBinding.SourceAccessHelperRefresh
+            }
             if ($sourceJournalMode -and !$sourceJournalRelease.RetirementConfirmed) {throw 'journal-release-policy-transition-unconfirmed'}
             if ($ApplyResumableSourceDeletionCleanupMigration) {
                 Assert-SourceDeletionCleanupReleaseBinding -State $sourceDeletionCleanupState
@@ -4089,11 +4229,26 @@ try {
             $offlineCodeState.ReleaseIntentUtc=[DateTime]::UtcNow.ToString('O')
             Write-SegmentedUpdateJson $offlineCodeState.StatePath $offlineCodeState
         }
-        if ($ApplyIncrementalSourceScanning -and !$sourceJournalRelease.TransportConfirmed) {throw 'journal-release-held-transport-unconfirmed'}
+        if (($ApplyIncrementalSourceScanning -or $RefreshSourceAccessHelper) -and !$sourceJournalRelease.TransportConfirmed) {throw 'journal-release-held-transport-unconfirmed'}
+        if($RefreshSourceAccessHelper){
+            Assert-DeploymentSourceJournalReleasePayloadSet $true
+            $currentDatabase=Get-SourceJournalDatabaseState -ConnectionString (Get-DeploymentSqlConnectionString)
+            Assert-SourceJournalSchema $currentDatabase
+            if($currentDatabase.Identity -cne $ExpectedSourceJournalDatabaseIdentity -or
+               ($currentDatabase.History -join '|') -cne ($refreshDatabase.History -join '|') -or
+               $currentDatabase.SchemaSha256 -cne $refreshDatabase.SchemaSha256){throw 'source-access-helper-refresh-database-drift'}
+            Assert-SourceAccessConfigurationChange $sourceJournalChange -Original
+            Assert-SourceJournalHelperBindings $sourceJournalHelperState $sourceJournalNativePorts
+        }
         if($ApplyTypedSchemaMigration){Assert-PassageWindowEligibilityActivation}
         # From this attempt onwards workers may have observed the hold disappear.
         $holdReleaseAttempted = $true
-        $releasedTypedHold=Remove-DeploymentValidationHold -Path $ValidationHoldPath -ReleaseId $releaseId -RequireOwned:$ApplyTypedSchemaMigration
+        $issuedHelperRecovery=$stoppedRecoveryBinding -and $stoppedRecoveryBinding.SourceAccessHelperRefresh
+        if($issuedHelperRecovery){
+            if(!(Test-Path -LiteralPath (Join-Path $releaseRoot 'source-access-helper-refresh-recovery-transport.json'))){throw 'helper-refresh-recovery-transport-required'}
+            Assert-SourceAccessHelperRefreshRecoveryInstalled $stoppedRecoveryBinding.SourceAccessHelperRefresh
+        }
+        $releasedTypedHold=Remove-DeploymentValidationHold -Path $ValidationHoldPath -ReleaseId $releaseId -RequireOwned:($ApplyTypedSchemaMigration -or $RefreshSourceAccessHelper -or $issuedHelperRecovery)
     }
     $deploymentValidation.HoldCreated = $false
     # Commit boundary: workers may now write. No automatic schema or mixed-payload rollback after this point.
@@ -4106,7 +4261,7 @@ try {
     }
     if ($interactiveHostTaskWasEnabled) {
         $companionRelease=@{}
-        if ($ApplyTypedSchemaMigration) { $companionRelease=@{ReleasedHold=$releasedTypedHold;ExpectedReleaseId=$releaseId} }
+        if ($ApplyTypedSchemaMigration -or $RefreshSourceAccessHelper -or $issuedHelperRecovery) { $companionRelease=@{ReleasedHold=$releasedTypedHold;ExpectedReleaseId=$releaseId} }
         Enable-IndexCompatibleOutlookTask -TaskName $InteractiveHostTaskName @companionRelease -ErrorAction Stop | Out-Null
     }
 
@@ -4151,6 +4306,11 @@ try {
 }
 catch {
     $deploymentFailure = $_
+    if($RefreshSourceAccessHelper -and $refreshPreparationStarted -and !$interactiveHostMutationStarted){
+        try {Restore-SourceAccessHelperRefreshBeforeSwap}
+        catch {throw ('source-access-refresh-predecessor-recovery-unconfirmed: '+$deploymentFailure.Exception.Message+'; '+$_.Exception.Message)}
+        throw $deploymentFailure
+    }
     if ($holdReleaseAttempted -or $holdReleased -or ($ApplyResumableSourceDeletionCleanupMigration -and $null -ne $sourceDeletionCleanupState -and $sourceDeletionCleanupState.ForwardRecoveryRequired)) {
         throw "Deployment hold release was attempted; outcome requires reconciliation after a failure. Current matching payloads and schema are retained; do not replay migration or predecessor rollback. Inspect recovery release $releaseRoot. Failure: $($_.Exception.Message)"
     }

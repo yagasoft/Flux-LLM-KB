@@ -95,6 +95,41 @@ public static class WindowsSourceAccessAdministration
         }
     }
 
+    public static byte[] ConfigureFileInheritance(string brokerRoot, byte[] request)
+    {
+        using var identity = WindowsIdentity.GetCurrent();
+        if (!identity.IsSystem) throw new UnauthorizedAccessException("SourceInheritanceOperatorRequiresLocalSystem");
+        var change = Parse<FileInheritanceRequest>(request);
+        using var storage = new SourceAccessBrokerStorage(brokerRoot);
+        var policy = storage.ReadPolicy();
+        var available = storage.ReadJournalPolicy()?.RepairEnabled ?? true;
+        if (change.Enabled is null)
+        {
+            using var current = storage.OpenFileInheritanceGrant(change.SourceId);
+            var installed = change.Path is not null && policy.Roots.Any(root => root.RepairFileInheritance &&
+                string.Equals(change.Path, root.Path, StringComparison.OrdinalIgnoreCase));
+            return JsonSerializer.SerializeToUtf8Bytes(new { Available = available, Grant = current?.Grant, ManagedByInstallation = installed });
+        }
+        if (change.Enabled.Value && !available)
+            throw new UnauthorizedAccessException("SourceInheritanceRepairPipeDisabled");
+        if (change.ExpectedGeneration is not { } expected || change.OperatorSid is null ||
+            new SecurityIdentifier(change.OperatorSid).Value != change.OperatorSid || change.ProtectedRoots is not { Length: <= 32 })
+            throw new InvalidDataException("SourceInheritanceChangeInvalid");
+        var updated = storage.ChangeFileInheritanceGrant(change.SourceId, expected, change.Enabled.Value,
+            change.Path, change.Fingerprint, change.ProtectedRoots, change.OperatorSid);
+        return JsonSerializer.SerializeToUtf8Bytes(new { Available = available, Grant = updated });
+    }
+
+    private sealed record FileInheritanceRequest(Guid SourceId)
+    {
+        public Guid? ExpectedGeneration { get; init; }
+        public bool? Enabled { get; init; }
+        public string? Path { get; init; }
+        public string? Fingerprint { get; init; }
+        public string[]? ProtectedRoots { get; init; }
+        public string? OperatorSid { get; init; }
+    }
+
     public static async Task ServeAsync(string brokerRoot, CancellationToken cancellationToken)
     {
         using var identity = WindowsIdentity.GetCurrent();

@@ -43,6 +43,225 @@ public sealed class SourceAccessBrokerTests
         Assert.Empty(Directory.EnumerateFiles(fixture.Journal));
     }
 
+    [Fact]
+    public void Opted_in_protected_file_inherits_parent_aces_and_retries_the_same_guarded_read()
+    {
+        using var fixture = new Fixture();
+        var path = Path.Combine(fixture.Source, "copied.txt");
+        var original = Path.Combine(fixture.Outside, "original.txt");
+        File.WriteAllText(original, "Private source fixture");
+        File.Copy(original, path);
+        Fixture.ProtectFile(path);
+        var acl = new FileInfo(path).GetAccessControl();
+        acl.AddAccessRule(new(new SecurityIdentifier("S-1-5-21-1-2-3-4321"), FileSystemRights.ReadData, AccessControlType.Deny));
+        new FileInfo(path).SetAccessControl(acl);
+        using var token = RestrictedToken();
+        using var indexer = new WindowsIdentity(token.DangerousGetHandle());
+        var parent = new DirectoryInfo(fixture.Source).GetAccessControl();
+        parent.AddAccessRule(new(indexer.User!, FileSystemRights.ReadAndExecute,
+            InheritanceFlags.ObjectInherit, PropagationFlags.None, AccessControlType.Allow));
+        new DirectoryInfo(fixture.Source).SetAccessControl(parent);
+        parent.AddAccessRule(new(new SecurityIdentifier("S-1-3-0"), FileSystemRights.ReadAndExecute,
+            InheritanceFlags.ObjectInherit, PropagationFlags.InheritOnly, AccessControlType.Allow));
+        parent.AddAccessRule(new(new SecurityIdentifier("S-1-5-21-1-2-3-4322"), FileSystemRights.ReadData,
+            InheritanceFlags.ObjectInherit, PropagationFlags.InheritOnly, AccessControlType.Allow));
+        new DirectoryInfo(fixture.Source).SetAccessControl(parent);
+        var before = new RawSecurityDescriptor(fixture.Acl(path), 0);
+        var policy = fixture.Policy();
+        var optedIn = SourceAccessPolicy.Parse(System.Text.Json.JsonSerializer.SerializeToUtf8Bytes(new
+        {
+            policy.Version, policy.PipeName, policy.IndexerSid, policy.ProtectedRoots,
+            Roots = policy.Roots.Select(root => new { root.Path, root.IdentityFingerprint, root.InheritableRead, RepairFileInheritance = true })
+        }));
+        var broker = new WindowsSourceAccessBroker(optedIn, fixture.Journal);
+        WindowsIdentity.RunImpersonated(token, () =>
+        {
+            Assert.Throws<SourceAccessDeniedException>(() => ReadGuarded(fixture.Source, path));
+            Assert.Equal("Private source fixture", SourceAccessRecovery.Run(fixture.Source, fixture.Request("copied.txt").RootIdentityFingerprint,
+                new DelegateRepair(request => WindowsIdentity.RunImpersonated(SafeAccessTokenHandle.InvalidHandle,
+                    () => broker.Repair(request, indexer, default))), () => ReadGuarded(fixture.Source, path)));
+        });
+        var after = new RawSecurityDescriptor(fixture.Acl(path), 0);
+        Assert.False(after.ControlFlags.HasFlag(ControlFlags.DiscretionaryAclProtected));
+        Assert.Equal(before.Owner, after.Owner);
+        Assert.Equal(before.Group, after.Group);
+        Assert.Equal(before.DiscretionaryAcl!.Cast<GenericAce>().Where(x => !x.IsInherited).Select(ConvertAce),
+            after.DiscretionaryAcl!.Cast<GenericAce>().Where(x => !x.IsInherited).Select(ConvertAce));
+        Assert.Contains(after.DiscretionaryAcl!.Cast<CommonAce>(), ace => ace.IsInherited && ace.SecurityIdentifier == indexer.User);
+        var twin = fixture.OldFile("windows-inheritance-control.txt");
+        Fixture.SetNative(twin, before);
+        var start = new System.Diagnostics.ProcessStartInfo(Path.Combine(Environment.SystemDirectory, "icacls.exe"))
+        { UseShellExecute = false, CreateNoWindow = true, RedirectStandardOutput = true };
+        foreach (var arg in new[] { twin, "/inheritancelevel:e" }) start.ArgumentList.Add(arg);
+        using var icacls = System.Diagnostics.Process.Start(start)!;
+        var message = icacls.StandardOutput.ReadToEnd();
+        Assert.True(icacls.WaitForExit(5000) && icacls.ExitCode == 0, message);
+        var windowsAcl = new RawSecurityDescriptor(fixture.Acl(twin), 0);
+        Assert.Equal(windowsAcl.DiscretionaryAcl!.Cast<GenericAce>().Select(ConvertAce),
+            after.DiscretionaryAcl!.Cast<GenericAce>().Select(ConvertAce));
+        var repaired = fixture.Acl(path);
+        Assert.Equal(SourceAccessRepairOutcome.AlreadyReadable, broker.Repair(fixture.Request("copied.txt"), indexer, default));
+        Assert.Equal(repaired, fixture.Acl(path));
+        Assert.Empty(Directory.EnumerateFiles(fixture.Journal));
+    }
+
+    [Fact]
+    public async Task Next_metadata_sweep_repairs_previously_deferred_file_and_reuses_unchanged_observation()
+    {
+        using var fixture = new Fixture();
+        var source = fixture.OldFile("previously-deferred.txt");
+        fixture.GrantParentRead();
+        var relative = Path.GetFileName(source);
+        var root = fixture.ScanRoot();
+        var before = new FileInfo(source);
+        var expectedLength = before.Length;
+        var expectedLastWrite = before.LastWriteTimeUtc.ToFileTimeUtc();
+        using var token = RestrictedToken();
+        using var cancellation = new CancellationTokenSource(TimeSpan.FromSeconds(15));
+        var policy = fixture.Policy(inheritance: true) with { PipeName = "FluxKnowledge.SourceAccess." + Guid.NewGuid().ToString("N") };
+        var owner = WindowsIdentity.GetCurrent().User!;
+        var client = new WindowsSourceAccessRepairClient(policy.PipeName, owner);
+        var observations = new WindowsSourceObservationReader(client);
+        await WindowsIdentity.RunImpersonatedAsync(token, async () =>
+        {
+            var prior = new LocalSourceEnumerator();
+            await foreach (var item in prior.EnumerateAsync(root, cancellation.Token)) Assert.Fail(item.RelativePath);
+            Assert.Contains(prior.LastEvidence, entry => entry.RelativePath == relative);
+            // Read-only observation cannot ask the helper to mutate permissions.
+            Assert.Throws<SourceAccessDeniedException>(() => observations.Open(root, relative));
+        });
+
+        var server = SourceAccessPipeServer.ServeOneAsync(policy, new WindowsSourceAccessBroker(policy, fixture.Journal), owner, cancellation.Token);
+        var observed = new List<string>();
+        await WindowsIdentity.RunImpersonatedAsync(token, async () =>
+        {
+            var enumerator = new LocalSourceEnumerator(sourceAccessRepairClient: client);
+            using var scope = enumerator.UseScope(new(null, async (path, ct) =>
+            {
+                using var lease = await observations.OpenForScanAsync(root, path,
+                    (dispatch, _) => ValueTask.FromResult(dispatch()), ct);
+                Assert.Equal(expectedLength, lease.Observation.ByteLength);
+                Assert.Equal(expectedLastWrite, lease.Observation.LastWriteTicks);
+                observed.Add(path);
+                return false;
+            }) { MetadataEntriesPerSecond = 64 });
+            await foreach (var item in enumerator.EnumerateAsync(root, cancellation.Token)) Assert.Fail(item.RelativePath);
+            Assert.Empty(enumerator.LastEvidence);
+        });
+        await server;
+        Assert.Equal([relative], observed);
+        Assert.Empty(Directory.EnumerateFiles(fixture.Journal));
+    }
+
+    [Theory]
+    [InlineData("missing-fingerprint", SourceAccessRepairOutcome.NotApproved)]
+    [InlineData("unprotected", SourceAccessRepairOutcome.UnsupportedPermissions)]
+    [InlineData("explicit-deny", SourceAccessRepairOutcome.ExplicitDeny)]
+    [InlineData("parent-deny", SourceAccessRepairOutcome.ExplicitDeny)]
+    [InlineData("no-parent-read", SourceAccessRepairOutcome.UnsupportedPermissions)]
+    [InlineData("hard-link", SourceAccessRepairOutcome.OutsideScope)]
+    [InlineData("symbolic-link", SourceAccessRepairOutcome.OutsideScope)]
+    public void Opted_in_inheritance_refuses_and_keeps_acl_unchanged(string failure, SourceAccessRepairOutcome expected)
+    {
+        using var fixture = new Fixture();
+        var path = fixture.OldFile("target.txt");
+        using var token = RestrictedToken();
+        using var indexer = new WindowsIdentity(token.DangerousGetHandle());
+        if (failure != "no-parent-read") fixture.GrantParentRead();
+        var request = fixture.Request("target.txt");
+        switch (failure)
+        {
+            case "no-parent-read":
+                var parentDirectory = new DirectoryInfo(fixture.Source);
+                var parentAcl = new DirectorySecurity();
+                parentAcl.SetAccessRuleProtection(true, false);
+                parentAcl.AddAccessRule(new(new SecurityIdentifier("S-1-5-32-544"), FileSystemRights.FullControl,
+                    InheritanceFlags.ObjectInherit | InheritanceFlags.ContainerInherit, PropagationFlags.None, AccessControlType.Allow));
+                parentAcl.AddAccessRule(new(indexer.User!, FileSystemRights.ReadAndExecute, AccessControlType.Allow));
+                parentDirectory.SetAccessControl(parentAcl);
+                break;
+            case "missing-fingerprint": request = request with { RootIdentityFingerprint = null }; break;
+            case "unprotected":
+                var detached = new RawSecurityDescriptor(fixture.Acl(path), 0);
+                detached.SetFlags(detached.ControlFlags & ~ControlFlags.DiscretionaryAclProtected);
+                Fixture.SetNative(path, detached);
+                Assert.False(new RawSecurityDescriptor(fixture.Acl(path), 0).ControlFlags.HasFlag(ControlFlags.DiscretionaryAclProtected));
+                break;
+            case "explicit-deny":
+                var security = new FileInfo(path).GetAccessControl();
+                security.AddAccessRule(new(indexer.User!, FileSystemRights.ReadData, AccessControlType.Deny));
+                new FileInfo(path).SetAccessControl(security);
+                break;
+            case "parent-deny":
+                var dir = new DirectoryInfo(fixture.Source);
+                var parent = dir.GetAccessControl();
+                parent.AddAccessRule(new(new SecurityIdentifier("S-1-5-32-544"), FileSystemRights.ReadData,
+                    InheritanceFlags.ObjectInherit, PropagationFlags.InheritOnly, AccessControlType.Deny));
+                dir.SetAccessControl(parent);
+                break;
+            case "hard-link":
+                Assert.True(CreateHardLink(Path.Combine(fixture.Outside, "other.txt"), path, IntPtr.Zero));
+                break;
+            case "symbolic-link":
+                File.CreateSymbolicLink(Path.Combine(fixture.Source, "alias.txt"), path);
+                request = fixture.Request("alias.txt");
+                break;
+        }
+
+        var before = fixture.Acl(path);
+        var broker = new WindowsSourceAccessBroker(fixture.Policy(inheritance: true), fixture.Journal);
+        Assert.Equal(expected, broker.Repair(request, indexer, default));
+        Assert.Equal(before, fixture.Acl(path));
+        Assert.False(Directory.Exists(fixture.Journal));
+    }
+
+    [Theory]
+    [InlineData(false)]
+    [InlineData(true)]
+    public void Parent_acl_drift_around_write_fails_closed(bool afterWrite)
+    {
+        using var fixture = new Fixture();
+        var path = fixture.OldFile("target.txt");
+        fixture.GrantParentRead();
+        using var token = RestrictedToken();
+        using var indexer = new WindowsIdentity(token.DangerousGetHandle());
+        var before = fixture.Acl(path);
+        var broker = new WindowsSourceAccessBroker(fixture.Policy(inheritance: true), fixture.Journal, phase =>
+        {
+            if (phase != (afterWrite ? SourceAccessRepairPhase.DescriptorWritten : SourceAccessRepairPhase.IntentPersisted)) return;
+            var descriptor = new RawSecurityDescriptor(fixture.Acl(fixture.Source), 0);
+            descriptor.DiscretionaryAcl!.InsertAce(0, new CommonAce(AceFlags.None, AceQualifier.AccessAllowed, 1,
+                new SecurityIdentifier("S-1-5-21-1-2-3-4321"), false, null));
+            Fixture.SetNative(fixture.Source, descriptor);
+        });
+        var outcome = broker.Repair(fixture.Request("target.txt"), indexer, default);
+        if (afterWrite)
+        {
+            Assert.Equal(SourceAccessRepairOutcome.Unconfirmed, outcome);
+            Assert.Single(Directory.EnumerateFiles(fixture.Journal));
+            Assert.Equal(SourceAccessRepairOutcome.AlreadyReadable, broker.Repair(fixture.Request("target.txt"), indexer, default));
+            Assert.Single(Directory.EnumerateFiles(fixture.Journal));
+        }
+        else
+        {
+            Assert.Equal(SourceAccessRepairOutcome.UnsupportedPermissions, outcome);
+            Assert.Equal(before, fixture.Acl(path));
+            Assert.Empty(Directory.EnumerateFiles(fixture.Journal));
+        }
+    }
+
+    private static string ConvertAce(GenericAce ace)
+    {
+        var bytes = new byte[ace.BinaryLength];
+        ace.GetBinaryForm(bytes, 0);
+        return Convert.ToHexString(bytes);
+    }
+
+    private sealed class DelegateRepair(Func<SourceAccessRepairRequest, SourceAccessRepairOutcome> repair) : ISourceAccessRepairClient
+    {
+        public SourceAccessRepairOutcome TryRepair(SourceAccessRepairRequest request, CancellationToken cancellationToken) => repair(request);
+    }
+
     [Theory]
     [InlineData(false)]
     [InlineData(true)]
@@ -231,23 +450,26 @@ public sealed class SourceAccessBrokerTests
         Assert.Empty(Directory.EnumerateFiles(fixture.Journal));
     }
 
-    [Fact]
-    public async Task Actual_pipe_recovery_reaches_discovery_retention_and_supported_readback()
+    [Theory]
+    [InlineData(false)]
+    [InlineData(true)]
+    public async Task Actual_pipe_recovery_reaches_discovery_retention_and_supported_readback(bool inheritance)
     {
         using var fixture = new Fixture();
-        fixture.OldFile("recovered.txt");
+        var recovered = fixture.OldFile("recovered.txt");
+        if (inheritance) fixture.GrantParentRead();
         using var cancellation = new CancellationTokenSource(TimeSpan.FromSeconds(15));
-        var policy = fixture.Policy() with { PipeName = "FluxKnowledge.SourceAccess." + Guid.NewGuid().ToString("N") };
+        var policy = fixture.Policy(inheritance) with { PipeName = "FluxKnowledge.SourceAccess." + Guid.NewGuid().ToString("N") };
         var owner = WindowsIdentity.GetCurrent().User!;
-        var server = SourceAccessPipeServer.ServeOneAsync(policy, fixture.Broker(), owner, cancellation.Token);
+        var server = SourceAccessPipeServer.ServeOneAsync(policy, new WindowsSourceAccessBroker(policy, fixture.Journal), owner, cancellation.Token);
         var client = new WindowsSourceAccessRepairClient(policy.PipeName, owner);
         using var token = RestrictedToken();
         await WindowsIdentity.RunImpersonatedAsync(token, async () =>
         {
             var enumerator = new LocalSourceEnumerator(sourceAccessRepairClient: client);
             var files = new List<FluxKnowledge.Application.Ports.SourceDiscoveredFile>();
-            await foreach (var file in enumerator.EnumerateAsync(SourceRootConfiguration.Create(
-                fixture.Source, "Access recovery fixture", false, false, 1024), cancellation.Token)) files.Add(file);
+            var root = fixture.ScanRoot();
+            await foreach (var file in enumerator.EnumerateAsync(root, cancellation.Token)) files.Add(file);
             var snapshot = Assert.Single(files);
             Assert.Equal("Private source fixture", snapshot.Classification.Text);
             Assert.Empty(enumerator.LastEvidence);
@@ -259,6 +481,7 @@ public sealed class SourceAccessBrokerTests
             Assert.Equal("Private source fixture", System.Text.Encoding.UTF8.GetString(readback.Bytes));
         });
         await server;
+        Assert.Equal(!inheritance, new RawSecurityDescriptor(fixture.Acl(recovered), 0).ControlFlags.HasFlag(ControlFlags.DiscretionaryAclProtected));
         Assert.Empty(Directory.EnumerateFiles(fixture.Journal));
     }
 
@@ -660,21 +883,36 @@ public sealed class SourceAccessBrokerTests
             Outside = Directory.CreateDirectory(Path.Combine(_root, "outside")).FullName;
             _approved = new(Source, PhysicalFileIdentity.GetDirectory(Source).IdentityFingerprint);
         }
-        public SourceAccessPolicy Policy() => new(1, "FluxKnowledge.SourceAccess.test", WindowsIdentity.GetCurrent().User!.Value,
-            [_approved], [Outside]);
+        public SourceAccessPolicy Policy(bool inheritance = false) => new(1, "FluxKnowledge.SourceAccess.test", WindowsIdentity.GetCurrent().User!.Value,
+            [_approved with { RepairFileInheritance = inheritance }], [Outside]);
+        public void GrantParentRead()
+        {
+            var parent = new DirectoryInfo(Source);
+            var acl = parent.GetAccessControl();
+            acl.AddAccessRule(new(WindowsIdentity.GetCurrent().User!, FileSystemRights.ReadAndExecute,
+                InheritanceFlags.ObjectInherit, PropagationFlags.None, AccessControlType.Allow));
+            parent.SetAccessControl(acl);
+        }
         public WindowsSourceAccessBroker Broker() => new(Policy(), Journal);
+        public SourceRootConfiguration ScanRoot() => SourceRootConfiguration.Restore(SourceRootId.New(), Source,
+            "Source access fixture", false, false, 1024, null, null, null, SourcePolicyDefaults.MetadataReconciliationCadence,
+            SourceRootState.Enabled, 1, physicalIdentityFingerprint: _approved.IdentityFingerprint, requiresPhysicalIdentityValidation: true);
         public SourceAccessRepairRequest Request(string relative) => new(Source, _approved.IdentityFingerprint, relative, false);
         public string OldFile(string name)
         {
             var path = Path.Combine(Source, name);
             File.WriteAllText(path, "Private source fixture");
+            ProtectFile(path);
+            return path;
+        }
+        public static void ProtectFile(string path)
+        {
             var acl = new FileInfo(path).GetAccessControl();
             acl.SetAccessRuleProtection(true, false);
             acl.SetOwner(new SecurityIdentifier("S-1-5-32-544"));
             acl.AddAccessRule(new(new SecurityIdentifier("S-1-5-32-544"), FileSystemRights.FullControl, AccessControlType.Allow));
             acl.AddAccessRule(new(new SecurityIdentifier("S-1-5-18"), FileSystemRights.FullControl, AccessControlType.Allow));
             new FileInfo(path).SetAccessControl(acl);
-            return path;
         }
         public byte[] Acl(string path) { using var h = Open(path, 0x20080, 3, IntPtr.Zero, 3, 0x02200000, IntPtr.Zero); return SourceReadGrant.Read(h); }
         public static void SetNative(string path, RawSecurityDescriptor descriptor)

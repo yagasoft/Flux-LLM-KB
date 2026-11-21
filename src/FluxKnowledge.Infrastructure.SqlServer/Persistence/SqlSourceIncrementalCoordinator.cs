@@ -1,3 +1,4 @@
+using System.Data;
 using System.Text.Json;
 using FluxKnowledge.Application.Ports;
 using FluxKnowledge.Domain.Sources;
@@ -417,6 +418,36 @@ public sealed partial class SqlSourceIncrementalCoordinator(
             result = JournalPollResult.Reset;
         }, ct).ConfigureAwait(false);
         return result;
+    }
+
+    public async ValueTask<SourceAccessRepairOutcome> AdmitAccessRepairAsync(SourceRootConfiguration root, SourceScanRequest request,
+        SourceIncrementalPlan plan, Func<SourceAccessRepairOutcome> dispatch, CancellationToken ct)
+    {
+        SourceAccessRepairOutcome? dispatched = null;
+        await using var strategy = await factory.CreateDbContextAsync(ct).ConfigureAwait(false);
+        return await strategy.Database.CreateExecutionStrategy().ExecuteAsync(async () =>
+        {
+            // A retry of a read-only SQL transaction must never replay a broker request.
+            if (dispatched is { } outcome) return outcome;
+            await using var db = await factory.CreateDbContextAsync(ct).ConfigureAwait(false);
+            await using var transaction = await db.Database.BeginTransactionAsync(IsolationLevel.Serializable, ct).ConfigureAwait(false);
+            SourceRootConfigurationEntity current;
+            SourceRootScanStateEntity state;
+            try
+            {
+                current = await RequireOwnedAsync(db, root, request, ct).ConfigureAwait(false);
+                state = await db.SourceRootScanStates.SingleAsync(x => x.SourceRootId == root.Id.Value, ct).ConfigureAwait(false);
+                SqlSourceIncrementalState.RequirePlan(state, plan);
+            }
+            catch (SourceSnapshotChangedException) { return SourceAccessRepairOutcome.NotApproved; }
+            if (state.PolicyFingerprint != SqlRepositoryWorkRecovery.Policy(current) || state.Mode == "Legacy")
+                return SourceAccessRepairOutcome.NotApproved;
+            ct.ThrowIfCancellationRequested();
+            dispatched = SourceAccessRepairOutcome.Unconfirmed;
+            dispatched = dispatch();
+            await transaction.CommitAsync(ct).ConfigureAwait(false);
+            return dispatched.Value;
+        }).ConfigureAwait(false);
     }
 
     private async Task<SourceRootConfigurationEntity> RequireOwnedAsync(FluxKnowledgeDbContext db, SourceRootConfiguration root, SourceScanRequest request, CancellationToken ct)

@@ -54,6 +54,9 @@ public interface ISourceIncrementalCoordinator
 {
     ValueTask<SourceIncrementalPlan?> PrepareAsync(SourceRootConfiguration root, SourceScanRequest request, CancellationToken ct);
     ValueTask<SourceRevisionId?> TryReuseAsync(SourceRootConfiguration root, SourceScanRequest request, SourceIncrementalPlan plan, string relativePath, CancellationToken ct);
+    ValueTask<SourceAccessRepairOutcome> AdmitAccessRepairAsync(SourceRootConfiguration root, SourceScanRequest request,
+        SourceIncrementalPlan plan, Func<SourceAccessRepairOutcome> dispatch, CancellationToken ct) =>
+        ValueTask.FromResult(SourceAccessRepairOutcome.NotApproved);
     ValueTask RecordCaptureAsync(SourceRootConfiguration root, SourceScanRequest request, SourceIncrementalPlan plan, SourceDiscoveredFile file, SourceRevisionId revision, ISourceFileCapture? capture, CancellationToken ct);
     ValueTask<bool> CompleteAsync(SourceRootConfiguration root, SourceScanRequest request, SourceIncrementalPlan plan,
         IReadOnlyList<SourceNamespaceObservation> directories, IReadOnlyList<SourceEnumerationEvidence> evidence,

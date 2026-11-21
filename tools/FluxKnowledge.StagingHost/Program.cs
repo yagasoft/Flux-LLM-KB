@@ -237,7 +237,11 @@ app.UseAntiforgery();
 app.MapStaticAssets(Path.Combine(AppContext.BaseDirectory, "FluxKnowledge.StagingHost.staticwebassets.endpoints.json"));
 app.MapRazorComponents<StagingApp>().AddInteractiveServerRenderMode();
 app.MapFluxKnowledgeHealth();
-if (journalIis) app.MapSourceJournalAllowlistPreview();
+if (journalIis)
+{
+    app.MapSourceJournalAllowlistPreview();
+    app.MapSourceRepairAuthority();
+}
 app.MapFluxKnowledgeIndexHealth();
 app.MapFluxKnowledgeGpuStatus();
 app.MapFluxKnowledgeSearch();

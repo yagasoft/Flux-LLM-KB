@@ -129,6 +129,8 @@ function Assert-IncrementalStoppedRecoveryBinding {
         else {Assert-IncrementalVectorMetadataIntentAbsent $prior}
         Assert-IncrementalVectorMetadataResumeEvidence $Binding $manifest $releaseBinding $intent
     }
+    $Binding.SourceAccessHelperRefresh=Read-SourceAccessHelperRefreshRecovery $Binding $manifest
+    $Binding.SourceAccessHelperRefreshReference=if($Binding.SourceAccessHelperRefresh){$manifest.source_access_helper_refresh}else{$null}
     foreach($payload in $Binding.Payloads) {
         [void](Assert-SegmentedUpdatePath $payload.Root)
         if((Get-HybridPayloadFingerprint $payload.Root) -cne $payload.Sha256){throw 'stopped-release-installed-payload-changed'}
@@ -149,11 +151,87 @@ function Assert-IncrementalStoppedRecoveryBinding {
     }
 }
 
+function Read-SourceAccessHelperRefreshRecovery($RecoveryBinding,$Manifest) {
+    if(!$Manifest.Contains('source_access_helper_refresh') -or !$Manifest.source_access_helper_refresh){return $null}
+    $reference=$Manifest.source_access_helper_refresh
+    if($reference -isnot [Collections.IDictionary] -or
+       $reference.ReleaseId -cnotmatch '^\d{8}T\d{6}Z-[a-f0-9]{12}$' -or
+       $reference.BindingSha256 -cnotmatch '^[A-Fa-f0-9]{64}$'){throw 'helper-refresh-recovery-manifest-invalid'}
+    $prior=Join-Path $IncrementalRecoveryRoot $reference.ReleaseId
+    $path=Join-Path $prior 'source-access-helper-refresh-binding.json'
+    $refresh=Read-SegmentedUpdateJson $path $reference.BindingSha256
+    if($refresh.ReleaseId -cne $reference.ReleaseId -or $refresh.Commit -cne $RecoveryBinding.PriorCommit -or
+       $refresh.DatabaseIdentity -cne $RecoveryBinding.DatabaseIdentity -or
+       $refresh.ConfigurationSha256 -cne $RecoveryBinding.ConfigurationSha256 -or
+       $refresh.Companion.IdentityHash -cne $RecoveryBinding.TaskIdentityHash -or
+       $refresh.Companion.LauncherSha256 -cne $RecoveryBinding.LauncherSha256 -or
+       $refresh.Companion.Enabled -cne $RecoveryBinding.EnableCompanionAfterValidation){
+        throw 'helper-refresh-recovery-binding-drift'
+    }
+    foreach($payload in $RecoveryBinding.Payloads){
+        if(($payload.Role + '=' + $payload.Sha256) -inotIn $refresh.CandidatePayloads){
+            throw 'helper-refresh-recovery-requires-complete-successor'
+        }
+    }
+    Assert-SourceAccessHelperRefreshRecoveryInstalled $refresh
+    return $refresh
+}
+
+function Assert-SourceAccessHelperRefreshRecoveryInstalled($Refresh) {
+    $checkpoint=Join-Path $SourceJournalHelperRoot ('updates/'+$Refresh.ReleaseId+'/state.json')
+    if($checkpoint -ine $Refresh.HelperCheckpointPath){throw 'helper-refresh-recovery-checkpoint-path-changed'}
+    $state=ConvertFrom-UniqueConfigurationJson (Read-SourceJournalHelperFile $checkpoint 65536)
+    if($state.Phase -cne 'Completed' -or $state.ReleaseId -cne $Refresh.ReleaseId -or
+       $state.CandidatePayloadSha256 -cne (Get-SourceJournalHelperPayloadManifest (Join-Path $SourceJournalHelperRoot 'payload')).Sha256){
+        throw 'helper-refresh-recovery-checkpoint-unsettled'
+    }
+    foreach($entry in @(@('policy.json','RepairPolicySha256'),@('journal-policy.json','JournalPolicySha256'),@('root-read-plan.json','RootReadPlanSha256'))){
+        $bytes=Read-SourceJournalHelperFile (Join-Path $SourceJournalHelperRoot $entry[0])
+        if([Convert]::ToHexString([Security.Cryptography.SHA256]::HashData($bytes)) -cne $Refresh[$entry[1]] -or
+           $state[$entry[1]] -cne $Refresh[$entry[1]]){throw 'helper-refresh-recovery-policy-drift'}
+    }
+    $task=Get-SourceJournalHelperTaskObservation -InstallRoot $SourceJournalHelperRoot -TaskName 'FluxKnowledge.SourceAccess'
+    foreach($key in @('TaskName','PrincipalSid','Executable','Arguments','WorkingDirectory','DefinitionSha256','SecuritySha256','Enabled','Running')){
+        if($task[$key] -cne $Refresh.HelperTask[$key]){throw 'helper-refresh-recovery-task-drift'}
+    }
+    foreach($payload in Get-DeploymentSourceJournalPayloads){
+        $fingerprint=Get-HybridPayloadFingerprint $payload.Root
+        if(($payload.Role + '=' + $fingerprint) -inotIn $Refresh.CandidatePayloads){throw 'helper-refresh-recovery-payload-drift'}
+    }
+}
+
+function Confirm-SourceAccessHelperRefreshRecoveryTransport($Refresh) {
+    Assert-HybridDeploymentHoldOwner -Path $ValidationHoldPath -ReleaseId $releaseId
+    Assert-SourceAccessHelperRefreshRecoveryInstalled $Refresh
+    $app=ConvertFrom-UniqueConfigurationJson (Get-SourceAccessConfigurationBytes (Join-Path $CanonicalLiveRoot 'Config/appsettings.Production.json'))
+    $policy=ConvertFrom-UniqueConfigurationJson (Read-SourceJournalHelperFile (Join-Path $SourceJournalHelperRoot 'policy.json'))
+    $response=Invoke-RestMethod -Uri ($loopbackOrigin.Origin+'/health/source-journal-helper') -Method Get -TimeoutSec 12
+    $volumes=[Collections.Generic.HashSet[string]]::new([string[]]$app.SourceJournal.ApprovedVolumes,[StringComparer]::OrdinalIgnoreCase)
+    if($response.Version -ne 1 -or $response.VolumesChecked -ne $volumes.Count -or
+        @($response.ApprovedVolumes).Count -ne $volumes.Count -or !$volumes.SetEquals([string[]]$response.ApprovedVolumes) -or
+        $response.PipeName -cne $app.SourceJournal.PipeName -or $response.RepairTransport -cne 'NotApproved' -or
+        $response.CallerSid -cne $policy.IndexerSid){throw 'helper-refresh-recovery-held-transport-unconfirmed'}
+    Assert-HybridDeploymentHoldOwner -Path $ValidationHoldPath -ReleaseId $releaseId
+    Assert-SourceAccessHelperRefreshRecoveryInstalled $Refresh
+    Write-SegmentedUpdateJson (Join-Path $releaseRoot 'source-access-helper-refresh-recovery-transport.json') @{
+        ReleaseId=$releaseId;SourceReleaseId=$Refresh.ReleaseId;ObservedAtUtc=[DateTimeOffset]::UtcNow
+        JournalVolumesChecked=$response.VolumesChecked;RepairTransport=$response.RepairTransport
+    }
+}
+
 function Move-IncrementalStoppedRecoveryHold {
     param([hashtable]$Binding,[string]$ReleaseId,[string]$StatePath)
     if($ReleaseId -cnotmatch '^\d{8}T\d{6}Z-[a-f0-9]{12}$' -or $ReleaseId -ceq $Binding.PriorReleaseId){throw 'stopped-release-new-owner-invalid'}
     if(Test-Path -LiteralPath $StatePath){throw 'stopped-release-transfer-reconciliation-required'}
     Assert-IncrementalStoppedRecoveryBinding $Binding
+    if($Binding.SourceAccessHelperRefreshReference){
+        $manifestPath=Join-Path (Split-Path -Parent $StatePath) 'manifest.json'
+        if(Test-Path -LiteralPath $manifestPath){throw 'helper-refresh-recovery-adoption-manifest-occupied'}
+        Write-SegmentedUpdateJson $manifestPath @{
+            commit=$Binding.PriorCommit;application_root=$CanonicalDeployRoot;migrations=$false;clean_slate=$false
+            source_access_helper_refresh=$Binding.SourceAccessHelperRefreshReference
+        }
+    }
     Write-IncrementalStoppedRecoveryHoldTransfer -Binding $Binding -ReleaseId $ReleaseId -StatePath $StatePath
 }
 

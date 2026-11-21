@@ -270,11 +270,13 @@ public sealed partial class SourceJournalSealIntegrationTests(NativeSqlServerFix
     {
         private readonly string _area = System.IO.Path.Combine(@"I:\Codex Workspaces\Staging\FluxKnowledge", "JournalSeal-" + Guid.NewGuid().ToString("N"));
         internal string Path => System.IO.Path.Combine(_area, "Sources", "one.txt");
+        internal ContentAddressedSourceArtifactStore Artifacts => _artifacts;
         internal string RetainedRoot => System.IO.Path.Combine(_area, "Retained");
         internal SourceJournalStoreIntegrationTests.ContextFactory Factory { get; }
         internal Clock Clock { get; } = new();
         internal SourceJournalOptions Options { get; } = new() { Enabled = true };
         internal ISourceChangeJournalReader? JournalReader;
+        internal ISourceAccessRepairClient? AccessRepairClient;
         internal long SourceBytes;
         internal long ArtifactSourceBytes;
         internal long RetainedBytes;
@@ -336,12 +338,12 @@ public sealed partial class SourceJournalSealIntegrationTests(NativeSqlServerFix
 
         internal void Restart()
         {
-            _coordinator = new(Factory, Clock, JournalReader ?? new WindowsSourceChangeJournalReader(), new WindowsSourceObservationReader(), _artifacts, Options)
+            _coordinator = new(Factory, Clock, JournalReader ?? new WindowsSourceChangeJournalReader(), new WindowsSourceObservationReader(AccessRepairClient), _artifacts, Options)
             {
                 ReuseRejected = (path, reason) => ReadTrace.Add(JsonSerializer.Serialize(new { ReusePath = path, reason })),
                 BeforeCaptureAttestation = () => BeforeAttestation?.Invoke(), BeforeCaptureAttestationCommit = () => BeforeAttestationCommit?.Invoke()
             };
-            Enumeration = new() { SourceBytesRead = n =>
+            Enumeration = new(sourceAccessRepairClient: AccessRepairClient) { SourceBytesRead = n =>
                 { SourceBytes += n; TraceRead(); var hook = AfterRead; AfterRead = null; hook?.Invoke(); } };
             _worker = new(Enumeration, _control, _artifacts,
                 new SqlSourceActivityStore(Factory, Clock), incrementalCoordinator: new CaptureFaultCoordinator(_coordinator, this));
@@ -441,6 +443,9 @@ public sealed partial class SourceJournalSealIntegrationTests(NativeSqlServerFix
             if (before is not null) await before(plan);
             return await inner.TryReuseAsync(root, request, plan, path, ct);
         }
+        public ValueTask<SourceAccessRepairOutcome> AdmitAccessRepairAsync(SourceRootConfiguration root, SourceScanRequest request,
+            SourceIncrementalPlan plan, Func<SourceAccessRepairOutcome> dispatch, CancellationToken ct) =>
+            inner.AdmitAccessRepairAsync(root, request, plan, dispatch, ct);
         public ValueTask RecordCaptureAsync(SourceRootConfiguration root, SourceScanRequest request, SourceIncrementalPlan plan, SourceDiscoveredFile file,
             SourceRevisionId revision, ISourceFileCapture? capture, CancellationToken ct)
         {

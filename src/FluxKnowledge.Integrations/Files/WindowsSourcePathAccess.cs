@@ -49,7 +49,8 @@ internal static class WindowsSourcePathAccess
         return new(information.Attributes, information.Tag, state);
     }
 
-    internal static DirectoryPathLease OpenDirectoryPath(string path, bool enumerate = false, bool readPermissions = false, bool allowNamespaceChanges = false)
+    internal static DirectoryPathLease OpenDirectoryPath(string path, bool enumerate = false, bool readPermissions = false,
+        bool allowNamespaceChanges = false, bool readFinalPermissions = false)
     {
         if (!OperatingSystem.IsWindows()) throw new PlatformNotSupportedException("Source physical-path validation requires Windows.");
         var canonical = Path.TrimEndingDirectorySeparator(Path.GetFullPath(path));
@@ -58,7 +59,7 @@ internal static class WindowsSourcePathAccess
         var lease = new DirectoryPathLease(canonical);
         try
         {
-            var handle = CreateFile(volume, ReadAttributes | Synchronize | (readPermissions ? 0x20000u : 0) | (canonical == volume && enumerate ? 1u : 0),
+            var handle = CreateFile(volume, ReadAttributes | Synchronize | (readPermissions || readFinalPermissions && canonical == volume ? 0x20000u : 0) | (canonical == volume && enumerate ? 1u : 0),
                 allowNamespaceChanges ? 7u : 3u, IntPtr.Zero, 3, 0x02300000, IntPtr.Zero);
             if (handle.IsInvalid)
             {
@@ -75,7 +76,8 @@ internal static class WindowsSourcePathAccess
                 for (var index = 0; index < components.Length; index++)
                 {
                     current = Path.Combine(current, components[index]);
-                    var access = ReadAttributes | Synchronize | (readPermissions ? 0x20000u : 0) | (enumerate && index == components.Length - 1 ? 1u : 0);
+                    var access = ReadAttributes | Synchronize | (readPermissions || readFinalPermissions && index == components.Length - 1 ? 0x20000u : 0) |
+                        (enumerate && index == components.Length - 1 ? 1u : 0);
                     // Type-neutral no-recall open; Add verifies Directory on the returned handle.
                     var child = OpenRelative(lease.Handle, components[index], access, allowNamespaceChanges ? 7u : 3u, SynchronousIo, current, true);
                     lease.Add(current, child);
@@ -121,10 +123,11 @@ internal static class WindowsSourcePathAccess
 
     // Broker-only open. No data bytes are requested; callers must hold independent
     // policy authority before requesting WRITE_DAC on this exact physical target.
-    internal static PermissionTargetLease OpenPermissionTarget(ApprovedSourceAccessRoot root, string relativePath, bool directory)
+    internal static PermissionTargetLease OpenPermissionTarget(ApprovedSourceAccessRoot root, string relativePath, bool directory,
+        bool repairInheritance = false)
     {
         var target = SourceAccessPolicy.ResolveTarget(root.Path, relativePath, directory);
-        var parent = OpenDirectoryPath(Path.GetDirectoryName(target)!);
+        var parent = OpenDirectoryPath(Path.GetDirectoryName(target)!, readFinalPermissions: repairInheritance);
         SafeFileHandle? handle = null;
         try
         {
@@ -135,6 +138,7 @@ internal static class WindowsSourcePathAccess
                 directory ? 3u : 1u, directory ? SynchronousIo : NonDirectoryFile, target, directory);
             var metadata = ReadMetadata(handle);
             ValidateTag(metadata);
+            if (repairInheritance) RequireOrdinaryFile(metadata);
             if (metadata.IsDirectory != directory) throw new SourceSnapshotChangedException("The permission target type changed.");
             if (!directory)
             {
@@ -147,21 +151,29 @@ internal static class WindowsSourcePathAccess
                 throw new SourcePathSecurityException("SourcePhysicalPathMismatch", "The permission target escaped its held parent.");
             if (string.Equals(target, root.Path, StringComparison.OrdinalIgnoreCase) && Fingerprint(identity) != root.IdentityFingerprint)
                 throw new SourceSnapshotChangedException("The approved source root identity changed.");
-            return new(parent, handle, target, identity, directory, root);
+            return new(parent, handle, target, identity, directory, root, repairInheritance);
         }
         catch { handle?.Dispose(); parent.Dispose(); throw; }
+    }
+
+    private static void RequireOrdinaryFile(Metadata metadata)
+    {
+        if (metadata.IsDirectory || (metadata.Attributes & (uint)FileAttributes.ReparsePoint) != 0)
+            throw new SourcePathSecurityException("SourceInheritanceTargetNotOrdinary", "Inheritance repair requires an ordinary file.");
     }
 
     private static string Fingerprint(string identity) =>
         Convert.ToHexStringLower(SHA256.HashData(Encoding.UTF8.GetBytes(identity["ntfs:".Length..])));
 
     internal sealed class PermissionTargetLease(DirectoryPathLease parent, SafeFileHandle handle, string path, string identity,
-        bool directory, ApprovedSourceAccessRoot root) : IDisposable
+        bool directory, ApprovedSourceAccessRoot root, bool repairInheritance) : IDisposable
     {
         private readonly long _length = directory ? 0 : RandomAccess.GetLength(handle);
         private readonly DateTime _lastWrite = File.GetLastWriteTimeUtc(handle);
         internal SafeFileHandle Handle { get; } = handle;
         internal string Identity { get; } = identity;
+        internal SafeFileHandle ParentHandle => parent.Handle;
+        internal string ParentIdentity => parent.Identity.IdentityFingerprint;
         internal void ValidateCurrent()
         {
             parent.ValidateCurrent();
@@ -173,6 +185,7 @@ internal static class WindowsSourcePathAccess
                 throw new SourceSnapshotChangedException("The approved root or held permission parent changed.");
             var metadata = ReadMetadata(Handle);
             ValidateTag(metadata);
+            if (repairInheritance) RequireOrdinaryFile(metadata);
             if (!directory) EnsureContentAvailable(metadata);
             if (metadata.IsDirectory != directory || PhysicalFileIdentity.Get(Handle) != Identity ||
                 !string.Equals(PhysicalFileIdentity.GetFinalPath(Handle), path, StringComparison.OrdinalIgnoreCase) ||

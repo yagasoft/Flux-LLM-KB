@@ -41,8 +41,12 @@ public sealed class SourceScanWorker(
                 var reused = await incrementalCoordinator!.TryReuseAsync(sourceRoot, scanRequest, incrementalPlan, relative, ct).ConfigureAwait(false);
                 if (reused is null) return true;
                 convergedRevisionIds.Add(reused); discovered++; return false;
-            }) { MetadataEntriesPerSecond = incrementalPlan.IsNamespaceSweep
-                ? incrementalPlan.MetadataEntriesPerSecond > 0 ? incrementalPlan.MetadataEntriesPerSecond : 64 : 0 }) : null;
+            })
+            {
+                MetadataEntriesPerSecond = incrementalPlan.IsNamespaceSweep
+                    ? incrementalPlan.MetadataEntriesPerSecond > 0 ? incrementalPlan.MetadataEntriesPerSecond : 64 : 0,
+                AdmitAccessRepair = (dispatch, ct) => incrementalCoordinator!.AdmitAccessRepairAsync(sourceRoot, scanRequest, incrementalPlan, dispatch, ct)
+            }) : null;
         await foreach (var (file, capture) in EnumerateFilesAsync(sourceRoot, scanRequest, incrementalPlan is not null, cancellationToken).ConfigureAwait(false))
         {
             SourceRevisionId revisionId;

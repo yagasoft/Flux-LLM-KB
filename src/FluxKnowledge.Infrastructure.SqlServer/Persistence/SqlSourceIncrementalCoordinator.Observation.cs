@@ -29,7 +29,8 @@ public sealed partial class SqlSourceIncrementalCoordinator
         if (artifact is null || artifact.ChecksumVerifiedAtUtc == default || artifact.ReferenceCount <= 0) return Reject("artifact-authority");
         try
         {
-            using var source = observations.Open(root, relativePath);
+            using var source = await observations.OpenForScanAsync(root, relativePath,
+                (dispatch, token) => AdmitAccessRepairAsync(root, request, plan, dispatch, token), ct).ConfigureAwait(false);
             if (source.Observation.ByteLength > root.MaximumFileBytes) return Reject("current-policy-byte-limit");
             if (source.Observation.ByteLength != proof.Source.ByteLength ||
                 source.Observation.LinkCount < 1) return Reject("source-identity-or-size");
@@ -72,8 +73,8 @@ public sealed partial class SqlSourceIncrementalCoordinator
             }, ct, () => { source.ValidateCurrent(); blob.ValidateCurrent(); }).ConfigureAwait(false);
             return result;
         }
-        catch (IOException error) { return Reject("io:" + error.Message); }
-        catch (UnauthorizedAccessException error) { return Reject("access:" + error.Message); }
+        catch (IOException error) when (error is not SourceContentUnavailableException) { return Reject("io:" + error.Message); }
+        catch (UnauthorizedAccessException error) when (error is not SourceAccessDeniedException) { return Reject("access:" + error.Message); }
 
         SourceRevisionId? Reject(string reason) { ReuseRejected?.Invoke(relativePath, reason); return null; }
     }

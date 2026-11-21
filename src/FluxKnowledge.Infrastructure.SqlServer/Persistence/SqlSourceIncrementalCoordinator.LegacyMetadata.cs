@@ -27,7 +27,8 @@ public sealed partial class SqlSourceIncrementalCoordinator
             cached?.SourceArtifactId is { } blobId && blobId != artifact.Id) return null;
         try
         {
-            using var source = observations.Open(root, relativePath);
+            using var source = await observations.OpenForScanAsync(root, relativePath,
+                (dispatch, token) => AdmitAccessRepairAsync(root, request, plan, dispatch, token), ct).ConfigureAwait(false);
             if (source.Observation.ByteLength != prior.ByteLength ||
                 source.Observation.ByteLength > root.MaximumFileBytes ||
                 source.Observation.LastWriteTicks != prior.FileLastWriteAtUtc!.Value.UtcDateTime.ToFileTimeUtc()) return null;
@@ -75,7 +76,7 @@ public sealed partial class SqlSourceIncrementalCoordinator
             }, ct, () => { source.ValidateCurrent(); blob.ValidateCurrent(); }).ConfigureAwait(false);
             return result;
         }
-        catch (IOException) { return null; }
-        catch (UnauthorizedAccessException) { return null; }
+        catch (IOException error) when (error is not SourceContentUnavailableException) { return null; }
+        catch (UnauthorizedAccessException error) when (error is not SourceAccessDeniedException) { return null; }
     }
 }

@@ -6,6 +6,7 @@ public sealed record SourceEnumerationScope(IReadOnlyList<string>? Targets,
     Func<string, CancellationToken, ValueTask<bool>>? CaptureNeeded)
 {
     public int MetadataEntriesPerSecond { get; init; }
+    public SourceAccessRepairAdmission? AdmitAccessRepair { get; init; }
 }
 public sealed record SourceNamespaceObservation(string RelativePath, string FileId, string ParentId, bool IsAncestor);
 public sealed record SourceFileObservation(string Identity, string FileId, string ParentId, long ByteLength,
@@ -19,6 +20,8 @@ public interface ISourceObservationLease : IDisposable
 public interface ISourceObservationReader
 {
     ISourceObservationLease Open(SourceRootConfiguration root, string relativePath);
+    ValueTask<ISourceObservationLease> OpenForScanAsync(SourceRootConfiguration root, string relativePath,
+        SourceAccessRepairAdmission admitRepair, CancellationToken cancellationToken) => ValueTask.FromResult(Open(root, relativePath));
     IReadOnlyList<SourceNamespaceObservation> ReadRootAncestors(SourceRootConfiguration root);
     ISourceRootObservationLease OpenRoot(SourceRootConfiguration root);
     ISourceRootObservationLease? OpenRootForJournalCoverage(SourceRootConfiguration root) => null;
