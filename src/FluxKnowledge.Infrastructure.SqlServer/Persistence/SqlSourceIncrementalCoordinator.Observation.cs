@@ -22,6 +22,8 @@ public sealed partial class SqlSourceIncrementalCoordinator
         if (cached?.ObservationJson is null)
             return await TryAdoptLegacyMetadataAsync(root, request, plan, relativePath, cached, ct).ConfigureAwait(false);
         if (cached.SourceRevisionId is null) return Reject("inventory-missing");
+        if (plan.OwnersRequiringRecoveryCapture.Contains(cached.SourceRevisionId.Value))
+            return Reject("recovery-capture-configuration-changed");
         var proof = JsonSerializer.Deserialize<CachedObservation>(cached.ObservationJson);
         if (proof is null || proof.Version is not (2 or 3 or 4)) return Reject("receipt-format");
         var artifact = await lookup.SourceArtifacts.AsNoTracking().SingleOrDefaultAsync(x => x.Id == cached.SourceArtifactId &&

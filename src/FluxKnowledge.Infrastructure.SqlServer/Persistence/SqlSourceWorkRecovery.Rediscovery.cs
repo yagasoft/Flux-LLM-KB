@@ -127,7 +127,7 @@ public sealed partial class SqlSourceWorkRecovery
             capture.LeaseGeneration <= 0 || capture.ObservedAt <= activity.UpdatedAtUtc || capture.ObservedAt > now ||
             capture.ContentSha256 != source.ContentSha256 || capture.ByteLength != source.ByteLength ||
             capture.StableSourceIdentity is not { Length: > 0 } || capture.LastWriteAtUtc <= DateTimeOffset.FromFileTime(0) ||
-            source.ByteLength < 0 || source.ByteLength > SourcePolicyDefaults.MaximumTextBytes ||
+            source.ByteLength < 0 || source.ByteLength > Math.Min(configuration.MaximumFileBytes, SourcePolicyDefaults.MaximumTextBytes) ||
             (!configuration.Recursive && relative.IndexOfAny([Path.DirectorySeparatorChar, Path.AltDirectorySeparatorChar]) >= 0) ||
             !LocalSourceEnumerator.MatchesPolicy(relative, configuration.IncludePatterns, configuration.ExcludePatterns) ||
             configuration.AllowedClassifications.Count != 0 &&
@@ -205,6 +205,29 @@ public sealed partial class SqlSourceWorkRecovery
                 request.RetainedSourceRevisionId == source.Id, token).ConfigureAwait(false) ||
             await db.Artifacts.AnyAsync(artifact => artifact.PipelineRecordId == record.Id, token).ConfigureAwait(false) ||
             await db.CorpusRebuildSupersededJobs.AnyAsync(superseded => superseded.JobId == job.Id, token).ConfigureAwait(false);
+    }
+
+    internal static async Task<IReadOnlySet<Guid>> ReadOwnersRequiringCaptureAsync(FluxKnowledgeDbContext db,
+        SourceRootConfiguration root, CancellationToken token)
+    {
+        // Recovery is deliberately held while a scan still owns pending changes. Capture
+        // refresh runs inside that scan, so candidate discovery here omits the pending fence.
+        var rows = await (from job in db.Jobs.AsNoTracking()
+            join record in db.PipelineRecords.AsNoTracking() on job.PipelineRecordId equals record.Id
+            join source in db.SourceRevisions.AsNoTracking() on record.SourceRevisionId equals source.Id
+            where source.SourceRootId == root.Id.Value && source.OriginKind == 0 && source.SuppressedAtUtc == null &&
+                source.Classification == "AcceptedUtf8Text" && source.CurrentDiscoveryEvidenceJson != null &&
+                !record.IsDeleted && !record.CompletionCriteriaMet && record.RepositoryRecoveryBindingJson == null &&
+                record.Revision == job.SourceRevision && record.CurrentStage == job.Stage &&
+                record.ContentHash == source.ContentSha256 && job.Stage == (int)PipelineStage.Extract &&
+                job.Operation == PipelineOperations.ExtractUtf8 && job.PublicState == (int)PublicJobState.Failed &&
+                job.Reason == Removed && job.AttemptCount == 0 && job.LeaseGeneration == 0 &&
+                job.LeaseOwner == null && job.LeaseExpiresAtUtc == null && job.ErrorDetails == null
+            select new { source.Id, Evidence = source.CurrentDiscoveryEvidenceJson! })
+            .ToArrayAsync(token).ConfigureAwait(false);
+        return rows.Where(row => ReadCapture(row.Evidence) is { Kind: "verified-physical-capture" } capture &&
+                capture.SourceRevisionId == row.Id && capture.ConfigurationRevision < root.ConfigurationRevision)
+            .Select(row => row.Id).ToHashSet();
     }
 
     private static PhysicalCapture? ReadCapture(string evidence)

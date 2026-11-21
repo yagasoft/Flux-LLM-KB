@@ -839,7 +839,8 @@ public sealed partial class SqlSourceScanStore(
         value.Length == 64 && value.All(static character =>
             character is >= '0' and <= '9' or >= 'a' and <= 'f' or >= 'A' and <= 'F');
 
-    internal static string MergeEvidence(string? existing, IReadOnlyList<SourceEnumerationEvidence> evidence)
+    internal static string MergeEvidence(string? existing, IReadOnlyList<SourceEnumerationEvidence> evidence,
+        IReadOnlySet<string>? confirmedAbsent = null)
     {
         JsonObject value;
         try
@@ -854,6 +855,8 @@ public sealed partial class SqlSourceScanStore(
         value["enumerationErrors"] = JsonSerializer.SerializeToNode(evidence.Take(100));
         value["enumerationIssueSummary"] = JsonSerializer.SerializeToNode(SourceScanIssueSummary.Create(evidence));
         value["enumerationComplete"] = evidence.Count == 0;
+        value["confirmedAbsentPathCount"] = confirmedAbsent?.Count ?? 0;
+        value["confirmedAbsentPaths"] = JsonSerializer.SerializeToNode(confirmedAbsent?.Order(StringComparer.Ordinal).Take(100));
         return value.ToJsonString();
     }
 

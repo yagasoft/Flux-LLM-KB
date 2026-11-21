@@ -34,6 +34,8 @@ public sealed record SourceIncrementalPlan(Guid ManifestId, long BaselineEpoch, 
     public Guid? SupersedesManifestId { get; init; }
     public bool IsReconciliation { get; init; }
     public int MetadataEntriesPerSecond { get; init; }
+    [JsonIgnore]
+    public IReadOnlySet<Guid> OwnersRequiringRecoveryCapture { get; init; } = new HashSet<Guid>();
     public bool IsFallback => Mode == "Fallback";
     public bool IsNamespaceSweep => IsBaseline || Targets.Any(x => x.RelativePath == "." && x.IsSubtree &&
         (x.ReasonFlags & SourcePendingReasons.NamespaceMetadata) != 0);

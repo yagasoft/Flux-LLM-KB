@@ -126,6 +126,12 @@ public sealed partial class SqlSourceIncrementalCoordinator(
             };
             row.IncrementalManifestJson = JsonSerializer.Serialize(result);
         }, ct).ConfigureAwait(false);
+        if (result is not null && root.DiscoveryMode == SourceDiscoveryMode.Filesystem && !root.FollowLinks)
+        {
+            await using var db = await factory.CreateDbContextAsync(ct).ConfigureAwait(false);
+            result = result with { OwnersRequiringRecoveryCapture = await SqlSourceWorkRecovery
+                .ReadOwnersRequiringCaptureAsync(db, root, ct).ConfigureAwait(false) };
+        }
         return result;
     }
 

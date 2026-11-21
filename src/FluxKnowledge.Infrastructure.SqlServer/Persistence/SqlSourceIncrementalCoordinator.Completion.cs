@@ -53,7 +53,6 @@ public sealed partial class SqlSourceIncrementalCoordinator
                 entry.RelativePath = directory.RelativePath; entry.FileId = directory.FileId; entry.ParentId = directory.ParentId;
                 entry.IsDirectory = true; entry.IsAncestor = directory.IsAncestor; entry.BaselineEpoch = state.BaselineEpoch;
             }
-            full = plan.IsNamespaceSweep && evidence.Count == 0 && HasCompleteNamespace(state);
         }, ct, rootAuthority.ValidateCurrent).ConfigureAwait(false);
 
         await using (var lookup = await factory.CreateDbContextAsync(ct).ConfigureAwait(false))
@@ -95,7 +94,6 @@ public sealed partial class SqlSourceIncrementalCoordinator
                             await RequireOwnedAsync(db, root, request, ct).ConfigureAwait(false);
                             var state = await db.SourceRootScanStates.SingleAsync(x => x.SourceRootId == root.Id.Value, ct).ConfigureAwait(false);
                             SqlSourceIncrementalState.RequirePlan(state, plan);
-                            if (full && !HasCompleteNamespace(state)) full = false;
                             var rows = await db.SourceRevisions.Where(x => chunk.Contains(x.Id) && x.SuppressedAtUtc == null).ToArrayAsync(ct).ConfigureAwait(false);
                             var scopes = new List<IndexAffectedScope>();
                             foreach (var revision in rows)
@@ -139,20 +137,79 @@ public sealed partial class SqlSourceIncrementalCoordinator
         }
 
         var releasedContentHold = false;
-        await _journal.ExecuteAsync(async db =>
+        var absenceLeasesForReporting = new List<ISourceAbsenceLease>();
+        var unconfirmedEvidence = evidence;
+        try
         {
+            await _journal.ExecuteAsync(CompleteScanAsync, ct, () =>
+            {
+                rootAuthority.ValidateCurrent();
+                foreach (var lease in absenceLeasesForReporting) lease.ValidateCurrent();
+            }).ConfigureAwait(false);
+        }
+        finally
+        {
+            foreach (var lease in absenceLeasesForReporting) lease.Dispose();
+        }
+        if ((releasedContentHold || plan.OwnersRequiringRecoveryCapture.Overlaps(seenIds)) &&
+            root.DiscoveryMode == SourceDiscoveryMode.Filesystem)
+            recoveryProgress?.NotifyRediscovery(root.Id.Value);
+        return full;
+
+        async Task CompleteScanAsync(FluxKnowledgeDbContext db)
+        {
+            foreach (var lease in absenceLeasesForReporting) lease.Dispose();
+            absenceLeasesForReporting.Clear();
             releasedContentHold = false;
             var current = await RequireOwnedAsync(db, root, request, ct).ConfigureAwait(false);
             var state = await db.SourceRootScanStates.SingleAsync(x => x.SourceRootId == root.Id.Value, ct).ConfigureAwait(false);
             SqlSourceIncrementalState.RequirePlan(state, plan);
+            unconfirmedEvidence = evidence;
+            if (root.DiscoveryMode == SourceDiscoveryMode.Filesystem)
+            {
+                var missingTargets = plan.Targets.Where(target => target.HasCaptureScope && target.RelativePath != ".")
+                    .ToLookup(target => target.RelativePath, StringComparer.Ordinal);
+                var confirmed = new HashSet<string>(StringComparer.Ordinal);
+                foreach (var path in evidence.Where(item => item.Kind == "changed" &&
+                        item.Detail == "SourcePathNoLongerExists" && missingTargets.Contains(item.RelativePath))
+                    .Select(item => item.RelativePath).Distinct(StringComparer.Ordinal))
+                {
+                    var absolute = Path.GetFullPath(path, root.CanonicalPath);
+                    var prefix = Path.TrimEndingDirectorySeparator(absolute) + Path.DirectorySeparatorChar;
+                    var subtree = missingTargets[path].Any(target => target.IsSubtree);
+                    // The earlier removal pass can lose its absence proof. Do not acknowledge
+                    // this target while any previously indexed owner still needs suppression.
+                    if (await db.SourceRevisions.AnyAsync(revision => revision.SourceRootId == root.Id.Value &&
+                        revision.OriginKind == 0 && revision.SuppressedAtUtc == null &&
+                        (EF.Functions.Collate(revision.CanonicalPath, "Latin1_General_100_CI_AS") == absolute ||
+                         subtree && EF.Functions.Collate(revision.CanonicalPath, "Latin1_General_100_CI_AS").StartsWith(prefix)), ct)
+                        .ConfigureAwait(false)) continue;
+                    ISourceAbsenceLease? lease;
+                    try { lease = observations.OpenAbsence(root, path); }
+                    catch (Exception exception) when (exception is IOException or UnauthorizedAccessException) { continue; }
+                    if (lease is null) continue;
+                    absenceLeasesForReporting.Add(lease);
+                    confirmed.Add(path);
+                }
+                if (confirmed.Count != 0)
+                {
+                    unconfirmedEvidence = evidence.Where(item => item.Kind != "changed" ||
+                        item.Detail != "SourcePathNoLongerExists" || !confirmed.Contains(item.RelativePath)).ToList();
+                    var scan = await db.SourceScanRequests.SingleAsync(value => value.Id == request.Id.Value, ct).ConfigureAwait(false);
+                    scan.ErrorFileCount = unconfirmedEvidence.Count;
+                    scan.AuditEvidenceJson = SqlSourceScanStore.MergeEvidence(scan.AuditEvidenceJson, unconfirmedEvidence, confirmed);
+                    current.HealthEvidenceJson = SqlSourceScanStore.MergeEvidence(current.HealthEvidenceJson, unconfirmedEvidence, confirmed);
+                }
+            }
             var oldIssues = JsonSerializer.Deserialize<SourceEnumerationEvidence[]>(state.DeferredEvidenceJson ?? "[]") ?? [];
             var deferred = plan.IsNamespaceSweep ? new List<SourceEnumerationEvidence>() : oldIssues.Where(x => !plan.Targets.Any(t =>
                 SourcePathScope.Contains(t.RelativePath, t.IsSubtree, x.RelativePath))).ToList();
-            deferred.AddRange(evidence.Where(x => x.Detail != "SourcePathNoLongerExists"));
+            deferred.AddRange(unconfirmedEvidence);
             state.DeferredEvidenceJson = JsonSerializer.Serialize(deferred.Distinct().ToArray());
-            var namespaceComplete = HasCompleteNamespace(state);
+            var namespaceComplete = plan.IsNamespaceSweep && !unconfirmedEvidence.Any(NamespaceIssue) &&
+                state.NamespaceGeneration == plan.NamespaceGeneration;
             if (namespaceComplete) { state.NamespaceComplete = true; state.UnresolvedThroughUsn = null; }
-            if (evidence.Any(NamespaceIssue)) { state.NamespaceComplete = false; state.NamespaceGeneration++; }
+            if (unconfirmedEvidence.Any(NamespaceIssue)) { state.NamespaceComplete = false; state.NamespaceGeneration++; }
             if (plan.IsBaseline)
             {
                 state.LastBaselineAtUtc = time.GetUtcNow();
@@ -267,17 +324,12 @@ public sealed partial class SqlSourceIncrementalCoordinator
                     }
                 }
             }
-            full &= state.NamespaceComplete && state.NamespaceGeneration == plan.NamespaceGeneration;
-        }, ct, rootAuthority.ValidateCurrent).ConfigureAwait(false);
-        if (releasedContentHold && root.DiscoveryMode == SourceDiscoveryMode.Filesystem)
-            recoveryProgress?.NotifyRediscovery(root.Id.Value);
-        return full;
+            full = namespaceComplete && unconfirmedEvidence.Count == 0 &&
+                state.NamespaceComplete && state.NamespaceGeneration == plan.NamespaceGeneration;
+        }
 
         bool InDeclaredScope(string relative) => plan.IsBaseline || plan.Targets.Any(x => x.HasCaptureScope &&
             SourcePathScope.Contains(x.RelativePath, x.IsSubtree, relative));
-
-        bool HasCompleteNamespace(SourceRootScanStateEntity state) => plan.IsNamespaceSweep &&
-            !evidence.Any(NamespaceIssue) && state.NamespaceGeneration == plan.NamespaceGeneration;
     }
 
     private static bool NamespaceIssue(SourceEnumerationEvidence issue) => issue.NamespaceIncomplete ||

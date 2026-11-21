@@ -148,6 +148,64 @@ public sealed partial class SourceJournalCompletionIntegrationTests(NativeSqlSer
         Assert.Equal(last, removed);
     }
 
+    [NativeSqlServerTheory]
+    [InlineData("confirmed", 0)]
+    [InlineData("mixed", 1)]
+    [InlineData("reappeared", 2)]
+    [InlineData("stale-owner", 1)]
+    public async Task Targeted_scan_reports_only_unconfirmed_missing_paths(string outcome, int expectedIssues)
+    {
+        await using var scenario = await Scenario.CreateAsync(fixture.ConnectionString);
+        await scenario.FinishEmptyBaselineAsync();
+        await scenario.SeedAsync(1);
+        const string name = "candidate-1.txt";
+        await using var db = scenario.Factory.CreateDbContext();
+        if (outcome == "stale-owner")
+            await db.SourceRevisions.ExecuteUpdateAsync(set => set.SetProperty(row => row.CanonicalPath,
+                Path.Combine(scenario.Files, "CANDIDATE-1.txt")));
+        var state = await db.SourceRootScanStates.SingleAsync();
+        db.SourcePendingChanges.Add(new() { Id = Guid.NewGuid(), SourceRootId = scenario.Claim.SourceRoot.Id.Value,
+            RelativePath = name, PathFingerprint = SqlSourceChangeJournalStore.PathKey(name), Generation = ++state.Generation,
+            ReasonFlags = SourcePendingReasons.FileEvent, LastContentUsn = 0, LastUnjournaledGeneration = 0 });
+        await db.SaveChangesAsync();
+        await scenario.ClaimTargetedAsync();
+        var evidence = new SourceEnumerationEvidence("changed", name, "SourcePathNoLongerExists") { NamespaceIncomplete = true };
+        var unrelated = new SourceEnumerationEvidence("permission", "other.txt", "SourceAccessDenied");
+        var scans = new SqlSourceScanStore(scenario.Factory, TimeProvider.System);
+        SourceEnumerationEvidence[] reports = outcome is "mixed" or "reappeared" ? [evidence, unrelated] : [evidence];
+        await scans.RecordEnumerationEvidenceAsync(scenario.Claim.ScanRequest.Id, reports, default);
+        if (outcome == "reappeared")
+            await File.WriteAllTextAsync(Path.Combine(scenario.Files, name), "returned");
+        if (outcome == "stale-owner") scenario.SetPageHook(null, new MissFirstAbsence());
+        await scenario.Coordinator.CompleteAsync(scenario.Claim.SourceRoot, scenario.Claim.ScanRequest, scenario.Plan,
+            [], reports, new HashSet<SourceRevisionId>(), null, default);
+        var finished = await db.SourceScanRequests.AsNoTracking().SingleAsync(x => x.Id == scenario.Claim.ScanRequest.Id.Value);
+        Assert.Equal(expectedIssues, finished.ErrorFileCount);
+        using var audit = JsonDocument.Parse(finished.AuditEvidenceJson!);
+        var confirmed = outcome is "confirmed" or "mixed";
+        Assert.Equal(confirmed ? 1 : 0, audit.RootElement.GetProperty("confirmedAbsentPathCount").GetInt32());
+        if (confirmed) Assert.Equal(name, audit.RootElement.GetProperty("confirmedAbsentPaths")[0].GetString());
+        if (reports.Length == 2) Assert.Contains("SourceAccessDenied", finished.AuditEvidenceJson);
+        Assert.Equal(confirmed, await db.SourceRevisions.AnyAsync(x => x.SuppressedAtUtc != null));
+        if (outcome == "stale-owner")
+            Assert.True(await db.SourcePendingChanges.AnyAsync(x => x.RelativePath == name));
+    }
+
+    private sealed class MissFirstAbsence : ISourceObservationReader
+    {
+        private readonly WindowsSourceObservationReader _reader = new();
+        private bool _seen;
+        public ISourceAbsenceLease? OpenAbsence(SourceRootConfiguration root, string path)
+        {
+            if (_seen) return _reader.OpenAbsence(root, path);
+            _seen = true;
+            return null;
+        }
+        public ISourceObservationLease Open(SourceRootConfiguration root, string path) => _reader.Open(root, path);
+        public ISourceRootObservationLease OpenRoot(SourceRootConfiguration root) => _reader.OpenRoot(root);
+        public IReadOnlyList<SourceNamespaceObservation> ReadRootAncestors(SourceRootConfiguration root) => _reader.ReadRootAncestors(root);
+    }
+
     private sealed class Scenario : IAsyncDisposable
     {
         private readonly string _area = Path.Combine(@"I:\Codex Workspaces\Staging\FluxKnowledge", "CompletionQuery-" + Guid.NewGuid().ToString("N"));
@@ -205,9 +263,9 @@ public sealed partial class SourceJournalCompletionIntegrationTests(NativeSqlSer
             await using var db = Factory.CreateDbContext();
             return await db.SourceRevisions.Where(x => x.SourceRootId == Claim.SourceRoot.Id.Value).OrderBy(x => x.Id).Select(x => x.Id).ToArrayAsync();
         }
-        internal void SetPageHook(Func<int, CancellationToken, ValueTask>? hook) =>
+        internal void SetPageHook(Func<int, CancellationToken, ValueTask>? hook, ISourceObservationReader? observations = null) =>
             Coordinator = new(Factory, TimeProvider.System, new WindowsSourceChangeJournalReader(),
-                new WindowsSourceObservationReader(), _artifacts, new() { Enabled = true,
+                observations ?? new WindowsSourceObservationReader(), _artifacts, new() { Enabled = true,
                     ApprovedVolumes = [WindowsSourceChangeJournalReader.CanonicalVolume(Files)] }) { BeforeCompletionPage = hook };
         internal async Task CompleteAsync(IReadOnlySet<SourceRevisionId> seen, CancellationToken ct = default) =>
             _ = await Coordinator.CompleteAsync(Claim.SourceRoot, Claim.ScanRequest, Plan, [], [], seen, null, ct);

@@ -19,6 +19,7 @@ public sealed partial class SqlSourceIncrementalCoordinator
             x.CanonicalPath == path && x.OriginKind == 0 && x.SuppressedAtUtc == null).Take(2).ToArrayAsync(ct).ConfigureAwait(false);
         if (revisions.Length != 1 || revisions[0].FileLastWriteAtUtc is null) return null;
         var prior = revisions[0];
+        if (plan.OwnersRequiringRecoveryCapture.Contains(prior.Id)) return null;
         var blobs = await lookup.SourceArtifacts.AsNoTracking().Where(x => x.SourceRevisionId == prior.Id).Take(2).ToArrayAsync(ct).ConfigureAwait(false);
         if (blobs.Length != 1) return null;
         var artifact = blobs[0];

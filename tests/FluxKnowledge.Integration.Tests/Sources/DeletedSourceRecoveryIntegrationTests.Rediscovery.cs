@@ -15,6 +15,7 @@ public sealed partial class DeletedSourceRecoveryIntegrationTests
 {
     [NativeSqlServerTheory]
     [InlineData("never-started")]
+    [InlineData("stale-configuration")]
     [InlineData("signal-after-removal-hold")]
     [InlineData("signal-after-content-hold")]
     [InlineData("fallback-missed-capture")]
@@ -30,7 +31,7 @@ public sealed partial class DeletedSourceRecoveryIntegrationTests
         var progress = new SqlSourceWorkRecoveryProgress();
         var time = new RediscoveryClock(DateTimeOffset.UtcNow);
         var hinted = history != "fallback-missed-capture";
-        var recovered = history is "never-started" or "signal-after-removal-hold" or "signal-after-content-hold" or
+        var recovered = history is "stale-configuration" or "never-started" or "signal-after-removal-hold" or "signal-after-content-hold" or
             "fallback-missed-capture" or "hint-after-retention-failure" or "after-content-retention-deadline";
         await using var scenario = await Scenario.CreateAsync(fixture.ConnectionString, hinted ? progress : null);
         const string name = "returning.md";
@@ -106,6 +107,41 @@ public sealed partial class DeletedSourceRecoveryIntegrationTests
         Assert.Equal(initial.Id, current.Id);
         Assert.Null(current.SuppressedAtUtc);
         Assert.Contains("verified-physical-capture", current.CurrentDiscoveryEvidenceJson);
+
+        if (history == "stale-configuration")
+        {
+            using var artifacts = new ContentAddressedSourceArtifactStore(scenario.Retained);
+            var incremental = new SqlSourceIncrementalCoordinator(scenario.Factory, TimeProvider.System, new StartupJournal("I:"),
+                observations, artifacts, new SourceJournalOptions { Enabled = false }, progress);
+            var scanner = new SourceScanWorker(new LocalSourceEnumerator(), scenario.Scans, artifacts, activities,
+                incrementalCoordinator: incremental);
+            await scanner.ScanAsync(scenario.Claim.SourceRoot, scenario.Claim.ScanRequest, default);
+            Assert.NotNull(await db.SourceInventoryEntries.AsNoTracking().Where(row => row.SourceRevisionId == initial.Id)
+                .Select(row => row.ObservationJson).SingleAsync());
+            var rootId = scenario.Claim.SourceRoot.Id.Value;
+            await db.SourceRootConfigurations.Where(row => row.Id == rootId).ExecuteUpdateAsync(set => set
+                .SetProperty(row => row.ConfigurationRevision, row => row.ConfigurationRevision + 1));
+            var currentRoot = SqlSourceRemovalReconciler.Restore(await db.SourceRootConfigurations.AsNoTracking().SingleAsync(row => row.Id == rootId));
+            scenario.Admission.MarkPrepared(rootId, currentRoot.ConfigurationRevision);
+            scenario.Admission.Admit(rootId, currentRoot.ConfigurationRevision);
+            var rootHold = await scenario.PendingAsync(".", subtree: true);
+            await db.SourcePendingChanges.Where(row => row.Id == rootHold).ExecuteUpdateAsync(set => set
+                .SetProperty(row => row.ReasonFlags, 524288L));
+            await recovery.AdvanceAsync(default);
+            Assert.Equal((int)PublicJobState.Failed, await db.Jobs.AsNoTracking()
+                .Where(row => row.Id == job.Id).Select(row => row.PublicState).SingleAsync());
+            // A fresh scan request owns the new policy and freezes the outstanding root generation.
+            var prior = scenario.Claim;
+            await scenario.Scans.CompleteAsync(prior, new(prior.SourceRoot.Id, prior.ScanRequest.Id, 0, 0, 0, 0), null, default);
+            await db.Database.ExecuteSqlInterpolatedAsync($"""
+                UPDATE SourceScanRequests SET State = 0, RequestKind = 1, IncrementalManifestJson = NULL WHERE Id = {prior.ScanRequest.Id.Value};
+                UPDATE SourceScanJobs SET State = 0, DueAtUtc = SYSDATETIMEOFFSET(), LeaseOwner = NULL, LeaseExpiresAtUtc = NULL WHERE Id = {prior.ControlJobId};
+                """);
+            var owned = Assert.IsType<ClaimedSourceScan>(await scenario.Scans.ClaimNextReleasedAsync(
+                "refresh-policy", DateTimeOffset.UtcNow.AddSeconds(1), TimeSpan.FromMinutes(10), default));
+            await scanner.ScanAsync(currentRoot, owned.ScanRequest, default);
+            Assert.False(await db.SourcePendingChanges.AnyAsync(row => row.Id == rootHold));
+        }
 
         var jobs = db.Jobs.Where(row => row.Id == job.Id);
         if (history == "attempted")
