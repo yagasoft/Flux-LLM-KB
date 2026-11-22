@@ -273,7 +273,8 @@ public sealed class SqlOutlookExportIngestionService(
                     sidecar.ContentSha256,
                     Path.Combine(sourceRoot.CanonicalPath, "ready", request.ExportId.Value.ToString("N"), kind),
                     parentRevision.Id,
-                    isText ? "AcceptedUtf8Text" : "DeferredCapability",
+                    ordinal != 0 && sidecar.IsSignatureDecoration ? OutlookAttachmentDisposition.SignatureDecorationClassification :
+                        isText ? "AcceptedUtf8Text" : "DeferredCapability",
                     sidecar.ByteLength,
                     SafeExtension(sidecar.RelativePath),
                     now,
@@ -289,7 +290,8 @@ public sealed class SqlOutlookExportIngestionService(
                     ChecksumVerifiedAtUtc = now,
                     ReferenceCount = 1
                 });
-                if (profile.WatchedSourceRootId is not null && profile.WatchedPublicationSuspendedAtUtc is null)
+                if (ordinal != 0 && sidecar.IsSignatureDecoration ||
+                    profile.WatchedSourceRootId is not null && profile.WatchedPublicationSuspendedAtUtc is null)
                     continue;
 
                 var requiredCapability = isSupportedText ? null : RequiredCapability(sidecar.ContentType);

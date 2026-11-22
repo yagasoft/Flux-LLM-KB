@@ -117,6 +117,8 @@ public sealed class RetainedProcessorActivationService
         if (_options.MediaMetadataEnabled)
         {
             var media = _mediaMetadataProcessor ?? throw new InvalidOperationException("The explicitly enabled media metadata processor is not registered.");
+            await _branchStore.ReconcileOutlookDecorativeImagesAsync(EffectiveAutomaticReplayBatchSize, _retainedSourceReader, cancellationToken)
+                .ConfigureAwait(false);
             await BlockRecognisedUnsupportedMediaAsync(cancellationToken).ConfigureAwait(false);
             var preflight = media.Preflight(cancellationToken);
             if (!preflight.IsAvailable)
@@ -127,7 +129,7 @@ public sealed class RetainedProcessorActivationService
             else
             {
                 runs.Add(await RunProcessorAsync(MediaMetadataRetainedProcessor.Capability,
-                    static (candidate, bytes) => MediaMetadataRetainedProcessor.HasMatchingSupportedSignature(candidate.Extension, bytes, out _),
+                    static (candidate, bytes) => MediaMetadataRetainedProcessor.HasMatchingSupportedSignature(candidate.Extension, bytes, out _, candidate.OpaqueMediaReason is not null),
                     (claim, retained, _, token) => media.ProcessAsync(claim, retained, token), "media-metadata", cancellationToken).ConfigureAwait(false));
             }
         }
@@ -237,12 +239,15 @@ public sealed class RetainedProcessorActivationService
                     await _branchStore.BlockPromotionAsync(candidate, "retained-artifact-checksum-invalid", cancellationToken).ConfigureAwait(false);
                     continue;
                 }
-                if (!MediaMetadataRetainedProcessor.HasMatchingSupportedSignature(candidate.Extension, retained.Bytes, out var signatureOutcome))
+                if (!MediaMetadataRetainedProcessor.HasMatchingSupportedSignature(candidate.Extension, retained.Bytes, out var signatureOutcome, candidate.OpaqueMediaReason is not null))
                 {
                     await _branchStore.BlockPromotionAsync(candidate, signatureOutcome!, cancellationToken).ConfigureAwait(false);
                     continue;
                 }
-                await _branchStore.DeferPromotionAsync(candidate, outcomeCode, cancellationToken).ConfigureAwait(false);
+                // A refused legacy input remains eligible when the parser returns. Pending inputs
+                // can record preflight unavailability without losing their bounded opaque admission.
+                if (candidate.OpaqueMediaReason != MediaMetadataRetainedProcessor.SignatureMismatch)
+                    await _branchStore.DeferPromotionAsync(candidate, outcomeCode, cancellationToken).ConfigureAwait(false);
             }
             catch (Exception exception) when (exception is FileNotFoundException or DirectoryNotFoundException)
             {
@@ -376,7 +381,7 @@ public sealed class RetainedProcessorActivationService
                 continue;
             }
             if (descriptor.Id == MediaMetadataRetainedProcessor.Capability.Id &&
-                !MediaMetadataRetainedProcessor.HasMatchingSupportedSignature(candidate.Extension, retained.Bytes, out var mediaSignatureOutcome))
+                !MediaMetadataRetainedProcessor.HasMatchingSupportedSignature(candidate.Extension, retained.Bytes, out var mediaSignatureOutcome, candidate.OpaqueMediaReason is not null))
             {
                 await _branchStore.BlockPromotionAsync(candidate, mediaSignatureOutcome!, cancellationToken).ConfigureAwait(false);
                 continue;

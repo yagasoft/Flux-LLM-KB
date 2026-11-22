@@ -1,5 +1,9 @@
 using System.Buffers.Binary;
 using System.Security.Cryptography;
+using System.Text.Json;
+using FluxKnowledge.Domain.Outlook;
+using FluxKnowledge.Domain.Pipeline;
+using FluxKnowledge.Integrations.Outlook;
 using FluxKnowledge.Application.Ports;
 using FluxKnowledge.Application.Sources;
 using FluxKnowledge.Application.Visibility;
@@ -21,23 +25,246 @@ public sealed class MediaMetadataReplayIntegrationTests(NativeSqlServerFixture f
     public Task InitializeAsync() => ClearMediaDataAsync();
     public Task DisposeAsync() => ClearMediaDataAsync();
 
-    [NativeSqlServerFact]
-    public async Task A_recognised_media_input_with_an_opaque_suffix_gets_a_format_decision()
+    [NativeSqlServerTheory]
+    [InlineData(".bin", false)]
+    [InlineData(".bin", true)]
+    [InlineData("", true)]
+    public async Task Verified_opaque_gif_is_processed_once_even_if_previously_blocked(string extension, bool previouslyBlocked)
     {
         var privateRoot = CreatePrivateRoot();
         try
         {
-            var seeded = await SeedBytesAsync(privateRoot, Png(), ".bin", "opaque");
+            var gif = Convert.FromBase64String("R0lGODlhAQABAIAAAAAAAP///yH5BAEAAAAALAAAAAABAAEAAAIBRAA7");
+            var seeded = await SeedBytesAsync(privateRoot, gif, extension, "opaque");
             await using var verification = CreateContext();
+            await verification.SourceRevisions.Where(revision => revision.Id == seeded.RevisionId)
+                .ExecuteUpdateAsync(update => update.SetProperty(revision => revision.Classification, "DeferredCapability"));
             await verification.SourceActivities.Where(activity => activity.Id == seeded.ActivityId)
-                .ExecuteUpdateAsync(update => update.SetProperty(activity => activity.Reason, "media-metadata-extraction-pending"));
+                .ExecuteUpdateAsync(update => update
+                    .SetProperty(activity => activity.State, (int)(previouslyBlocked
+                        ? SourceActivityState.DeferredPolicy : SourceActivityState.DeferredUnsupported))
+                    .SetProperty(activity => activity.Reason, previouslyBlocked
+                        ? "media-metadata-signature-mismatch" : "media-metadata-extraction-pending"));
 
-            await CreateActivation(privateRoot, enabled: true).RunOnceAsync(CancellationToken.None);
+            var activation = CreateActivation(privateRoot, enabled: true);
+            var result = await activation.RunOnceAsync(CancellationToken.None);
+            Assert.Equal(1, result.CompletedBranches);
+            Assert.Equal(0, (await activation.RunOnceAsync(CancellationToken.None)).ClaimedBranches);
+            if (previouslyBlocked)
+            {
+                var old = await verification.SourceActivities.SingleAsync(activity => activity.Id == seeded.ActivityId);
+                Assert.Equal((int)SourceActivityState.CancelledSuperseded, old.State);
+                Assert.Equal("media-metadata-signature-mismatch", old.Reason);
+            }
+            var branch = await verification.SourceProcessorBranches.SingleAsync(value => value.SourceRevisionId == seeded.RevisionId);
+            Assert.Equal((int)RetainedProcessorBranchState.Completed, branch.State);
+        }
+        finally { DeletePrivateRoot(privateRoot); }
+    }
 
-            var activity = await verification.SourceActivities.SingleAsync(value => value.Id == seeded.ActivityId);
-            Assert.Equal((int)SourceActivityState.DeferredPolicy, activity.State);
-            Assert.Equal("media-metadata-signature-mismatch", activity.Reason);
-            Assert.False(await verification.SourceProcessorBranches.AnyAsync(value => value.SourceRevisionId == seeded.RevisionId));
+    [NativeSqlServerTheory]
+    [InlineData(".bin", true, true)]
+    [InlineData(".gif", true, true)]
+    [InlineData(".gif", true, false)]
+    [InlineData(".gif", false, true)]
+    public async Task Outlook_skips_single_pixel_images_without_discarding_larger_images(
+        string extension, bool captured, bool singlePixel)
+    {
+        var privateRoot = CreatePrivateRoot();
+        try
+        {
+            var gif = Convert.FromBase64String("R0lGODlhAQABAIAAAAAAAP///yH5BAEAAAAALAAAAAABAAEAAAIBRAA7");
+            if (!singlePixel) gif[6] = 2;
+            var seeded = await SeedBytesAsync(privateRoot, gif, extension, "outlook-decoration");
+            await using var verification = CreateContext();
+            await AttachWatchedOutlookReceiptAsync(verification, privateRoot, seeded, extension, gif.Length, captured);
+            if (extension == ".bin")
+            {
+                await verification.SourceRevisions.Where(value => value.Id == seeded.RevisionId)
+                    .ExecuteUpdateAsync(update => update.SetProperty(value => value.Classification, "DeferredCapability"));
+                await verification.SourceActivities.Where(value => value.Id == seeded.ActivityId)
+                    .ExecuteUpdateAsync(update => update.SetProperty(value => value.Reason, "media-metadata-extraction-pending"));
+            }
+
+            var activation = CreateActivation(privateRoot, enabled: true);
+            var activationResult = await activation.RunOnceAsync(CancellationToken.None);
+            Assert.True(activationResult.CompletedBranches == 1,
+                $"{activationResult}; activity: {await verification.SourceActivities.Where(value => value.Id == seeded.ActivityId).Select(value => value.Reason).SingleAsync()}");
+            Assert.Equal(0, (await activation.RunOnceAsync(CancellationToken.None)).ClaimedBranches);
+            var branch = await verification.SourceProcessorBranches.SingleAsync(value => value.SourceRevisionId == seeded.RevisionId);
+            Assert.Equal((int)RetainedProcessorBranchState.Completed, branch.State);
+            var skipped = captured && singlePixel;
+            Assert.Equal(skipped ? 0 : 1, branch.CompletedMemberCount);
+            var member = await verification.SourceProcessorBranchMembers.SingleAsync(value => value.BranchId == branch.Id);
+            Assert.Equal(skipped ? "skipped" : "completed", member.Disposition);
+            Assert.Equal(skipped ? "outlook-decorative-image" : null, member.ReasonCode);
+            Assert.Equal(!skipped, await verification.SourceRevisions.AnyAsync(value => value.ParentSourceRevisionId == seeded.RevisionId));
+        }
+        finally { DeletePrivateRoot(privateRoot); }
+    }
+
+    [NativeSqlServerTheory]
+    [InlineData(true)]
+    [InlineData(false)]
+    public async Task Previously_published_outlook_pixel_metadata_requires_exact_single_frame_proof(bool singleFrame)
+    {
+        var privateRoot = CreatePrivateRoot();
+        try
+        {
+            var gif = singleFrame
+                ? Convert.FromBase64String("R0lGODlhAQABAIAAAAAAAP///yH5BAEAAAAALAAAAAABAAEAAAIBRAA7")
+                : GifWithImageDirectories(2);
+            var seeded = await SeedBytesAsync(privateRoot, gif, ".bin", "historical-outlook-decoration");
+            await using var db = CreateContext();
+            await db.SourceRevisions.Where(value => value.Id == seeded.RevisionId)
+                .ExecuteUpdateAsync(update => update.SetProperty(value => value.Classification, "DeferredCapability"));
+            await db.SourceActivities.Where(value => value.Id == seeded.ActivityId)
+                .ExecuteUpdateAsync(update => update.SetProperty(value => value.State, (int)SourceActivityState.DeferredPolicy)
+                    .SetProperty(value => value.Reason, MediaMetadataRetainedProcessor.SignatureMismatch));
+
+            var activation = CreateActivation(privateRoot, enabled: true);
+            Assert.Equal(1, (await activation.RunOnceAsync(CancellationToken.None)).CompletedBranches);
+            var member = await db.SourceProcessorBranchMembers.SingleAsync(value => value.ChildSourceRevisionId != null);
+            var child = await db.SourceRevisions.AsNoTracking().SingleAsync(value => value.Id == member.ChildSourceRevisionId);
+            var now = DateTimeOffset.UtcNow;
+            var identityId = Guid.NewGuid();
+            var recordId = Guid.NewGuid();
+            db.SourceIdentities.Add(new SourceIdentityEntity
+            {
+                Id = identityId, SourceKind = "retained local source", StableKey = $"media-test-finished:{identityId:N}", CreatedAtUtc = now
+            });
+            db.PipelineRecords.Add(new PipelineRecordEntity
+            {
+                Id = recordId, SourceIdentityId = identityId, SourceRevisionId = child.Id, Revision = 1,
+                ContentHash = child.ContentSha256, RootLineageRecordId = recordId, CurrentStage = (int)PipelineStage.Publish,
+                CompletionCriteriaMet = true, RegisteredAtUtc = now
+            });
+            await db.SaveChangesAsync();
+            await db.SourceActivities.Where(value => value.Id == member.ChildSourceActivityId)
+                .ExecuteUpdateAsync(update => update.SetProperty(value => value.State, (int)SourceActivityState.Completed)
+                    .SetProperty(value => value.ResultingPipelineRecordId, recordId)
+                    .SetProperty(value => value.ResultingPipelineRecordRevision, 1L));
+            await AttachWatchedOutlookReceiptAsync(db, privateRoot, seeded, ".bin", gif.Length, includeAttachment: true);
+
+            var version = await db.IndexState.Select(value => value.CorpusVersion).SingleAsync();
+            Assert.Equal(0, (await activation.RunOnceAsync(CancellationToken.None)).ClaimedBranches);
+            var withdrawn = await db.SourceRevisions.AsNoTracking().SingleAsync(value => value.Id == child.Id);
+            Assert.Equal(singleFrame, withdrawn.SuppressedAtUtc.HasValue);
+            Assert.Equal(singleFrame ? OutlookDecorativeImage.RetentionEvidence : null, withdrawn.RetentionEvidenceJson);
+            Assert.True(await db.SourceRevisions.AnyAsync(value => value.Id == seeded.RevisionId && value.SuppressedAtUtc == null));
+            Assert.True(await db.PipelineRecords.AnyAsync(value => value.Id == recordId && !value.IsDeleted && value.CompletionCriteriaMet));
+            Assert.Equal(0, (await activation.RunOnceAsync(CancellationToken.None)).ClaimedBranches);
+            Assert.Equal(version + (singleFrame ? 1 : 0), await db.IndexState.Select(value => value.CorpusVersion).SingleAsync());
+        }
+        finally { DeletePrivateRoot(privateRoot); }
+    }
+
+    [NativeSqlServerTheory]
+    [InlineData(true)]
+    [InlineData(false)]
+    public async Task Scoped_outlook_OCR_withdrawal_verifies_the_original_and_preserves_its_ownership(bool actualPixel)
+    {
+        var privateRoot = CreatePrivateRoot();
+        try
+        {
+            var png = Png();
+            if (!actualPixel) png[19] = 2; // IHDR width.
+            var seeded = await SeedBytesAsync(privateRoot, png, ".png", "historical-outlook-ocr");
+            await using var db = CreateContext();
+            await db.SourceRevisions.Where(value => value.Id == seeded.RevisionId)
+                .ExecuteUpdateAsync(update => update.SetProperty(value => value.Classification, "DeferredCapability"));
+            Assert.Equal(1, (await CreateActivation(privateRoot, enabled: false, enableImageOcr: true)
+                .RunOnceAsync(CancellationToken.None)).CompletedBranches);
+            var member = await db.SourceProcessorBranchMembers.SingleAsync(value => value.ChildSourceRevisionId != null);
+            var child = await db.SourceRevisions.AsNoTracking().SingleAsync(value => value.Id == member.ChildSourceRevisionId);
+            var now = DateTimeOffset.UtcNow;
+            var identityId = Guid.NewGuid();
+            var recordId = Guid.NewGuid();
+            db.SourceIdentities.Add(new SourceIdentityEntity
+            {
+                Id = identityId, SourceKind = "retained local source", StableKey = $"media-test-finished:{identityId:N}", CreatedAtUtc = now
+            });
+            db.PipelineRecords.Add(new PipelineRecordEntity
+            {
+                Id = recordId, SourceIdentityId = identityId, SourceRevisionId = child.Id, Revision = 1,
+                ContentHash = child.ContentSha256, RootLineageRecordId = recordId, CurrentStage = (int)PipelineStage.Publish,
+                CompletionCriteriaMet = true, RegisteredAtUtc = now
+            });
+            db.DocumentPublications.Add(new DocumentPublicationEntity
+            {
+                OwnerSourceRevisionId = seeded.RevisionId, DocumentInputSourceRevisionId = child.Id, SourceProcessorBranchId = member.BranchId,
+                PipelineRecordId = recordId, PipelineRecordRevision = 1, ProcessorFingerprint = ImageDocumentInputProcessor.Capability.ProcessorFingerprint,
+                PublishedAtUtc = now
+            });
+            db.DocumentOcrRequests.Add(new DocumentOcrRequestEntity
+            {
+                MiniTaskId = Guid.NewGuid(), ParentJobId = Guid.NewGuid(), PipelineRecordId = recordId, SourceRevision = 1,
+                RetainedSourceRevisionId = child.Id, ContentSha256 = child.ContentSha256, RequestedPageIndexesJson = "[0]",
+                ModelRuntimeKey = "synthetic", SettingsFingerprint = "synthetic", State = (int)DocumentOcrRequestState.Requeued,
+                ResultJson = """{"pages":[{"sourceWidth":1,"sourceHeight":1}]}""", ResultDigest = new byte[32],
+                CreatedAtUtc = now, UpdatedAtUtc = now
+            });
+            await db.SaveChangesAsync();
+            await db.SourceActivities.Where(value => value.Id == member.ChildSourceActivityId)
+                .ExecuteUpdateAsync(update => update.SetProperty(value => value.State, (int)SourceActivityState.Completed)
+                    .SetProperty(value => value.ResultingPipelineRecordId, recordId)
+                    .SetProperty(value => value.ResultingPipelineRecordRevision, 1L));
+            await AttachWatchedOutlookReceiptAsync(db, privateRoot, seeded, ".png", png.Length, includeAttachment: true);
+
+            var factory = new ContextFactory(_fixture.ConnectionString);
+            using var reader = new SqlRetainedSourceReader(factory, privateRoot);
+            var store = new SqlRetainedProcessorBranchStore(factory, TimeProvider.System, new FixtureSourceAdmission(factory));
+            var approved = new OutlookDecorativePublicationTarget(seeded.RevisionId, child.Id, member.BranchId, recordId, 1);
+            Assert.Equal(0, await store.ReconcileOutlookDecorativeImagesAsync(
+                16, reader, CancellationToken.None, child.SourceRootId, approvedOcrTargets: [approved with { PipelineRecordRevision = 2 }]));
+            var version = await db.IndexState.Select(value => value.CorpusVersion).SingleAsync();
+            Assert.Equal(0, await store.ReconcileOutlookDecorativeImagesAsync(16, reader, CancellationToken.None, Guid.NewGuid(), approvedOcrTargets: [approved]));
+            Assert.Equal(actualPixel ? 1 : 0, await store.ReconcileOutlookDecorativeImagesAsync(
+                16, reader, CancellationToken.None, child.SourceRootId, verifyOnly: true, approvedOcrTargets: [approved]));
+            Assert.Equal(version, await db.IndexState.Select(value => value.CorpusVersion).SingleAsync());
+            Assert.Equal(actualPixel ? 1 : 0, await store.ReconcileOutlookDecorativeImagesAsync(
+                16, reader, CancellationToken.None, child.SourceRootId, approvedOcrTargets: [approved]));
+            Assert.Equal(0, await store.ReconcileOutlookDecorativeImagesAsync(16, reader, CancellationToken.None, child.SourceRootId, approvedOcrTargets: [approved]));
+            Assert.Equal(actualPixel, (await db.SourceRevisions.AsNoTracking().SingleAsync(value => value.Id == child.Id)).SuppressedAtUtc.HasValue);
+            Assert.True(await db.SourceRevisions.AnyAsync(value => value.Id == seeded.RevisionId && value.SuppressedAtUtc == null));
+            Assert.True(await db.DocumentOcrRequests.AnyAsync(value => value.PipelineRecordId == recordId && value.ResultDigest != null));
+            Assert.True(await db.DocumentPublications.AnyAsync(value => value.OwnerSourceRevisionId == seeded.RevisionId && value.PipelineRecordId == recordId));
+        }
+        finally { DeletePrivateRoot(privateRoot); }
+    }
+
+    [NativeSqlServerFact]
+    public async Task Earlier_unsupported_opaque_mismatches_clear_the_candidate_batch_without_reopening_named_mismatches()
+    {
+        var privateRoot = CreatePrivateRoot();
+        try
+        {
+            await using var verification = CreateContext();
+            for (var index = 0; index < RetainedProcessorOptions.MaximumAutomaticReplayBatchSize; index++)
+                await SeedBlockedAsync("OggS"u8.ToArray(), ".bin", $"unsupported-{index}");
+            var gif = Convert.FromBase64String("R0lGODlhAQABAIAAAAAAAP///yH5BAEAAAAALAAAAAABAAEAAAIBRAA7");
+            var accepted = await SeedBlockedAsync(gif, ".bin", "supported");
+            var named = await SeedBlockedAsync(gif, ".png", "wrong-name");
+
+            var activation = CreateActivation(privateRoot, enabled: true);
+            Assert.Equal(0, (await activation.RunOnceAsync(CancellationToken.None)).CompletedBranches);
+            Assert.Equal(1, (await activation.RunOnceAsync(CancellationToken.None)).CompletedBranches);
+            Assert.Equal(0, (await activation.RunOnceAsync(CancellationToken.None)).ClaimedBranches);
+            Assert.Equal(16, await verification.SourceActivities.CountAsync(activity => activity.Reason == "media-metadata-format-unsupported"));
+            Assert.Equal("media-metadata-signature-mismatch", (await verification.SourceActivities
+                .SingleAsync(activity => activity.Id == named.ActivityId)).Reason);
+            Assert.Equal(accepted.RevisionId, (await verification.SourceProcessorBranches.SingleAsync()).SourceRevisionId);
+
+            async Task<(Guid ActivityId, Guid RevisionId, string Hash)> SeedBlockedAsync(byte[] bytes, string extension, string kind)
+            {
+                var seeded = await SeedBytesAsync(privateRoot, bytes, extension, kind);
+                await verification.SourceRevisions.Where(revision => revision.Id == seeded.RevisionId)
+                    .ExecuteUpdateAsync(update => update.SetProperty(revision => revision.Classification, "DeferredCapability"));
+                await verification.SourceActivities.Where(activity => activity.Id == seeded.ActivityId)
+                    .ExecuteUpdateAsync(update => update.SetProperty(activity => activity.State, (int)SourceActivityState.DeferredPolicy)
+                        .SetProperty(activity => activity.Reason, "media-metadata-signature-mismatch"));
+                return seeded;
+            }
         }
         finally { DeletePrivateRoot(privateRoot); }
     }
@@ -594,17 +821,58 @@ public sealed class MediaMetadataReplayIntegrationTests(NativeSqlServerFixture f
         finally { DeletePrivateRoot(privateRoot); }
     }
 
+    private async Task AttachWatchedOutlookReceiptAsync(FluxKnowledgeDbContext context, string privateRoot,
+        (Guid ActivityId, Guid RevisionId, string Hash) seeded, string extension, int bytes, bool includeAttachment)
+    {
+        var capture = await SeedPngAsync(privateRoot, "capture-binding");
+        var root = await context.SourceRootConfigurations.SingleAsync(value => context.SourceRevisions
+            .Any(revision => revision.Id == seeded.RevisionId && revision.SourceRootId == value.Id));
+        var captureRootId = await context.SourceRevisions.Where(value => value.Id == capture.RevisionId)
+            .Select(value => value.SourceRootId).SingleAsync();
+        await context.SourceActivities.Where(value => value.Id == capture.ActivityId).ExecuteDeleteAsync();
+        var now = DateTimeOffset.UtcNow;
+        var profileId = Guid.NewGuid();
+        var folderId = Guid.NewGuid();
+        var exportId = Guid.NewGuid();
+        var relativePath = Path.Combine("attachments", "001-image" + extension);
+        context.OutlookCaptureProfiles.Add(new OutlookCaptureProfileEntity
+        {
+            Id = profileId, SourceRootId = captureRootId, WatchedSourceRootId = root.Id,
+            WatchedRootPath = root.CanonicalPath, WatchedStagingPath = root.CanonicalPath + "-staging",
+            WatchedRootIdentity = new string('a', 64), WatchedStagingIdentity = new string('b', 64),
+            DisplayName = "Synthetic Outlook profile", SpoolRoot = privateRoot, IsEnabled = true,
+            ConfigurationRevision = 1, CadenceTicks = TimeSpan.FromMinutes(5).Ticks,
+            MaximumOverlapTicks = TimeSpan.FromMinutes(1).Ticks, CreatedAtUtc = now, UpdatedAtUtc = now
+        });
+        context.OutlookCaptureFolders.Add(new OutlookCaptureFolderEntity
+        {
+            Id = folderId, ProfileId = profileId, StoreId = "synthetic-store", FolderEntryId = "synthetic-folder", DisplayName = "Inbox"
+        });
+        context.OutlookCaptureExports.Add(new OutlookCaptureExportEntity
+        {
+            Id = exportId, ProfileId = profileId, FolderId = folderId, EntryId = "synthetic-mail",
+            SourceFingerprint = new string('f', 64), State = (int)OutlookExportState.Ingested, WatchedWithdrawalAtUtc = now,
+            WatchedPreparedBundleJson = JsonSerializer.Serialize(new OutlookWatchedBundleReceipt(exportId, Guid.NewGuid(),
+                includeAttachment ? [new(relativePath, seeded.Hash, bytes)] : []))
+        });
+        await context.SaveChangesAsync();
+        await context.SourceRevisions.Where(value => value.Id == seeded.RevisionId)
+            .ExecuteUpdateAsync(update => update.SetProperty(value => value.CanonicalPath,
+                Path.Combine(root.CanonicalPath, exportId.ToString("N"), relativePath)));
+    }
+
     private RetainedProcessorActivationService CreateActivation(string privateRoot, bool enabled, MediaMetadataRetainedProcessor? media = null,
-        IRetainedSourceReader? retainedReader = null)
+        IRetainedSourceReader? retainedReader = null, bool enableImageOcr = false)
     {
         var factory = new ContextFactory(_fixture.ConnectionString);
         var writer = new SqlRetainedArtifactWriter(factory, privateRoot);
         var zip = new ZipArchiveRetainedProcessor(writer);
         return new RetainedProcessorActivationService(
-            new SourceCapabilityService(new SqlSourceActivityStore(factory, TimeProvider.System), new LocalSourceCapabilityHandlerRegistry([zip, new MediaMetadataCapabilityHandler()])),
+            new SourceCapabilityService(new SqlSourceActivityStore(factory, TimeProvider.System), new LocalSourceCapabilityHandlerRegistry([zip, new MediaMetadataCapabilityHandler(), new ImageDocumentInputCapabilityHandler()])),
             new SqlRetainedProcessorBranchStore(factory, TimeProvider.System, sourceAdmission: new global::FluxKnowledge.Integration.Tests.Support.FixtureSourceAdmission(factory)), retainedReader ?? _resources.Own(new SqlRetainedSourceReader(factory, privateRoot)), zip,
-            new RetainedProcessorOptions { MediaMetadataEnabled = enabled }, TimeProvider.System,
-            mediaMetadataProcessor: media ?? new MediaMetadataRetainedProcessor(writer, new AllowingDisclosure()));
+            new RetainedProcessorOptions { MediaMetadataEnabled = enabled, ImageDocumentOcrEnabled = enableImageOcr }, TimeProvider.System,
+            mediaMetadataProcessor: media ?? new MediaMetadataRetainedProcessor(writer, new AllowingDisclosure()),
+            imageProcessor: new ImageDocumentInputProcessor());
     }
 
     private async Task<(Guid ActivityId, Guid RevisionId, string Hash)> SeedPngAsync(string privateRoot, string sourceKind) =>
@@ -655,6 +923,8 @@ public sealed class MediaMetadataReplayIntegrationTests(NativeSqlServerFixture f
         var revisionIds = context.SourceRevisions.Where(value => rootIds.Contains(value.SourceRootId));
         var activityIds = context.SourceActivities.Where(value => revisionIds.Select(revision => revision.Id).Contains(value.SourceRevisionId)).Select(value => value.Id);
         var branchIds = context.SourceProcessorBranches.Where(value => revisionIds.Select(revision => revision.Id).Contains(value.SourceRevisionId)).Select(value => value.Id);
+        await context.DocumentPublications.Where(value => branchIds.Contains(value.SourceProcessorBranchId)).ExecuteDeleteAsync();
+        await context.DocumentOcrRequests.Where(value => revisionIds.Select(revision => revision.Id).Contains(value.RetainedSourceRevisionId)).ExecuteDeleteAsync();
         await context.SourceProcessorBranchMembers.Where(value => branchIds.Contains(value.BranchId)).ExecuteDeleteAsync();
         await context.SourceProcessorAttempts.Where(value => branchIds.Contains(value.BranchId)).ExecuteDeleteAsync();
         await context.SourceProcessorBranches.Where(value => branchIds.Contains(value.Id)).ExecuteDeleteAsync();
@@ -663,8 +933,15 @@ public sealed class MediaMetadataReplayIntegrationTests(NativeSqlServerFixture f
             value.SourceActivityId != null && activityIds.Contains(value.SourceActivityId.Value) ||
             value.SourceRevisionId != null && revisionIds.Select(revision => revision.Id).Contains(value.SourceRevisionId.Value)).ExecuteDeleteAsync();
         await context.SourceActivities.Where(value => activityIds.Contains(value.Id)).ExecuteDeleteAsync();
+        var testIdentities = context.SourceIdentities.Where(value => value.StableKey.StartsWith("media-test-finished:"));
+        await context.PipelineRecords.Where(value => testIdentities.Select(identity => identity.Id).Contains(value.SourceIdentityId)).ExecuteDeleteAsync();
+        await testIdentities.ExecuteDeleteAsync();
         await context.SourceArtifacts.Where(value => revisionIds.Select(revision => revision.Id).Contains(value.SourceRevisionId)).ExecuteDeleteAsync();
         await context.SourceRevisions.Where(value => rootIds.Contains(value.SourceRootId)).ExecuteDeleteAsync();
+        var profileIds = context.OutlookCaptureProfiles.Where(value => rootIds.Contains(value.SourceRootId)).Select(value => value.Id);
+        await context.OutlookCaptureExports.Where(value => value.ProfileId.HasValue && profileIds.Contains(value.ProfileId.Value)).ExecuteDeleteAsync();
+        await context.OutlookCaptureFolders.Where(value => profileIds.Contains(value.ProfileId)).ExecuteDeleteAsync();
+        await context.OutlookCaptureProfiles.Where(value => rootIds.Contains(value.SourceRootId)).ExecuteDeleteAsync();
         await context.SourceRootConfigurations.Where(value => value.CanonicalPath.StartsWith("C:\\phase5-media-")).ExecuteDeleteAsync();
     }
     private static string CreatePrivateRoot() { var root = Path.Combine(Path.GetTempPath(), $"flux-media-retained-{Guid.NewGuid():N}"); Directory.CreateDirectory(root); return root; }

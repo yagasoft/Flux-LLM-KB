@@ -1,3 +1,4 @@
+@using FluxKnowledge.Domain.Sources
 @using FluxKnowledge.Web.Components.Status
 @using Microsoft.JSInterop
 @implements IAsyncDisposable
@@ -5,11 +6,18 @@
 
 <div class="file-path">
     <strong>@(OpaqueMember ? "Retained archive member" : FileName)</strong>
+    @if (ArchivePath is not null)
+    {
+        <p class="status-freshness">Containing archive: <code>@PipelineFilePresentation.ShortenPath(ArchivePath)</code></p>
+    }
     @if (OpaqueMember)
     {
-        <p class="status-freshness">Containing archive: <code>@PipelineFilePresentation.ShortenPath(ArchivePath!)</code><br />Original member path unavailable. Member identity:</p>
+        <p class="status-freshness">Original member path unavailable.</p>
     }
-    <code class="file-path-preview">@(ShowFullPath && !OpaqueMember ? FullPath : PipelineFilePresentation.ShortenPath(FullPath))</code>
+    else
+    {
+        <code class="file-path-preview">@(ShowFullPath ? FullPath : PipelineFilePresentation.ShortenPath(FullPath))</code>
+    }
     <details><summary>@(OpaqueMember ? "Member identity and copy" : "Full path and copy")</summary>
         @if (ArchivePath is not null)
         {
@@ -29,7 +37,7 @@
     [Parameter] public bool ShowFullPath { get; set; }
     private IJSObjectReference? _module;
     private string? _copyStatus;
-    private bool OpaqueMember => ArchivePath is not null && FullPath.StartsWith("retained-archive-member:", StringComparison.Ordinal);
+    private bool OpaqueMember => ArchiveMemberIdentity.IsOpaqueLocator(FullPath);
     private string ValueLabel => OpaqueMember ? "Member identity" : "Full path";
     private string FileName => FullPath.Replace('\\', '/').Split('/').LastOrDefault() ?? FullPath;
     private async Task CopyAsync()

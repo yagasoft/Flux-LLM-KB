@@ -14,6 +14,22 @@ public enum RetainedProcessorBranchState
 /// <summary>Opaque child identity derived from an immutable parent and a normalised archive member path.</summary>
 public sealed record ArchiveMemberIdentity(string MemberFingerprint, string SyntheticLocator, string StableSourceIdentity)
 {
+    public static bool IsOpaqueLocator(string locator)
+    {
+        const string legacy = "retained-archive-member:";
+        const string scoped = "C:/retained-archive-members/";
+        if (locator.StartsWith(legacy, StringComparison.Ordinal))
+            return IsHex(locator[legacy.Length..], 64);
+
+        var path = locator.Replace('\\', '/');
+        if (!path.StartsWith(scoped, StringComparison.OrdinalIgnoreCase)) return false;
+        var parts = path[scoped.Length..].Split('/');
+        return parts.Length == 1 && IsHex(parts[0], 64) ||
+            parts.Length == 2 && IsHex(parts[0], 32) && IsHex(parts[1], 64);
+    }
+
+    private static bool IsHex(string value, int length) => value.Length == length && value.All(char.IsAsciiHexDigit);
+
     public static ArchiveMemberIdentity Create(string parentStableIdentity, string normalisedEntryName)
     {
         ArgumentException.ThrowIfNullOrWhiteSpace(parentStableIdentity);
@@ -36,6 +52,8 @@ public sealed record RetainedProcessorClaim(
 {
     /// <summary>Durable, verified exact document recovery activity; ordinary document identities are unchanged.</summary>
     public Guid? DocumentRecoveryId { get; init; }
+
+    public bool IsOutlookSource { get; init; }
 }
 
 /// <summary>

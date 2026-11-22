@@ -88,7 +88,10 @@ public sealed class SqlOutlookWatchedBundleReader(
             var binding = sidecars[index + 1];
             var metadata = manifest?.Attachments[index];
             attachments[index] = new OutlookWatchedAttachment(metadata?.OriginalFileName,
-                async token => await ReadSidecarAsync(binding, token).ConfigureAwait(false), metadata?.ContentType);
+                async token => await ReadSidecarAsync(binding, token).ConfigureAwait(false), metadata?.ContentType)
+            {
+                IsSignatureDecoration = binding.Classification == OutlookAttachmentDisposition.SignatureDecorationClassification
+            };
         }
 
         return new OutlookWatchedBundle(exportId, manifest?.Subject, manifest?.Sender, manifest?.ReceivedAtUtc, body, attachments);
@@ -132,7 +135,7 @@ public sealed class SqlOutlookWatchedBundleReader(
                 revision.SourceRootId != parent.SourceRootId || revision.Revision != 1 || revision.OriginKind != 0 ||
                 revision.CanonicalPath != Path.Combine(symbolicDirectory, kind) ||
                 (ordinal == 0 ? revision.Classification != "AcceptedUtf8Text" :
-                    revision.Classification is not ("AcceptedUtf8Text" or "DeferredCapability")))
+                    revision.Classification is not ("AcceptedUtf8Text" or "DeferredCapability" or OutlookAttachmentDisposition.SignatureDecorationClassification)))
             {
                 throw new InvalidDataException("The Outlook export has a missing or ambiguous retained sidecar binding.");
             }
@@ -212,7 +215,8 @@ public sealed class SqlOutlookWatchedBundleReader(
     }
 
     private static bool MatchesSidecar(OutlookExportSidecar? sidecar, SidecarBinding revision) =>
-        sidecar is not null && sidecar.ByteLength == revision.ByteLength && sidecar.ContentSha256 == revision.ContentSha256;
+        sidecar is not null && sidecar.ByteLength == revision.ByteLength && sidecar.ContentSha256 == revision.ContentSha256 &&
+        sidecar.IsSignatureDecoration == (revision.Classification == OutlookAttachmentDisposition.SignatureDecorationClassification);
 
     private sealed record SidecarBinding(
         Guid Id,

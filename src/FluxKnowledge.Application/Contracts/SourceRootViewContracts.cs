@@ -78,7 +78,11 @@ public sealed record SourceFileProjection(
     string Classification,
     string Status,
     string? Reason,
-    Guid? CorpusPipelineRecordId);
+    Guid? CorpusPipelineRecordId)
+{
+    public string? ArchiveMemberPath { get; init; }
+    public string? ArchivePath { get; init; }
+}
 
 public sealed record SourceScopeProjection(
     long ConfigurationRevision,

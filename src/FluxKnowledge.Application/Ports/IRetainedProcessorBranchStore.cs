@@ -68,6 +68,11 @@ public interface IRetainedProcessorBranchStore
         SourceCapabilityDescriptor capability,
         CancellationToken cancellationToken) => ReadPromotionCandidatesAsync(maximumCount, cancellationToken);
 
+    /// <summary>Suppresses already-emitted decorative Outlook image outputs; historical OCR requires an explicit source root.</summary>
+    ValueTask<int> ReconcileOutlookDecorativeImagesAsync(int maximumCount, IRetainedSourceReader retainedReader, CancellationToken cancellationToken, Guid? historicalOcrRootId = null, bool verifyOnly = false,
+        IReadOnlyCollection<OutlookDecorativePublicationTarget>? approvedOcrTargets = null) =>
+        ValueTask.FromResult(0);
+
     /// <summary>Lists only known unsupported media extensions; this is not a broad deferred-work selector.</summary>
     ValueTask<IReadOnlyList<RetainedProcessorPromotionCandidate>> ReadRecognisedUnsupportedMediaCandidatesAsync(
         int maximumCount,
@@ -171,6 +176,7 @@ public sealed record RetainedProcessorPromotionCandidate(
     string Extension = "")
 {
     public long? SourceConfigurationRevision { get; init; }
+    public string? OpaqueMediaReason { get; init; }
 }
 
 /// <summary>Processor-derived child manifest. Values are opaque and never use a source locator.</summary>
@@ -209,6 +215,9 @@ public sealed record RetainedProcessorMember(
     string Classification)
     : RetainedProcessorDerivedChild(Identity.MemberFingerprint, Identity.SyntheticLocator, Identity.StableSourceIdentity,
         ContentSha256, StoreRelativePath, ByteLength, Classification, OriginKind: 1, Extension: ".txt");
+
+public sealed record OutlookDecorativePublicationTarget(
+    Guid OwnerSourceRevisionId, Guid ChildSourceRevisionId, Guid BranchId, Guid PipelineRecordId, long PipelineRecordRevision);
 
 public sealed record RetainedProcessorCompletion(
     IReadOnlyList<RetainedProcessorDerivedChild> Members,

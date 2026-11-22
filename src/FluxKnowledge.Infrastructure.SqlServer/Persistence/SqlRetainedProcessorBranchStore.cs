@@ -12,6 +12,8 @@ using System.Data;
 using FluxKnowledge.Application.Documents;
 using FluxKnowledge.Application.Workers;
 using FluxKnowledge.Domain.Pipeline;
+using FluxKnowledge.Domain.Outlook;
+using FluxKnowledge.Integrations.Outlook;
 
 namespace FluxKnowledge.Infrastructure.SqlServer.Persistence;
 
@@ -995,13 +997,17 @@ public sealed class SqlRetainedProcessorBranchStore(IDbContextFactory<FluxKnowle
             _ => Array.Empty<string>()
         };
         await using var context = await contextFactory.CreateDbContextAsync(cancellationToken).ConfigureAwait(false);
-        var needsSourceBinding = capability.Id == ZipArchiveRetainedProcessor.Capability.Id ||
-            capability.Id == MediaMetadataRetainedProcessor.Capability.Id;
+        var isMedia = capability.Id == MediaMetadataRetainedProcessor.Capability.Id;
+        var needsSourceBinding = capability.Id == ZipArchiveRetainedProcessor.Capability.Id || isMedia;
         var candidates = from activity in context.SourceActivities.AsNoTracking()
                       join revision in context.SourceRevisions.AsNoTracking() on activity.SourceRevisionId equals revision.Id
                       join root in context.SourceRootConfigurations.AsNoTracking() on revision.SourceRootId equals root.Id
                       join artifact in context.SourceArtifacts.AsNoTracking() on revision.Id equals artifact.SourceRevisionId
-                      where activity.State == (int)SourceActivityState.DeferredUnsupported &&
+                      let opaqueMedia = isMedia && revision.Classification == "DeferredCapability" &&
+                          (revision.Extension == "" || revision.Extension.ToLower() == ".bin")
+                      where (activity.State == (int)SourceActivityState.DeferredUnsupported ||
+                            opaqueMedia && activity.State == (int)SourceActivityState.DeferredPolicy &&
+                            activity.Reason == MediaMetadataRetainedProcessor.SignatureMismatch) &&
                             activity.ExecutionClass == (int)ExecutionClass.DeferredCapability &&
                             root.State == (int)SourceRootState.Enabled &&
                             EF.Functions.Collate(artifact.ContentSha256, SchemaConfiguration.SchedulerFenceCollation) ==
@@ -1009,7 +1015,7 @@ public sealed class SqlRetainedProcessorBranchStore(IDbContextFactory<FluxKnowle
                             EF.Functions.Collate(revision.ContentSha256, SchemaConfiguration.SchedulerFenceCollation) ==
                                 EF.Functions.Collate(activity.InputFingerprint, SchemaConfiguration.SchedulerFenceCollation) &&
                             !context.SourceProcessorBranches.Any(branch => branch.SourceActivityId == activity.Id)
-                      select new { activity, revision, root.ConfigurationRevision };
+                      select new { activity, revision, root.ConfigurationRevision, opaqueMedia };
         if (capability.ProcessorKind is "document-ooxml-structural-extract" or "document-vsdx-structural-extract" or "document-vsdx-visio-extract" or "document-pdf-structural-extract" or "document-image-ocr-extract")
             candidates = candidates.Where(value => extensions.Contains(value.revision.Extension.ToLower()));
         else if (capability.ProcessorKind == "media-metadata")
@@ -1017,7 +1023,9 @@ public sealed class SqlRetainedProcessorBranchStore(IDbContextFactory<FluxKnowle
             var imageOcrRunnable = await IsImageOcrRunnableAsync(context, cancellationToken).ConfigureAwait(false);
             candidates = candidates.Where(value =>
                 (extensions.Contains(value.revision.Extension.ToLower()) ||
-                    value.activity.Reason == "media-metadata-extraction-pending") &&
+                    value.activity.Reason == MediaMetadataRetainedProcessor.SignaturePending ||
+                    value.opaqueMedia && (value.activity.Reason == MediaMetadataRetainedProcessor.ParserUnavailable ||
+                        value.activity.Reason == MediaMetadataRetainedProcessor.SignatureMismatch)) &&
                 (!imageOcrRunnable || !new[] { ".jpg", ".jpeg", ".png" }.Contains(value.revision.Extension.ToLower())));
         }
         else if (capability.ProcessorKind == "retained-csharp-code")
@@ -1058,7 +1066,13 @@ public sealed class SqlRetainedProcessorBranchStore(IDbContextFactory<FluxKnowle
             : candidates.OrderBy(value => value.activity.CreatedAtUtc);
         return await ordered.ThenBy(value => value.activity.Id)
             .Select(value => new RetainedProcessorPromotionCandidate(value.activity.Id, new SourceRevisionId(value.activity.SourceRevisionId), value.activity.InputFingerprint, value.revision.Extension)
-            { SourceConfigurationRevision = needsSourceBinding ? value.ConfigurationRevision : null })
+            {
+                SourceConfigurationRevision = needsSourceBinding ? value.ConfigurationRevision : null,
+                OpaqueMediaReason = value.opaqueMedia &&
+                    (value.activity.Reason == MediaMetadataRetainedProcessor.SignaturePending ||
+                     value.activity.Reason == MediaMetadataRetainedProcessor.ParserUnavailable ||
+                     value.activity.Reason == MediaMetadataRetainedProcessor.SignatureMismatch) ? value.activity.Reason : null
+            })
             .Take(Math.Clamp(maximumCount, 1, RetainedProcessorOptions.MaximumAutomaticReplayBatchSize)).ToListAsync(cancellationToken).ConfigureAwait(false);
     }
 
@@ -1185,6 +1199,8 @@ public sealed class SqlRetainedProcessorBranchStore(IDbContextFactory<FluxKnowle
 
     public async ValueTask<bool> PromoteAsync(RetainedProcessorPromotionCandidate candidate, SourceCapabilityDescriptor capability, CancellationToken cancellationToken)
     {
+        if (candidate.OpaqueMediaReason is not null && capability.Id != MediaMetadataRetainedProcessor.Capability.Id)
+            return false;
         if (capability.Id == RetainedCsharpCodeProcessor.Capability.Id)
         {
             return await PromoteRetainedCsharpAsync(candidate, capability, cancellationToken).ConfigureAwait(false);
@@ -1214,7 +1230,10 @@ public sealed class SqlRetainedProcessorBranchStore(IDbContextFactory<FluxKnowle
                 DescriptorFingerprint = capability.ProcessorFingerprint,
                 State = (int)SourceActivityState.Pending, CreatedAtUtc = timeProvider.GetUtcNow(), UpdatedAtUtc = timeProvider.GetUtcNow() };
             var supersessionReason = $"superseded-by-{capability.ProcessorKind}";
-            legacy.State = (int)SourceActivityState.CancelledSuperseded; legacy.Reason = supersessionReason; legacy.UpdatedAtUtc = timeProvider.GetUtcNow();
+            legacy.State = (int)SourceActivityState.CancelledSuperseded;
+            if (candidate.OpaqueMediaReason != MediaMetadataRetainedProcessor.SignatureMismatch)
+                legacy.Reason = supersessionReason;
+            legacy.UpdatedAtUtc = timeProvider.GetUtcNow();
             context.SourceActivities.Add(successor);
             context.SourceActivityRelations.Add(new SourceActivityRelationEntity { Id = Guid.NewGuid(), PredecessorActivityId = legacy.Id, SuccessorActivityId = successor.Id,
                 RelationshipKind = "superseded-by-retained-processor", ReasonCode = supersessionReason, CreatedAtUtc = timeProvider.GetUtcNow() });
@@ -1453,7 +1472,19 @@ public sealed class SqlRetainedProcessorBranchStore(IDbContextFactory<FluxKnowle
 
         var activity = await context.SourceActivities.SingleOrDefaultAsync(value => value.Id == candidate.LegacyActivityId,
             cancellationToken).ConfigureAwait(false);
-        return activity is null || activity.State != (int)SourceActivityState.DeferredUnsupported ||
+        if (activity is null) return null;
+        var previousOpaqueRefusal = candidate.OpaqueMediaReason == MediaMetadataRetainedProcessor.SignatureMismatch &&
+            activity.State == (int)SourceActivityState.DeferredPolicy;
+        if (candidate.OpaqueMediaReason is { } expectedReason &&
+            (candidate.SourceConfigurationRevision is null || activity.Reason != expectedReason ||
+             activity.ExecutionClass != (int)ExecutionClass.DeferredCapability ||
+             !await context.SourceRevisions.AnyAsync(revision => revision.Id == candidate.SourceRevisionId.Value &&
+                 revision.Classification == "DeferredCapability" && revision.Extension == candidate.Extension &&
+                 (revision.Extension == "" || revision.Extension.ToLower() == ".bin"), cancellationToken).ConfigureAwait(false) ||
+             await context.SourceActivityRelations.AnyAsync(relation => relation.PredecessorActivityId == activity.Id,
+                 cancellationToken).ConfigureAwait(false)))
+            return null;
+        return (!previousOpaqueRefusal && activity.State != (int)SourceActivityState.DeferredUnsupported) ||
             activity.SourceRevisionId != candidate.SourceRevisionId.Value ||
             !string.Equals(activity.InputFingerprint, candidate.InputSha256, StringComparison.Ordinal) ||
             await context.SourceProcessorBranches.AnyAsync(value => value.SourceActivityId == activity.Id, cancellationToken)
@@ -1985,9 +2016,222 @@ public sealed class SqlRetainedProcessorBranchStore(IDbContextFactory<FluxKnowle
             value.ProcessorFingerprint == PdfDocumentProcessor.Capability.ProcessorFingerprint).Select(value => value.SourceActivityId).ToArray();
         var documentActivities = documentActivityIds.Length == 0 ? new Dictionary<Guid, SourceActivityEntity>() :
             await context.SourceActivities.AsNoTracking().Where(value => documentActivityIds.Contains(value.Id)).ToDictionaryAsync(value => value.Id, cancellationToken).ConfigureAwait(false);
+        var outlookRevisions = new HashSet<Guid>();
+        if (processorFingerprint == ImageDocumentInputProcessor.Capability.ProcessorFingerprint ||
+            processorFingerprint == MediaMetadataRetainedProcessor.Capability.ProcessorFingerprint)
+        {
+            foreach (var revision in revisions.Values)
+                if (await IsOutlookAttachmentAsync(context, revision, cancellationToken).ConfigureAwait(false))
+                    outlookRevisions.Add(revision.Id);
+        }
         return branches.Select(branch => new RetainedProcessorClaim(branch.Id, new SourceRevisionId(branch.SourceRevisionId), revisions[branch.SourceRevisionId].StableSourceIdentity,
             branch.InputSha256, leaseOwner, branch.LeaseGeneration, expiry)
-            { DocumentRecoveryId = documentActivities.TryGetValue(branch.SourceActivityId, out var activity) ? SqlDocumentInputRecovery.RecoveryId(activity) : null }).ToArray();
+            {
+                DocumentRecoveryId = documentActivities.TryGetValue(branch.SourceActivityId, out var activity) ? SqlDocumentInputRecovery.RecoveryId(activity) : null,
+                IsOutlookSource = outlookRevisions.Contains(branch.SourceRevisionId)
+            }).ToArray();
+        }, cancellationToken).ConfigureAwait(false);
+    }
+
+    private static async Task<bool> IsOutlookAttachmentAsync(FluxKnowledgeDbContext context, SourceRevisionEntity revision,
+        CancellationToken cancellationToken)
+    {
+        if (revision.OriginKind != 0) return false;
+        var rootPath = await context.OutlookCaptureProfiles.AsNoTracking()
+            .Where(profile => profile.WatchedSourceRootId == revision.SourceRootId)
+            .Select(profile => profile.WatchedRootPath).SingleOrDefaultAsync(cancellationToken).ConfigureAwait(false);
+
+        if (rootPath is not null && Path.IsPathFullyQualified(revision.CanonicalPath) && Path.IsPathFullyQualified(rootPath))
+        {
+            var relative = Path.GetRelativePath(rootPath, revision.CanonicalPath);
+            var components = relative.Split(Path.DirectorySeparatorChar);
+            if (components.Length == 3 && Guid.TryParseExact(components[0], "N", out var exportId) &&
+                string.Equals(components[1], "attachments", StringComparison.OrdinalIgnoreCase))
+            {
+                var receiptJson = await (
+                    from export in context.OutlookCaptureExports.AsNoTracking()
+                    join profile in context.OutlookCaptureProfiles.AsNoTracking() on export.ProfileId equals profile.Id
+                    where export.Id == exportId && export.State == (int)OutlookExportState.Ingested &&
+                          profile.WatchedSourceRootId == revision.SourceRootId && export.WatchedWithdrawalAtUtc != null
+                    select export.WatchedPreparedBundleJson).SingleOrDefaultAsync(cancellationToken).ConfigureAwait(false);
+                if (receiptJson is null) return false;
+                try
+                {
+                    var receipt = JsonSerializer.Deserialize<OutlookWatchedBundleReceipt>(receiptJson);
+                    var expected = Path.Combine(components[1], components[2]);
+                    return receipt?.ExportId == exportId && receipt.StageId != Guid.Empty && receipt.Files is not null &&
+                           receipt.Files.Count(file => string.Equals(file.RelativePath, expected, StringComparison.OrdinalIgnoreCase) &&
+                               file.Sha256 == revision.ContentSha256 && file.ByteLength == revision.ByteLength) == 1;
+                }
+                catch (JsonException)
+                {
+                    return false;
+                }
+            }
+        }
+
+        if (revision.ParentSourceRevisionId is not Guid parentId) return false;
+        var captureId = await (
+            from export in context.OutlookCaptureExports.AsNoTracking()
+            join profile in context.OutlookCaptureProfiles.AsNoTracking() on export.ProfileId equals profile.Id
+            join owner in context.SourceRevisions.AsNoTracking() on export.SourceRevisionId equals owner.Id
+            where export.SourceRevisionId == parentId && export.State == (int)OutlookExportState.Ingested &&
+                  profile.SourceRootId == revision.SourceRootId && owner.SourceRootId == revision.SourceRootId &&
+                  owner.Classification == "OutlookMessage" && owner.ContentSha256 == export.ManifestHash
+            select (Guid?)export.Id).SingleOrDefaultAsync(cancellationToken).ConfigureAwait(false);
+        if (captureId is null) return false;
+        var prefix = $"outlook:{captureId:N}:attachment-";
+        return revision.StableSourceIdentity.StartsWith(prefix, StringComparison.Ordinal) &&
+               int.TryParse(revision.StableSourceIdentity.AsSpan(prefix.Length), out var ordinal) && ordinal > 0;
+    }
+
+    public async ValueTask<int> ReconcileOutlookDecorativeImagesAsync(int maximumCount, IRetainedSourceReader retainedReader,
+        CancellationToken cancellationToken, Guid? historicalOcrRootId = null, bool verifyOnly = false,
+        IReadOnlyCollection<OutlookDecorativePublicationTarget>? approvedOcrTargets = null)
+    {
+        if (deploymentValidationHold?.IsHeld == true) return 0;
+        if (historicalOcrRootId.HasValue && approvedOcrTargets is not { Count: > 0 and <= 128 }) return 0;
+        var approved = approvedOcrTargets?.ToDictionary(target => target.ChildSourceRevisionId) ?? [];
+        var approvedChildIds = approved.Keys.ToArray();
+        return await ExecuteWithRetryAsync(async () =>
+        {
+            await using var context = await contextFactory.CreateDbContextAsync(cancellationToken).ConfigureAwait(false);
+            // Stored output dimensions are a candidate filter. Independently read the original below.
+            var singlePixelRequests = context.DocumentOcrRequests.FromSqlRaw("""
+                SELECT [request].* FROM [DocumentOcrRequests] AS [request]
+                CROSS APPLY (SELECT CASE WHEN ISJSON([request].[ResultJson])=1 THEN [request].[ResultJson] ELSE NULL END AS [document]) AS [safe]
+                WHERE JSON_VALUE([safe].[document], '$.pages[0].sourceWidth')=N'1'
+                  AND JSON_VALUE([safe].[document], '$.pages[0].sourceHeight')=N'1'
+                  AND LEFT(JSON_QUERY([safe].[document], '$.pages'), 1)=N'['
+                  AND (SELECT COUNT(*) FROM OPENJSON([safe].[document], '$.pages'))=1
+                """).Where(request => request.State == (int)DocumentOcrRequestState.Requeued && request.ResultDigest != null);
+            // Recheck the exact output, its owner and its branch together under the publication fence.
+            var candidates =
+                from artifact in context.SourceArtifacts
+                join child in SqlSourceWorkEligibility.Inputs(context, sourceAdmission) on artifact.SourceRevisionId equals child.Id
+                join member in context.SourceProcessorBranchMembers on child.Id equals member.ChildSourceRevisionId
+                join childActivity in context.SourceActivities on member.ChildSourceActivityId equals (Guid?)childActivity.Id
+                join record in context.PipelineRecords on childActivity.ResultingPipelineRecordId equals (Guid?)record.Id
+                join branch in context.SourceProcessorBranches on member.BranchId equals branch.Id
+                join activity in context.SourceActivities on branch.SourceActivityId equals activity.Id
+                join owner in context.SourceRevisions on branch.SourceRevisionId equals owner.Id
+                join root in context.SourceRootConfigurations on owner.SourceRootId equals root.Id
+                where artifact.ContentSha256 == child.ContentSha256 && artifact.ByteLength == child.ByteLength &&
+                      child.ParentSourceRevisionId == owner.Id && child.SourceRootId == owner.SourceRootId &&
+                      owner.Classification == "DeferredCapability" &&
+                      EF.Functions.Collate(branch.InputSha256, SchemaConfiguration.SchedulerFenceCollation) ==
+                          EF.Functions.Collate(owner.ContentSha256, SchemaConfiguration.SchedulerFenceCollation) &&
+                      member.Disposition == "completed" && member.ByteLength == child.ByteLength &&
+                      branch.State == (int)RetainedProcessorBranchState.Completed && branch.CompletedMemberCount == 1 &&
+                      activity.SourceRevisionId == owner.Id &&
+                      EF.Functions.Collate(activity.InputFingerprint, SchemaConfiguration.SchedulerFenceCollation) ==
+                          EF.Functions.Collate(branch.InputSha256, SchemaConfiguration.SchedulerFenceCollation) &&
+                      EF.Functions.Collate(activity.ProcessorVersion, SchemaConfiguration.SchedulerFenceCollation) ==
+                          EF.Functions.Collate(branch.ProcessorVersion, SchemaConfiguration.SchedulerFenceCollation) &&
+                      EF.Functions.Collate(activity.DescriptorFingerprint, SchemaConfiguration.SchedulerFenceCollation) ==
+                          EF.Functions.Collate(branch.ProcessorFingerprint, SchemaConfiguration.SchedulerFenceCollation) &&
+                      childActivity.SourceRevisionId == child.Id && childActivity.State == (int)SourceActivityState.Completed &&
+                      record.SourceRevisionId == child.Id && record.Revision == childActivity.ResultingPipelineRecordRevision &&
+                      record.CurrentStage == (int)PipelineStage.Publish && record.CompletionCriteriaMet && !record.IsDeleted &&
+                      EF.Functions.Collate(record.ContentHash, SchemaConfiguration.SchedulerFenceCollation) ==
+                          EF.Functions.Collate(child.ContentSha256, SchemaConfiguration.SchedulerFenceCollation) &&
+                      root.State == (int)SourceRootState.Enabled &&
+                      context.OutlookCaptureProfiles.Any(profile => profile.SourceRootId == root.Id || profile.WatchedSourceRootId == root.Id) &&
+                      (historicalOcrRootId == null &&
+                       artifact.ContentSha256 == MediaMetadataRetainedProcessor.SinglePixelGifManifestHash &&
+                       child.OriginKind == 3 && child.Classification == "AcceptedUtf8Text" && child.Extension == ".json" &&
+                       (owner.Extension == ".bin" || owner.Extension == "") &&
+                       branch.ProcessorVersion == MediaMetadataRetainedProcessor.Capability.ProcessorVersion &&
+                       branch.ProcessorFingerprint == MediaMetadataRetainedProcessor.Capability.ProcessorFingerprint &&
+                       context.SourceActivityRelations.Any(relation => relation.SuccessorActivityId == activity.Id &&
+                           relation.RelationshipKind == "superseded-by-retained-processor" &&
+                           context.SourceActivities.Any(predecessor => predecessor.Id == relation.PredecessorActivityId &&
+                               predecessor.SourceRevisionId == owner.Id && predecessor.Reason == MediaMetadataRetainedProcessor.SignatureMismatch))
+                       ||
+                       root.Id == historicalOcrRootId && approvedChildIds.Contains(child.Id) &&
+                       child.OriginKind == 2 && child.Classification == DocumentProcessingInput.ImageClassification &&
+                       (owner.Extension == ".jpg" || owner.Extension == ".jpeg" || owner.Extension == ".png") &&
+                       child.ContentSha256 == owner.ContentSha256 && child.ByteLength == owner.ByteLength &&
+                       branch.ProcessorVersion == ImageDocumentInputProcessor.Capability.ProcessorVersion &&
+                       branch.ProcessorFingerprint == ImageDocumentInputProcessor.Capability.ProcessorFingerprint &&
+                       !context.SourceActivityRelations.Any(relation => relation.SuccessorActivityId == activity.Id &&
+                           relation.ReasonCode == DocumentProcessingInput.DocumentRecoveryVersion) &&
+                       context.DocumentPublications.Any(publication => publication.OwnerSourceRevisionId == owner.Id &&
+                           publication.DocumentInputSourceRevisionId == child.Id && publication.SourceProcessorBranchId == branch.Id &&
+                           publication.PipelineRecordId == record.Id && publication.PipelineRecordRevision == record.Revision &&
+                           publication.ProcessorFingerprint == ImageDocumentInputProcessor.Capability.ProcessorFingerprint) &&
+                       context.DocumentOcrRequests.Count(request => request.RetainedSourceRevisionId == child.Id &&
+                           request.PipelineRecordId == record.Id && request.SourceRevision == record.Revision) == 1 &&
+                       singlePixelRequests.Any(request => request.RetainedSourceRevisionId == child.Id &&
+                           request.PipelineRecordId == record.Id && request.SourceRevision == record.Revision &&
+                           EF.Functions.Collate(request.ContentSha256, SchemaConfiguration.SchedulerFenceCollation) ==
+                               EF.Functions.Collate(child.ContentSha256, SchemaConfiguration.SchedulerFenceCollation)))
+                select new { Child = child, Owner = owner, RecordId = record.Id, record.Revision, BranchId = branch.Id };
+            var limit = Math.Clamp(maximumCount, 1, verifyOnly ? 128 : RetainedProcessorOptions.MaximumAutomaticReplayBatchSize);
+            var selected = new Dictionary<Guid, (Guid OwnerId, string Sha256, long ByteLength, Guid RecordId, long RecordRevision, Guid BranchId)>(limit);
+            var verifiedBytes = new HashSet<(string Sha256, long ByteLength, string Extension)>();
+            for (var offset = 0; selected.Count < limit; offset += limit)
+            {
+                var page = await candidates.AsNoTracking().OrderBy(value => value.Child.Id).Skip(offset).Take(limit)
+                    .ToListAsync(cancellationToken).ConfigureAwait(false);
+                foreach (var match in page)
+                {
+                    if (historicalOcrRootId.HasValue &&
+                        (!approved.TryGetValue(match.Child.Id, out var target) || target.OwnerSourceRevisionId != match.Owner.Id ||
+                         target.BranchId != match.BranchId || target.PipelineRecordId != match.RecordId ||
+                         target.PipelineRecordRevision != match.Revision)) continue;
+                    if (!await IsOutlookAttachmentAsync(context, match.Owner, cancellationToken).ConfigureAwait(false)) continue;
+                    var input = (match.Owner.ContentSha256, match.Owner.ByteLength, match.Owner.Extension);
+                    if (!verifiedBytes.Contains(input))
+                    {
+                        if (!await OutlookDecorativeImage.VerifyRetainedRasterAsync(retainedReader,
+                            new SourceRevisionId(match.Owner.Id), input.ContentSha256, input.ByteLength, input.Extension,
+                            match.Child.OriginKind == 3, cancellationToken).ConfigureAwait(false))
+                            continue;
+                        verifiedBytes.Add(input);
+                    }
+                    selected.Add(match.Child.Id, (match.Owner.Id, input.ContentSha256, input.ByteLength,
+                        match.RecordId, match.Revision, match.BranchId));
+                    if (selected.Count == limit) break;
+                }
+                if (page.Count < limit) break;
+            }
+            if (verifyOnly || selected.Count == 0) return selected.Count;
+
+            await using var transaction = await context.Database.BeginTransactionAsync(IsolationLevel.Serializable, cancellationToken).ConfigureAwait(false);
+            await SqlPublishedPassageSelection.AcquireFenceAsync(context, cancellationToken).ConfigureAwait(false);
+            if (deploymentValidationHold?.IsHeld == true) return 0;
+            var selectedIds = selected.Keys.ToArray();
+            var matched = await candidates.Where(value => selectedIds.Contains(value.Child.Id))
+                .ToListAsync(cancellationToken).ConfigureAwait(false);
+            var children = new List<SourceRevisionEntity>();
+            foreach (var match in matched)
+            {
+                var proof = selected[match.Child.Id];
+                if (proof.OwnerId == match.Owner.Id && proof.Sha256 == match.Owner.ContentSha256 &&
+                    proof.ByteLength == match.Owner.ByteLength && proof.RecordId == match.RecordId &&
+                    proof.RecordRevision == match.Revision && proof.BranchId == match.BranchId &&
+                    await IsOutlookAttachmentAsync(context, match.Owner, cancellationToken).ConfigureAwait(false))
+                {
+                    children.Add(match.Child);
+                }
+            }
+            if (children.Count == 0) return 0;
+
+            var now = await DatabaseUtcNowAsync(context, cancellationToken).ConfigureAwait(false);
+            foreach (var child in children)
+            {
+                child.SuppressedAtUtc = now;
+                child.RetentionEvidenceJson ??= OutlookDecorativeImage.RetentionEvidence;
+                OperatorEventAppender.Add(context, OperatorEventDraft.SourceRemoved(child.SourceRootId, child.Id,
+                    $"source:{child.Id:N}", new { revision = child.Revision, reason = OutlookDecorativeImage.Reason }));
+            }
+            await SqlPublishedPassageSelection.AdvanceVersionAsync(context, now, cancellationToken,
+                children.Select(child => new IndexAffectedScope(3, child.SourceRootId)).Distinct().ToArray()).ConfigureAwait(false);
+            await context.SaveChangesAsync(cancellationToken).ConfigureAwait(false);
+            if (deploymentValidationHold?.IsHeld == true) return 0;
+            await transaction.CommitAsync(cancellationToken).ConfigureAwait(false);
+            return children.Count;
         }, cancellationToken).ConfigureAwait(false);
     }
 
@@ -2047,6 +2291,16 @@ public sealed class SqlRetainedProcessorBranchStore(IDbContextFactory<FluxKnowle
             throw new InvalidOperationException("The retained document parent artifact is not bound to its source revision.");
         }
         var memberOutcomes = completion.MemberOutcomes ?? [];
+        if (memberOutcomes.Any(outcome => outcome.ReasonCode == OutlookDecorativeImage.Reason) &&
+            (recoveryId is not null || !claim.IsOutlookSource || completion.Members.Count != 0 || memberOutcomes.Count != 1 ||
+             memberOutcomes[0].Disposition != "skipped" || memberOutcomes[0].MemberFingerprint != parent.ContentSha256 ||
+             memberOutcomes[0].ByteLength != parent.ByteLength ||
+             branch.ProcessorFingerprint != MediaMetadataRetainedProcessor.Capability.ProcessorFingerprint &&
+             branch.ProcessorFingerprint != ImageDocumentInputProcessor.Capability.ProcessorFingerprint ||
+             !await IsOutlookAttachmentAsync(context, parent, cancellationToken).ConfigureAwait(false)))
+        {
+            return false;
+        }
         if (recoveryId is not null)
         {
             if (completion.Members.Count != 1 || memberOutcomes.Count != 0) return false;

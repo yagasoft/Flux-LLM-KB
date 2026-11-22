@@ -71,7 +71,10 @@ internal sealed record OutlookItemEnvelope(
 internal sealed record OutlookAttachmentPayload(
     string FileName,
     string ContentType,
-    ReadOnlyMemory<byte> Content);
+    ReadOnlyMemory<byte> Content)
+{
+    public bool IsSignatureDecoration { get; init; }
+}
 
 internal sealed record OutlookMessagePayload(
     ReadOnlyMemory<byte> Body,

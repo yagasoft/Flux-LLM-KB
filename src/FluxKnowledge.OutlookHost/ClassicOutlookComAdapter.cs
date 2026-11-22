@@ -184,6 +184,8 @@ internal sealed class ClassicOutlookComAdapter : IClassicOutlookAdapter
 {
     private const string AttachmentBytesSchema = "http://schemas.microsoft.com/mapi/proptag/0x37010102";
     private const string AttachmentMimeSchema = "http://schemas.microsoft.com/mapi/proptag/0x370E001F";
+    private const string AttachmentContentIdSchema = "http://schemas.microsoft.com/mapi/proptag/0x3712001F";
+    private const string AttachmentHiddenSchema = "http://schemas.microsoft.com/mapi/proptag/0x7FFE000B";
     private const int MaximumDirectedFolderCandidates = 500;
     private readonly Outlook.Application _application;
     private readonly Outlook.NameSpace _session;
@@ -387,7 +389,10 @@ internal sealed class ClassicOutlookComAdapter : IClassicOutlookAdapter
                     throw OutlookComFailureClassifier.ClassifyCom(exception, OutlookComFailureStage.AttachmentEnumeration);
                 }
 
+                var signatureImages = attachmentCount == 0 ? [] :
+                    OutlookSignatureImages.Find(ReadOptionalMailText(() => mail.HTMLBody));
                 var attachments = new List<OutlookAttachmentPayload>(attachmentCount);
+                var contentIds = new string?[attachmentCount];
                 for (var index = 1; index <= attachmentCount; index++)
                 {
                     Outlook.Attachment? attachment = null;
@@ -411,10 +416,16 @@ internal sealed class ClassicOutlookComAdapter : IClassicOutlookAdapter
                                     OutlookComFailureReason.OutlookUnavailable,
                                     stage: OutlookComFailureStage.AttachmentByteProperty);
                             var contentType = accessor.GetProperty(AttachmentMimeSchema) as string;
-                            attachments.Add(new OutlookAttachmentPayload(
-                                attachment.FileName,
-                                string.IsNullOrWhiteSpace(contentType) ? "application/octet-stream" : contentType,
-                                bytes));
+                            var mediaType = string.IsNullOrWhiteSpace(contentType) ? "application/octet-stream" : contentType;
+                            var contentId = signatureImages.Count == 0 ? null : OutlookSignatureImages.NormalizeContentId(
+                                ReadOptionalMailText(() => accessor.GetProperty(AttachmentContentIdSchema) as string));
+                            contentIds[index - 1] = contentId;
+                            attachments.Add(new OutlookAttachmentPayload(attachment.FileName, mediaType, bytes)
+                            {
+                                IsSignatureDecoration = contentId is not null &&
+                                    signatureImages.Contains(contentId, StringComparer.OrdinalIgnoreCase) &&
+                                    OutlookSignatureImages.IsRaster(mediaType, bytes) && ReadOptionalAttachmentHidden(accessor)
+                            });
                         }
                         catch (COMException exception)
                         {
@@ -429,6 +440,14 @@ internal sealed class ClassicOutlookComAdapter : IClassicOutlookAdapter
                     {
                         Release(attachment);
                     }
+                }
+
+                var duplicateContentIds = contentIds.OfType<string>().GroupBy(id => id, StringComparer.OrdinalIgnoreCase)
+                    .Where(group => group.Count() > 1).Select(group => group.Key).ToHashSet(StringComparer.OrdinalIgnoreCase);
+                for (var index = 0; index < attachments.Count; index++)
+                {
+                    if (contentIds[index] is { } contentId && duplicateContentIds.Contains(contentId))
+                        attachments[index] = attachments[index] with { IsSignatureDecoration = false };
                 }
 
                 return ValueTask.FromResult(new OutlookMessagePayload(
@@ -456,6 +475,12 @@ internal sealed class ClassicOutlookComAdapter : IClassicOutlookAdapter
         Release(_session);
         Release(_application);
         return ValueTask.CompletedTask;
+    }
+
+    private static bool ReadOptionalAttachmentHidden(Outlook.PropertyAccessor accessor)
+    {
+        try { return accessor.GetProperty(AttachmentHiddenSchema) is true; }
+        catch (COMException) { return false; }
     }
 
     private static string? ReadOptionalMailText(Func<string?> read)

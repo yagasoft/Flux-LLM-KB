@@ -20,7 +20,12 @@ establish successful extraction.
 | Binary Office DOC, XLS and PPT | Retained with an explicit parser-unavailable state. | No supported binary Office text parser is currently registered. |
 | MP4, M4V, MOV, WAV and MP3 | Metadata indexing and, for explicitly configured filesystem roots, separately queued offline speech transcription. | Requires the pinned local runtime and exclusive shared GPU admission. Up to 1 GiB, 120 minutes of decoded audio and 20 minutes of worker execution. A same-name adjacent transcript candidate holds automatic transcription for review. Machine-generated transcripts need review. |
 | Other recognised image, audio and video formats | Bounded metadata extraction where a capability is registered. | Additional processing depends on the configured capability. |
+
 | Unknown, malformed, protected or policy-denied content | Named refusal or deferred state. | No silent coercion into text or unrestricted external parser fallback. |
+
+Retained media classified during capture can use an allowlisted signature when its name is extensionless or ends in `.bin`. Metadata processing retains the original locator and bytes. Named media extensions still require a matching signature.
+
+Outlook retains the original attachment bytes. It skips confirmed single-pixel images in supported still formats and hidden inline images whose original message HTML ties them exclusively to an explicit signature container. Ambiguous images follow the normal processing route. Exact byte matches share retained storage while each message keeps its own attachment reference.
 
 English OCR has known repeated-text fidelity limits. A page with both native
 text and scanned regions is not currently region-OCRed. Arabic OCR is outside

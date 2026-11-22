@@ -76,7 +76,8 @@ internal sealed class OutlookExportIngestionBridge(
                     cancellationToken).ConfigureAwait(false);
                 attachments.Add(OutlookExportSidecar.Create(relativePath, attachment.ContentType) with
                 {
-                    OriginalFileName = attachment.FileName
+                    OriginalFileName = attachment.FileName,
+                    IsSignatureDecoration = attachment.IsSignatureDecoration
                 });
             }
 

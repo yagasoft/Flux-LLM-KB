@@ -44,6 +44,13 @@ public sealed class ImageDocumentInputProcessor : ILocalSourceCapabilityHandler
         var extension = IsPng(retained.Bytes) ? ".png" : IsJpeg(retained.Bytes) ? ".jpg" : null;
         if (extension is null)
             throw new RetainedProcessorException("image-document-container-invalid");
+        if (claim.IsOutlookSource && claim.DocumentRecoveryId is null &&
+            OutlookDecorativeImage.IsSmallRasterSinglePixel(retained.Bytes,
+                extension == ".png" ? MediaMetadataFormat.Png : MediaMetadataFormat.Jpeg, cancellationToken))
+        {
+            return ValueTask.FromResult(OutlookDecorativeImage.Skip(claim.InputSha256, retained.ByteLength));
+        }
+
         var input = DocumentProcessingInput.CreateImageChild(claim, retained, extension);
         var receipt = Convert.ToHexStringLower(SHA256.HashData(Encoding.UTF8.GetBytes(
             $"completed:{input.MemberFingerprint}:{input.ContentSha256}:{input.ByteLength}")));

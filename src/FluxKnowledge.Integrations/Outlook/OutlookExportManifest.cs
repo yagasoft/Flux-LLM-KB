@@ -92,6 +92,9 @@ public sealed record OutlookExportSidecar(
     [JsonIgnore(Condition = JsonIgnoreCondition.WhenWritingNull)]
     public string? OriginalFileName { get; init; }
 
+    [JsonIgnore(Condition = JsonIgnoreCondition.WhenWritingDefault)]
+    public bool IsSignatureDecoration { get; init; }
+
     public static OutlookExportSidecar Create(string relativePath, string contentType) =>
         new(relativePath, contentType, new string('0', 64), 0);
 

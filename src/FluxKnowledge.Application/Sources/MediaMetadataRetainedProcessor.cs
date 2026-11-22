@@ -32,7 +32,9 @@ public sealed class MediaMetadataRetainedProcessor(
     public const long MaximumParserReadBytes = 96L * 1024 * 1024;
     public const int MaximumMetadataDirectories = 128;
     public const int MaximumManifestUtf8Bytes = 1_024;
-    private const string ParserUnavailable = "media-metadata-parser-unavailable";
+    public const string ParserUnavailable = "media-metadata-parser-unavailable";
+    public const string SignatureMismatch = "media-metadata-signature-mismatch";
+    public const string SignaturePending = "media-metadata-extraction-pending";
     private readonly IMediaMetadataParser _parser = parser ?? new MetadataExtractorMediaMetadataParser();
 
     public static readonly SourceCapabilityDescriptor Capability = new(
@@ -68,8 +70,16 @@ public sealed class MediaMetadataRetainedProcessor(
     }
 
     /// <summary>Checks the extension-led promotion fence without reading a source path.</summary>
-    public static bool HasMatchingSupportedSignature(string fileNameOrExtension, ReadOnlySpan<byte> bytes, out string? outcomeCode)
+    public static bool HasMatchingSupportedSignature(string fileNameOrExtension, ReadOnlySpan<byte> bytes, out string? outcomeCode,
+        bool allowOpaqueExtension = false)
     {
+        if (string.IsNullOrEmpty(fileNameOrExtension) || string.Equals(fileNameOrExtension, ".bin", StringComparison.OrdinalIgnoreCase))
+        {
+            var supported = allowOpaqueExtension && MediaMetadataSignature.TryDetect(bytes, out _);
+            outcomeCode = supported ? null : allowOpaqueExtension ? "media-metadata-format-unsupported" : SignatureMismatch;
+            return supported;
+        }
+
         if (!MediaMetadataSignature.TryGetFormatForExtension(fileNameOrExtension, out var expected))
         {
             outcomeCode = MediaMetadataSignature.IsRecognisedUnsupportedMediaExtension(fileNameOrExtension) &&
@@ -154,6 +164,10 @@ public sealed class MediaMetadataRetainedProcessor(
         cancellationToken.ThrowIfCancellationRequested();
         if (parsed.Format != format || !IsSafeContainer(parsed.Container) || parsed.Audio is { SampleRateHz: <= 0 } or { Channels: <= 0 })
             throw new RetainedProcessorException("media-metadata-parser-failed");
+        if (claim.IsOutlookSource && prefix.LongLength == retained.ByteLength &&
+            OutlookDecorativeImage.IsSinglePixel(parsed, prefix))
+            return OutlookDecorativeImage.Skip(claim.InputSha256, retained.ByteLength);
+
         var manifest = CanonicalManifest(parsed, cancellationToken);
         var manifestBytes = Encoding.UTF8.GetBytes(manifest);
         if (manifestBytes.Length > MaximumManifestUtf8Bytes)
@@ -192,6 +206,10 @@ public sealed class MediaMetadataRetainedProcessor(
             PublicationLease: receipt.PublicationLease);
         return new RetainedProcessorCompletion([child], Hash($"{child.MemberFingerprint}:{child.ContentSha256}:{child.ByteLength}"));
     }
+
+    public static string SinglePixelGifManifestHash { get; } =
+        Hash(CanonicalManifest(new MediaMetadataParseResult(MediaMetadataFormat.Gif, "gif", 1, 1, null, null),
+            CancellationToken.None));
 
     private static string CanonicalManifest(MediaMetadataParseResult parsed, CancellationToken cancellationToken)
     {
@@ -360,6 +378,9 @@ public sealed record MediaMetadataParseResult(
     MediaMetadataAudioFacts? Audio,
     IReadOnlyList<MediaMetadataIgnoredField>? IgnoredFields = null)
 {
+    internal bool CompleteRasterMetadata { get; init; }
+    internal bool SingleGifFrame { get; init; }
+
     public static MediaMetadataParseResult Png(int width, int height, IReadOnlyList<MediaMetadataIgnoredField>? ignoredFields = null) =>
         new(MediaMetadataFormat.Png, "png", width, height, null, null, ignoredFields);
 }
@@ -404,7 +425,14 @@ internal sealed class MetadataExtractorMediaMetadataParser : IMediaMetadataParse
             throw new InvalidDataException("Metadata directory limit exceeded.");
         var (width, height) = Dimensions(directories, format, cancellationToken);
         return new MediaMetadataParseResult(format, Container(format), width, height,
-            DurationMilliseconds(directories, format), Audio(directories, format));
+            DurationMilliseconds(directories, format), Audio(directories, format))
+        {
+            CompleteRasterMetadata = !directories.Any(directory => directory.HasError),
+            SingleGifFrame = format == MediaMetadataFormat.Gif && directories.OfType<GifImageDirectory>().ToArray() is [var frame] &&
+                PositiveInt(frame, GifImageDirectory.TagWidth) == 1 && PositiveInt(frame, GifImageDirectory.TagHeight) == 1 &&
+                frame.TryGetInt32(GifImageDirectory.TagLeft, out var left) && left == 0 &&
+                frame.TryGetInt32(GifImageDirectory.TagTop, out var top) && top == 0
+        };
     }
 
     private static MediaMetadataAudioFacts? Audio(IReadOnlyList<MetadataDirectory> directories, MediaMetadataFormat format)

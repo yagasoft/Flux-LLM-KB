@@ -7,6 +7,8 @@ namespace FluxKnowledge.Integrations.Outlook;
 public sealed record OutlookWatchedAttachment(
     string? FileName, Func<CancellationToken, Task<ReadOnlyMemory<byte>>> ReadContentAsync, string? ContentType = null)
 {
+    public bool IsSignatureDecoration { get; init; }
+
     public OutlookWatchedAttachment(string? fileName, ReadOnlyMemory<byte> content, string? contentType = null)
         : this(fileName, _ => Task.FromResult(content), contentType)
     {
@@ -164,13 +166,14 @@ public sealed class OutlookWatchedBundleWriter
         while (body.ReadLine() is { } line)
             text.Append("    ").Append(line).Append('\n');
 
-        if (bundle.Attachments.Count > 0)
+        if (bundle.Attachments.Any(attachment => !attachment.IsSignatureDecoration))
         {
             Directory.CreateDirectory(Path.Combine(staging, "attachments"));
             text.Append("\n## Attachments\n\n");
             for (var index = 0; index < bundle.Attachments.Count; index++)
             {
                 var attachment = bundle.Attachments[index];
+                if (attachment.IsSignatureDecoration) continue;
                 var bytes = await attachment.ReadContentAsync(cancellationToken).ConfigureAwait(false);
                 var fileName = $"{index + 1:D3}-{SafeFileName(attachment, bytes.Span)}";
                 files.Add(await WriteFileAsync(staging, Path.Combine("attachments", fileName), bytes,

@@ -1,5 +1,6 @@
 using System.Text.Json;
 using FluxKnowledge.Application.Contracts;
+using FluxKnowledge.Application.Sources;
 using FluxKnowledge.Domain.Pipeline;
 using FluxKnowledge.Domain.Sources;
 using FluxKnowledge.Infrastructure.SqlServer.Persistence;
@@ -27,6 +28,7 @@ public sealed class ZipArchiveProcessorPrivacyTests(NativeSqlServerFixture fixtu
         var pipelineId = Guid.NewGuid();
         var now = DateTimeOffset.UtcNow;
         var hash = new string('a', 64);
+        var locator = $@"C:\retained-archive-members\{parentId:N}\{new string('d', 64)}";
         await using (var setup = CreateContext())
         {
             setup.SourceRootConfigurations.Add(new SourceRootConfigurationEntity
@@ -46,7 +48,7 @@ public sealed class ZipArchiveProcessorPrivacyTests(NativeSqlServerFixture fixtu
                     CanonicalPath = "C:\\phase5-public-root\\retained.zip", Classification = "DeferredCapability", Extension = ".zip", ByteLength = 1, DiscoveredAtUtc = now },
                 new SourceRevisionEntity { Id = childId, SourceRootId = rootId, ParentSourceRevisionId = parentId,
                     StableSourceIdentity = "retained-archive-member:opaque", Revision = 1, ContentSha256 = new string('b', 64),
-                    CanonicalPath = "C:\\phase5-public-root\\retained-archive-members\\opaque", Classification = "AcceptedUtf8Text", Extension = ".txt", OriginKind = 1, ByteLength = 1, DiscoveredAtUtc = now });
+                    CanonicalPath = locator, Classification = "AcceptedUtf8Text", Extension = ".txt", OriginKind = 1, ByteLength = 1, DiscoveredAtUtc = now });
             setup.SourceIdentities.Add(new SourceIdentityEntity { Id = sourceIdentityId, SourceKind = "retained archive", StableKey = "retained-archive-member:opaque", CreatedAtUtc = now });
             setup.PipelineRecords.Add(new PipelineRecordEntity { Id = pipelineId, SourceIdentityId = sourceIdentityId, SourceRevisionId = childId, Revision = 1,
                 ContentHash = new string('b', 64), RootLineageRecordId = pipelineId, CurrentStage = (int)PipelineStage.Publish, CompletionCriteriaMet = true, RegisteredAtUtc = now });
@@ -60,12 +62,18 @@ public sealed class ZipArchiveProcessorPrivacyTests(NativeSqlServerFixture fixtu
         }
 
         var factory = new TestDbContextFactory(fixture.ConnectionString);
-        var sources = await new SourceRootProjectionReader(factory, null!, null!, null!).ReadRootsAsync(CancellationToken.None);
+        var reader = new SourceRootProjectionReader(factory, null!, null!, new LocalSourceCapabilityHandlerRegistry([]));
+        var sources = await reader.ReadRootsAsync(CancellationToken.None);
+        var detail = await reader.ReadRootAsync(rootId, CancellationToken.None);
+        var member = Assert.Single(detail!.Files, file => file.ArchiveMemberPath is not null);
+        Assert.Equal("Retained archive member", member.FileName);
+        Assert.Equal(locator, member.ArchiveMemberPath);
+        Assert.Equal(@"C:\phase5-public-root\retained.zip", member.ArchivePath);
         var corpus = await new SqlCorpusProjectionReader(factory).ReadPageAsync(new CorpusQuery(), CancellationToken.None);
         var events = await new SqlOperatorEventProjectionReader(factory).ReadPageAsync(new OperatorEventQuery(), CancellationToken.None);
         var pipeline = await new SqlProjectionReader(factory, new HealthyRecoveryStatus(), new SqlGpuSchedulerStore(factory))
             .ReadPipelineRecordAsync(pipelineId, CancellationToken.None);
-        var serialised = JsonSerializer.Serialize(new { sources, corpus, events, pipeline });
+        var serialised = JsonSerializer.Serialize(new { sources, detail, corpus, events, pipeline });
 
         Assert.DoesNotContain(PrivateRootSentinel, serialised, StringComparison.Ordinal);
         Assert.DoesNotContain(MemberNameSentinel, serialised, StringComparison.Ordinal);

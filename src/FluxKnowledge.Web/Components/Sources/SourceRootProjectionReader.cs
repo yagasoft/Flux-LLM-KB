@@ -7,6 +7,7 @@ using FluxKnowledge.Application.Workers;
 using FluxKnowledge.Domain.Jobs;
 using FluxKnowledge.Domain.Pipeline;
 using FluxKnowledge.Domain.Sources;
+using FluxKnowledge.Domain.Outlook;
 using FluxKnowledge.Infrastructure.SqlServer.Persistence;
 using FluxKnowledge.Infrastructure.SqlServer.Persistence.Configurations;
 using FluxKnowledge.Infrastructure.SqlServer.Persistence.Entities;
@@ -145,7 +146,10 @@ public sealed class SourceRootProjectionReader(
                 revision.OriginKind,
                 revision.SourceRootId,
                 revision.StableSourceIdentity,
-                revision.DiscoveredAtUtc))
+                revision.DiscoveredAtUtc,
+                revision.OriginKind == 1 && revision.ParentSourceRevision != null &&
+                    revision.ParentSourceRevision.SourceRootId == revision.SourceRootId
+                    ? revision.ParentSourceRevision.CanonicalPath : null))
             .ToArrayAsync(cancellationToken)
             .ConfigureAwait(false);
         var publications = await (
@@ -154,7 +158,7 @@ public sealed class SourceRootProjectionReader(
                 join input in context.SourceRevisions.AsNoTracking() on publication.DocumentInputSourceRevisionId equals input.Id
                 join branch in context.SourceProcessorBranches.AsNoTracking() on publication.SourceProcessorBranchId equals branch.Id
                 join record in context.PipelineRecords.AsNoTracking() on publication.PipelineRecordId equals record.Id
-                where owner.SourceRootId == rootId && owner.SuppressedAtUtc == null
+                where input.SuppressedAtUtc == null && owner.SourceRootId == rootId && owner.SuppressedAtUtc == null
                     && record.Revision == publication.PipelineRecordRevision && record.CompletionCriteriaMet && !record.IsDeleted
                 select new DocumentPublicationRow(
                     publication.OwnerSourceRevisionId,
@@ -464,7 +468,9 @@ public sealed class SourceRootProjectionReader(
             from assessment in assessmentValues.DefaultIfEmpty()
             join branch in context.SourceProcessorBranches.AsNoTracking() on activity.Id equals branch.SourceActivityId into branches
             from branch in branches.DefaultIfEmpty()
-            join publicationValue in context.DocumentPublications.AsNoTracking() on revision.Id equals publicationValue.OwnerSourceRevisionId into publicationValues
+            join publicationValue in context.DocumentPublications.AsNoTracking()
+                .Where(value => context.SourceRevisions.Any(input => input.Id == value.DocumentInputSourceRevisionId && input.SuppressedAtUtc == null))
+                on revision.Id equals publicationValue.OwnerSourceRevisionId into publicationValues
             from publication in publicationValues.DefaultIfEmpty()
             join recordValue in context.PipelineRecords.AsNoTracking() on activity.ResultingPipelineRecordId equals recordValue.Id into recordValues
             from record in recordValues.DefaultIfEmpty()
@@ -552,15 +558,20 @@ public sealed class SourceRootProjectionReader(
                 state.PublishedPipelineRecordId.HasValue ? 3 : null,
                 true,
                 state.BranchId,
-                state.Status == "Completed" ? "No extractable text" : null,
+                state.Status is "Completed" or "Skipped" ? "No extractable text" : null,
                 PublishedAtUtc: state.PublishedAtUtc,
                 Reason: state.Reason));
         }
         var unconfirmed = UnconfirmedRevisionIds(knownFiles);
         var represented = rows.Select(row => row.SourceRevisionId).ToHashSet();
         rows.AddRange(knownFiles.Where(file => !represented.Contains(file.Id)).Select(file =>
-            new SourceStateRow(file.SourceRootId, file.Id, (int)SourceActivityState.Pending,
-                null, null, null, null, false)));
+        {
+            var decoration = file.Classification == OutlookAttachmentDisposition.SignatureDecorationClassification;
+            return new SourceStateRow(file.SourceRootId, file.Id,
+                (int)(decoration ? SourceActivityState.Completed : SourceActivityState.Pending),
+                null, null, null, null, false, TerminalOutcome: decoration ? "No extractable text" : null,
+                Reason: decoration ? "Outlook signature image" : null);
+        }));
         var statesByRevision = rows.GroupBy(row => row.SourceRevisionId).ToDictionary(g => g.Key, g => g.ToArray());
         var filesByRoot = knownFiles.GroupBy(FileBindingKey).Select(bindings =>
         {
@@ -707,10 +718,24 @@ public sealed class SourceRootProjectionReader(
         return revisions.Where(revision => revision.OriginKind is not (2 or 3)).GroupBy(FileBindingKey).Select(bindings =>
         {
             var revision = bindings.First();
+            SourceFileProjection ProjectFile(string fileName, string relativePath, string classification,
+                string status, string? reason, Guid? recordId)
+            {
+                var isArchiveMember = revision.OriginKind == 1;
+                var opaque = isArchiveMember && ArchiveMemberIdentity.IsOpaqueLocator(revision.CanonicalPath);
+                return new SourceFileProjection(opaque ? "Retained archive member" : fileName,
+                    opaque ? revision.ArchivePath ?? "Retained archive member" : relativePath,
+                    classification, status, reason, recordId)
+                {
+                    ArchiveMemberPath = isArchiveMember ? revision.CanonicalPath : null,
+                    ArchivePath = isArchiveMember ? revision.ArchivePath : null
+                };
+            }
+
             if (unconfirmed.Contains(revision.Id))
             {
                 var path = RelativePath(rootCanonicalPath, revision.CanonicalPath);
-                return new SourceFileProjection(Path.GetFileName(path), path, revision.Classification, "Unconfirmed",
+                return ProjectFile(Path.GetFileName(path), path, revision.Classification, "Unconfirmed",
                     "source-revision-binding-unconfirmed", null);
             }
             logicalStates.TryGetValue(revision.Id, out var logicalState);
@@ -719,7 +744,7 @@ public sealed class SourceRootProjectionReader(
                 var publishedRelativePath = RelativePath(rootCanonicalPath, revision.CanonicalPath);
                 if (logicalState is not null)
                 {
-                    return new SourceFileProjection(
+                    return ProjectFile(
                         Path.GetFileName(publishedRelativePath),
                         publishedRelativePath,
                         PublishedDocumentClassification(revision.Extension, revision.Classification),
@@ -727,7 +752,7 @@ public sealed class SourceRootProjectionReader(
                         logicalState.Reason,
                         logicalState.PublishedPipelineRecordId.HasValue ? null : publication.PipelineRecordId);
                 }
-                return new SourceFileProjection(
+                return ProjectFile(
                     Path.GetFileName(publishedRelativePath),
                     publishedRelativePath,
                     PublishedDocumentClassification(revision.Extension, revision.Classification),
@@ -738,7 +763,7 @@ public sealed class SourceRootProjectionReader(
             if (logicalState is not null)
             {
                 var logicalRelativePath = RelativePath(rootCanonicalPath, revision.CanonicalPath);
-                return new SourceFileProjection(
+                return ProjectFile(
                     Path.GetFileName(logicalRelativePath),
                     logicalRelativePath,
                     revision.Classification,
@@ -746,11 +771,17 @@ public sealed class SourceRootProjectionReader(
                     logicalState.Reason,
                     null);
             }
+            if (revision.Classification == OutlookAttachmentDisposition.SignatureDecorationClassification)
+            {
+                var path = RelativePath(rootCanonicalPath, revision.CanonicalPath);
+                return ProjectFile(Path.GetFileName(path), path, revision.Classification, "Skipped", "Outlook signature image", null);
+            }
+
             var revisionActivities = activities.Where(activity => activity.SourceRevisionId == revision.Id).ToArray();
             var revisionBranches = terminalBlockedBranches.Where(branch => branch.SourceRevisionId == revision.Id).ToArray();
             var state = ClassifyRevision(revisionActivities, revisionBranches.Length > 0);
             var relativePath = RelativePath(rootCanonicalPath, revision.CanonicalPath);
-            return new SourceFileProjection(
+            return ProjectFile(
                 Path.GetFileName(relativePath),
                 relativePath,
                 revision.Classification,
@@ -798,6 +829,27 @@ public sealed class SourceRootProjectionReader(
                 select new LogicalOwnerStateRow(
                     owner.SourceRootId, owner.Id, branch.Id, branch.CreatedAtUtc, 2,
                     "Completed", "office-document-no-extractable-text"))
+            .ToListAsync(cancellationToken).ConfigureAwait(false);
+
+        var decorativeImages = await (
+                from branch in context.SourceProcessorBranches.AsNoTracking()
+                join owner in currentOwners on branch.SourceRevisionId equals owner.Id
+                join member in context.SourceProcessorBranchMembers.AsNoTracking() on branch.Id equals member.BranchId
+                join child in context.SourceRevisions.AsNoTracking() on member.ChildSourceRevisionId equals child.Id into children
+                from child in children.DefaultIfEmpty()
+                where branch.State == (int)RetainedProcessorBranchState.Completed &&
+                      (branch.ProcessorFingerprint == MediaMetadataRetainedProcessor.Capability.ProcessorFingerprint ||
+                       branch.ProcessorFingerprint == ImageDocumentInputProcessor.Capability.ProcessorFingerprint) &&
+                      (branch.CompletedMemberCount == 0 && member.Disposition == "skipped" &&
+                       member.ReasonCode == OutlookDecorativeImage.Reason ||
+                       branch.CompletedMemberCount == 1 && member.Disposition == "completed" && child != null &&
+                       child.ParentSourceRevisionId == owner.Id && child.SourceRootId == owner.SourceRootId &&
+                       (child.OriginKind == 3 && branch.ProcessorFingerprint == MediaMetadataRetainedProcessor.Capability.ProcessorFingerprint ||
+                        child.OriginKind == 2 && branch.ProcessorFingerprint == ImageDocumentInputProcessor.Capability.ProcessorFingerprint) &&
+                       child.SuppressedAtUtc != null && child.RetentionEvidenceJson == OutlookDecorativeImage.RetentionEvidence)
+                select new LogicalOwnerStateRow(owner.SourceRootId, owner.Id, branch.Id, branch.CreatedAtUtc,
+                    branch.ProcessorFingerprint == ImageDocumentInputProcessor.Capability.ProcessorFingerprint ? 2 : 1,
+                    "Skipped", "Decorative Outlook image"))
             .ToListAsync(cancellationToken).ConfigureAwait(false);
 
         var childJobs = await (
@@ -953,7 +1005,7 @@ public sealed class SourceRootProjectionReader(
                         .FirstOrDefault(outcome => !string.IsNullOrWhiteSpace(outcome)) ?? "processor-branch-blocked"
                     : null));
 
-        var candidates = noContent.Concat(childJobs
+        var candidates = noContent.Concat(decorativeImages).Concat(childJobs
                 .GroupBy(value => new
                 {
                     value.SourceRootId,
@@ -988,7 +1040,8 @@ public sealed class SourceRootProjectionReader(
                 from publication in context.DocumentPublications.AsNoTracking()
                 join branch in context.SourceProcessorBranches.AsNoTracking() on publication.SourceProcessorBranchId equals branch.Id
                 join input in context.SourceRevisions.AsNoTracking() on publication.DocumentInputSourceRevisionId equals input.Id
-                where candidates.Select(value => value.OwnerSourceRevisionId).Contains(publication.OwnerSourceRevisionId)
+                where input.SuppressedAtUtc == null &&
+                      candidates.Select(value => value.OwnerSourceRevisionId).Contains(publication.OwnerSourceRevisionId)
                 select new PublicationBranchRow(
                     publication.OwnerSourceRevisionId, branch.Id, branch.CreatedAtUtc, input.OriginKind == 3 ? 1 : 2))
             .ToDictionaryAsync(value => value.OwnerSourceRevisionId, cancellationToken).ConfigureAwait(false);

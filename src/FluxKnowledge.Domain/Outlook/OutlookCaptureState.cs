@@ -78,3 +78,8 @@ internal static class OutlookCaptureValidation
         }
     }
 }
+
+public static class OutlookAttachmentDisposition
+{
+    public const string SignatureDecorationClassification = "OutlookSignatureDecoration";
+}

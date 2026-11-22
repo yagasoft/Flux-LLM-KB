@@ -35,6 +35,28 @@ public sealed class OutlookWatchedBundleTests
     }
 
     [Fact]
+    public async Task A_signature_decoration_is_never_read_or_linked_by_the_watched_bundle_writer()
+    {
+        using var fixture = new BundleRoot();
+        var writer = new OutlookWatchedBundleWriter(fixture.WatchRoot, fixture.StageRoot);
+        var exportId = Guid.NewGuid();
+        var signature = new OutlookWatchedAttachment("logo.png", _ => throw new InvalidOperationException("Decoration was read."))
+        {
+            IsSignatureDecoration = true
+        };
+        var bundle = new OutlookWatchedBundle(exportId, null, null, null, "Body",
+            [signature, new OutlookWatchedAttachment("screenshot.png", new byte[] { 1, 2, 3 })]);
+
+        Assert.True(await writer.PublishAsync(bundle, CancellationToken.None));
+        var directory = Path.Combine(fixture.WatchRoot, exportId.ToString("N"));
+        var image = Assert.Single(Directory.GetFiles(Path.Combine(directory, "attachments")));
+        Assert.Equal("002-screenshot.png", Path.GetFileName(image));
+        var markdown = await File.ReadAllTextAsync(Path.Combine(directory, "message.md"));
+        Assert.Contains("002-screenshot.png", markdown, StringComparison.Ordinal);
+        Assert.DoesNotContain("logo.png", markdown, StringComparison.Ordinal);
+    }
+
+    [Fact]
     public async Task Replay_rejects_existing_content_that_differs_from_the_committed_export()
     {
         using var fixture = new BundleRoot();
