@@ -198,11 +198,15 @@ public sealed class RetainedProcessorActivationService
          extension.Equals(".ppt", StringComparison.OrdinalIgnoreCase)) &&
          bytes.StartsWith(new byte[] { 0xd0, 0xcf, 0x11, 0xe0, 0xa1, 0xb1, 0x1a, 0xe1 });
 
-    private async ValueTask<RetainedSourceBytes> ReadMediaSignatureAsync(SourceRevisionId revisionId, CancellationToken cancellationToken)
+    private ValueTask<RetainedSourceBytes> ReadMediaSignatureAsync(SourceRevisionId revisionId, CancellationToken cancellationToken) =>
+        ReadSignatureAsync(revisionId, MediaMetadataRetainedProcessor.MaximumRetainedInputBytes, 64 * 1024, cancellationToken);
+
+    private async ValueTask<RetainedSourceBytes> ReadSignatureAsync(SourceRevisionId revisionId, long maximumByteLength,
+        int signatureBytes, CancellationToken cancellationToken)
     {
         await using var lease = await _retainedSourceReader.OpenReadAsync(revisionId,
-            MediaMetadataRetainedProcessor.MaximumRetainedInputBytes, cancellationToken).ConfigureAwait(false);
-        var prefix = new byte[(int)Math.Min(lease.ByteLength, 64 * 1024)];
+            maximumByteLength, cancellationToken).ConfigureAwait(false);
+        var prefix = new byte[(int)Math.Min(lease.ByteLength, signatureBytes)];
         await lease.Stream.ReadExactlyAsync(prefix, cancellationToken).ConfigureAwait(false);
         return new RetainedSourceBytes(lease.SourceRevisionId, prefix, lease.ContentSha256, lease.ByteLength);
     }
@@ -346,9 +350,13 @@ public sealed class RetainedProcessorActivationService
             RetainedSourceBytes retained;
             try
             {
-                retained = descriptor.Id == MediaMetadataRetainedProcessor.Capability.Id
-                    ? await ReadMediaSignatureAsync(candidate.SourceRevisionId, cancellationToken).ConfigureAwait(false)
-                    : await _retainedSourceReader.ReadBytesAsync(candidate.SourceRevisionId, cancellationToken).ConfigureAwait(false);
+                if (descriptor.Id == ZipArchiveRetainedProcessor.Capability.Id)
+                    retained = await ReadSignatureAsync(candidate.SourceRevisionId, Math.Max(1, inspection.ByteLength),
+                        4, cancellationToken).ConfigureAwait(false);
+                else if (descriptor.Id == MediaMetadataRetainedProcessor.Capability.Id)
+                    retained = await ReadMediaSignatureAsync(candidate.SourceRevisionId, cancellationToken).ConfigureAwait(false);
+                else
+                    retained = await _retainedSourceReader.ReadBytesAsync(candidate.SourceRevisionId, cancellationToken).ConfigureAwait(false);
             }
             catch (Exception exception) when (exception is FileNotFoundException or DirectoryNotFoundException)
             {
@@ -360,14 +368,33 @@ public sealed class RetainedProcessorActivationService
                 await _branchStore.BlockPromotionAsync(candidate, "retained-artifact-checksum-invalid", cancellationToken).ConfigureAwait(false);
                 continue;
             }
+            if (retained.SourceRevisionId != candidate.SourceRevisionId ||
+                !string.Equals(retained.ContentSha256, candidate.InputSha256, StringComparison.Ordinal) ||
+                retained.ByteLength != inspection.ByteLength)
+            {
+                await _branchStore.BlockPromotionAsync(candidate, "retained-artifact-checksum-invalid", cancellationToken).ConfigureAwait(false);
+                continue;
+            }
             if (descriptor.Id == MediaMetadataRetainedProcessor.Capability.Id &&
                 !MediaMetadataRetainedProcessor.HasMatchingSupportedSignature(candidate.Extension, retained.Bytes, out var mediaSignatureOutcome))
             {
                 await _branchStore.BlockPromotionAsync(candidate, mediaSignatureOutcome!, cancellationToken).ConfigureAwait(false);
                 continue;
             }
-            if (hasSignature(candidate, retained.Bytes) &&
-                await _branchStore.PromoteAsync(candidate, descriptor, cancellationToken).ConfigureAwait(false))
+            if (!hasSignature(candidate, retained.Bytes))
+            {
+                if (descriptor.Id == ZipArchiveRetainedProcessor.Capability.Id)
+                {
+                    await _branchStore.RecordZipSignatureMismatchAsync(candidate, cancellationToken).ConfigureAwait(false);
+                }
+                continue;
+            }
+            if (descriptor.Id == ZipArchiveRetainedProcessor.Capability.Id && inspection.ByteLength > _options.MaximumCompressedInputBytes)
+            {
+                await _branchStore.BlockPromotionAsync(candidate, "archive-input-too-large", cancellationToken).ConfigureAwait(false);
+                continue;
+            }
+            if (await _branchStore.PromoteAsync(candidate, descriptor, cancellationToken).ConfigureAwait(false))
             {
                 promoted++;
             }

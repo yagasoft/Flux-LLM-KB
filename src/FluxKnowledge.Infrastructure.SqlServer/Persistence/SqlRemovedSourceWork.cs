@@ -150,6 +150,47 @@ internal static class SqlRemovedSourceWork
         finally { await context.Database.CloseConnectionAsync().ConfigureAwait(false); }
     }
 
+    private static readonly string WorkerCleanupWitnessesSql = $$"""
+            SELECT job.Id,
+                CAST(CASE WHEN job.PublicState = {{(int)PublicJobState.WorkerProcessing}} THEN 1 ELSE 0 END AS bit) AS Processing,
+                CAST(CASE WHEN EXISTS (SELECT 1 FROM JobAttempts attempt
+                    WHERE attempt.JobId = job.Id AND attempt.CompletedAtUtc IS NULL) THEN 1 ELSE 0 END AS bit) AS OpenAttempt,
+                CAST(CASE WHEN {{CanHaveUnconfirmedDelivery("job")}} AND EXISTS
+                    (SELECT 1 FROM OutboxMessages delivery WHERE {{UnconfirmedDeliveryBinding("job")}})
+                    THEN 1 ELSE 0 END AS bit) AS Undispatched,
+                CAST(CASE WHEN job.PublicState IN (0,2,3) AND
+                    (job.LeaseOwner IS NOT NULL OR job.LeaseExpiresAtUtc IS NOT NULL) THEN 1 ELSE 0 END AS bit) AS LeaseRecorded
+            FROM OPENJSON(@workerCleanupIds) WITH (Id uniqueidentifier '$') ids
+            INNER JOIN Jobs job ON job.Id = ids.Id
+            """;
+
+    internal static async Task<Dictionary<Guid, string[]>> ReadWorkerCleanupDetailsAsync(
+        FluxKnowledgeDbContext context, Guid[] ids, CancellationToken cancellationToken)
+    {
+        if (ids.Length == 0) return [];
+        var witnesses = await context.Database.SqlQueryRaw<WorkerCleanupWitness>(WorkerCleanupWitnessesSql, JsonParameter("@workerCleanupIds", JsonSerializer.Serialize(ids)))
+            .ToArrayAsync(cancellationToken).ConfigureAwait(false);
+
+        return witnesses.ToDictionary(witness => witness.Id, witness =>
+        {
+            var details = new List<string>(4);
+            if (witness.Processing) details.Add("Worker still recorded as processing");
+            if (witness.OpenAttempt) details.Add("Attempt completion was not recorded");
+            if (witness.Undispatched) details.Add("Leased delivery has no dispatch receipt");
+            if (witness.LeaseRecorded) details.Add("Job still carries lease fields");
+            return details.ToArray();
+        });
+    }
+
+    private sealed class WorkerCleanupWitness
+    {
+        public Guid Id { get; set; }
+        public bool Processing { get; set; }
+        public bool OpenAttempt { get; set; }
+        public bool Undispatched { get; set; }
+        public bool LeaseRecorded { get; set; }
+    }
+
     private sealed class RemovedJobFact
     {
         public Guid Id { get; set; }

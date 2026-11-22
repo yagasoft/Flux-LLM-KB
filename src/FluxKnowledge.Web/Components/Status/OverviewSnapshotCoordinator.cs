@@ -6,7 +6,10 @@ using Microsoft.Data.SqlClient;
 
 namespace FluxKnowledge.Web.Components.Status;
 
-public sealed record OverviewSnapshot(OverviewProjection? Projection, string? RefreshIssue, DateTimeOffset? PublishedAtUtc = null);
+public sealed record OverviewSnapshot(OverviewProjection? Projection, string? RefreshIssue, DateTimeOffset? PublishedAtUtc = null)
+{
+    public bool RefreshPending { get; init; }
+}
 public sealed record OverviewRefreshMetrics(long Attempts, long Completed, long Failed, long CacheHits, long Coalesced);
 
 /// <summary>One bounded refresh per app process; caller cancellation only stops that caller waiting.</summary>
@@ -72,7 +75,7 @@ public sealed class OverviewSnapshotCoordinator : IAsyncDisposable
                     return value with { RefreshIssue = "Deployment admission changed after this sample. Refreshing status." };
             }
             return pending && value.RefreshIssue is null
-                ? value with { RefreshIssue = "Status changed after this sample. Refreshing status." } : value;
+                ? value with { RefreshIssue = "Status changed after this sample. Refreshing status.", RefreshPending = true } : value;
         }
     }
 

@@ -313,6 +313,9 @@ internal sealed class SqlPipelineActivityReader(IDeploymentValidationHold? hold,
             page = Math.Clamp(page, 0, Math.Max(0, (total - 1) / pageSize));
             var rows = await byReason.OrderBy(entry => entry.Row.Id).Skip(page * pageSize).Take(pageSize).Select(entry => entry.Row)
                 .ToArrayAsync(cancellationToken).ConfigureAwait(false);
+            var cleanupDetails = await SqlRemovedSourceWork.ReadWorkerCleanupDetailsAsync(context,
+                rows.Where(row => row.RemovalCleanupBlocker == 1).Select(row => row.Id).ToArray(), cancellationToken)
+                .ConfigureAwait(false);
             items = rows.Select(row => new PipelineAttentionItem(row.Id, row.SourceRootId, row.PipelineRecordId,
                 SourceName(row.SourceRootId, names), "Pipeline job", ((PublicJobState)row.PublicState).ToString(),
                 row.RemovalCleanupBlocker != 0 ? "Removed source" : row.IsHistorical ? "Historical" : "Current",
@@ -320,7 +323,10 @@ internal sealed class SqlPipelineActivityReader(IDeploymentValidationHold? hold,
                     new((PublicJobState)row.PublicState, row.IsHistorical, row.SourceAdmitted, row.HasWorkerLease,
                         row.HasActiveGpu, row.HasReadyGpu, row.HasUncertainGpu, row.IsDue, row.Reason,
                         row.HasWaitingGpu, row.HasPendingDispatch, row.RemovalCleanupBlocker)).Reason, row.RecordedAtUtc)
-                { Stage = ((PipelineStage)row.Stage).ToString() }).ToArray();
+                {
+                    Stage = ((PipelineStage)row.Stage).ToString(),
+                    CleanupDetails = cleanupDetails.TryGetValue(row.Id, out var details) ? details : []
+                }).ToArray();
         }
         else
         {

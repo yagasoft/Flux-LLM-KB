@@ -10,19 +10,21 @@ public sealed class OverviewProjectionState(IProjectionReader reader, ILogger<Ov
     private readonly TimeProvider _clock = timeProvider ?? TimeProvider.System;
     private IDisposable? _sharedSubscription;
     private bool _isStale;
+    private DateTimeOffset? _publishedAtUtc;
+    public bool RefreshPending { get; private set; }
     private string? _refreshIssue;
     public bool UsesSharedSnapshots => shared is not null;
     public bool HasSnapshot { get; private set; }
     public bool IsStale
     {
-        get => _isStale || shared is not null && LastSuccessfulReadAtUtc is { } sampled &&
+        get => _isStale || shared is not null && _publishedAtUtc is { } sampled &&
             _clock.GetUtcNow() - sampled >= TimeSpan.FromSeconds(10);
         private set => _isStale = value;
     }
     public DateTimeOffset? LastSuccessfulReadAtUtc { get; private set; }
     public string? RefreshIssue
     {
-        get => _refreshIssue ?? (IsStale ? "The last committed sample is more than 10 seconds old. Refreshing status." : null);
+        get => _refreshIssue ?? (IsStale ? "The last status update is more than 10 seconds old. Refreshing status." : null);
         private set => _refreshIssue = value;
     }
 
@@ -118,6 +120,8 @@ public sealed class OverviewProjectionState(IProjectionReader reader, ILogger<Ov
             HasSnapshot = true;
             LastSuccessfulReadAtUtc = OverviewSnapshotCoordinator.SampleTime(value);
         }
+        _publishedAtUtc = value.PublishedAtUtc;
+        RefreshPending = value.RefreshPending && value.Projection is not null;
         IsStale = value.RefreshIssue is not null;
         RefreshIssue = value.RefreshIssue;
     }

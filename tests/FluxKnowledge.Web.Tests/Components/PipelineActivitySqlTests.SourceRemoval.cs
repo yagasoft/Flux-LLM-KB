@@ -221,7 +221,10 @@ public sealed partial class PipelineActivitySqlTests
         var jobs = await reader.ReadPipelineAttentionAsync("current-jobs", root, 0, default);
         Assert.Equal(4, jobs.Items.Count);
         Assert.Contains(jobs.Items, item => item.PipelineRecordId == workerRecord);
-        Assert.Contains(jobs.Items, item => item.PipelineRecordId == earlierRetiredRecord);
+        var workerEvidence = Assert.Single(jobs.Items, item => item.PipelineRecordId == workerRecord);
+        var deliveryEvidence = Assert.Single(jobs.Items, item => item.PipelineRecordId == earlierRetiredRecord);
+        Assert.Contains("Worker still recorded as processing", workerEvidence.CleanupDetails);
+        Assert.Contains("Leased delivery has no dispatch receipt", deliveryEvidence.CleanupDetails);
         Assert.Contains(jobs.Items, item => item.PipelineRecordId == legacyRecord);
         Assert.Contains(jobs.Items, item => item.PipelineRecordId == terminalGpuRecord &&
             item.Reason.Contains("GPU cleanup", StringComparison.Ordinal));

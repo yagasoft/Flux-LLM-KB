@@ -71,6 +71,19 @@ public sealed class PipelineFilePresentationTests
         Assert.Contains(categories, c => c.Label == "Published — ready to query");
     }
 
+    [Theory]
+    [InlineData("archive-zip-expansion-pending", "ZIP worker")]
+    [InlineData("media-metadata-extraction-pending", "parser")]
+    [InlineData("media-metadata-parser-unavailable", "preflight")]
+    [InlineData("compound-binary-parser-unavailable", "supported export")]
+    [InlineData("File bytes are not valid UTF-8.", "confirmed source encoding")]
+    [InlineData("source-removed", "verified capture")]
+    [InlineData("document-ocr-source-unavailable", "native cleanup")]
+    public void Current_file_reasons_have_specific_recovery_guidance(string reason, string expected)
+    {
+        Assert.Contains(expected, PipelineFilePresentation.NextAction(reason), StringComparison.OrdinalIgnoreCase);
+    }
+
     private static PipelineJobActivityRow Job(PipelineStage stage, string? reason = null) => new()
     {
         Id = Guid.NewGuid(), Stage = (int)stage, PublicState = 0, SourceAdmitted = true,

@@ -22,6 +22,27 @@ public sealed class MediaMetadataReplayIntegrationTests(NativeSqlServerFixture f
     public Task DisposeAsync() => ClearMediaDataAsync();
 
     [NativeSqlServerFact]
+    public async Task A_recognised_media_input_with_an_opaque_suffix_gets_a_format_decision()
+    {
+        var privateRoot = CreatePrivateRoot();
+        try
+        {
+            var seeded = await SeedBytesAsync(privateRoot, Png(), ".bin", "opaque");
+            await using var verification = CreateContext();
+            await verification.SourceActivities.Where(activity => activity.Id == seeded.ActivityId)
+                .ExecuteUpdateAsync(update => update.SetProperty(activity => activity.Reason, "media-metadata-extraction-pending"));
+
+            await CreateActivation(privateRoot, enabled: true).RunOnceAsync(CancellationToken.None);
+
+            var activity = await verification.SourceActivities.SingleAsync(value => value.Id == seeded.ActivityId);
+            Assert.Equal((int)SourceActivityState.DeferredPolicy, activity.State);
+            Assert.Equal("media-metadata-signature-mismatch", activity.Reason);
+            Assert.False(await verification.SourceProcessorBranches.AnyAsync(value => value.SourceRevisionId == seeded.RevisionId));
+        }
+        finally { DeletePrivateRoot(privateRoot); }
+    }
+
+    [NativeSqlServerFact]
     public async Task Disabled_media_metadata_activation_is_inert()
     {
         var privateRoot = CreatePrivateRoot();

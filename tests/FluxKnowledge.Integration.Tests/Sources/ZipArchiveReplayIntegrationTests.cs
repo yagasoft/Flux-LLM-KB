@@ -28,6 +28,118 @@ public sealed class ZipArchiveReplayIntegrationTests(NativeSqlServerFixture fixt
     private readonly FluxKnowledge.Testing.TestResources _resources = new();
     private readonly NativeSqlServerFixture _fixture = fixture;
 
+    [NativeSqlServerFact]
+    public async Task Promotion_refuses_a_zip_selected_before_the_source_was_paused()
+    {
+        var seeded = await SeedDeferredZipAsync(new string('a', 64), 4, "sha256/aa/zip.bin");
+        var factory = new ContextFactory(_fixture.ConnectionString);
+        var store = new SqlRetainedProcessorBranchStore(factory, TimeProvider.System,
+            sourceAdmission: new FixtureSourceAdmission(factory));
+        var candidates = await store.ReadPromotionCandidatesAsync(16, ZipArchiveRetainedProcessor.Capability, default);
+        var candidate = Assert.Single(candidates, input => input.SourceRevisionId.Value == seeded.SourceRevisionId);
+
+        await using var context = CreateContext();
+        await context.SourceRootConfigurations.Where(root => root.Id == seeded.RootId)
+            .ExecuteUpdateAsync(update => update.SetProperty(root => root.State, (int)SourceRootState.Paused));
+
+        Assert.False(await store.PromoteAsync(candidate, ZipArchiveRetainedProcessor.Capability, default));
+        Assert.False(await store.BlockPromotionAsync(candidate, "archive-signature-invalid", default));
+        Assert.False(await store.DeferPromotionAsync(candidate, "waiting-for-parser", default));
+        await store.RecordZipSignatureMismatchAsync(candidate, default);
+        var activity = await context.SourceActivities.SingleAsync(value => value.Id == seeded.LegacyActivityId);
+        Assert.Equal((int)SourceActivityState.DeferredUnsupported, activity.State);
+        Assert.Equal("deferred", activity.Reason);
+        Assert.Null(activity.AttemptEvidenceJson);
+        Assert.False(await context.SourceProcessorBranches.AnyAsync(branch => branch.SourceRevisionId == seeded.SourceRevisionId));
+    }
+
+    [NativeSqlServerFact]
+    public async Task Zip_signature_probe_preserves_large_non_zip_inputs_for_their_own_processor()
+    {
+        var root = Directory.CreateTempSubdirectory("flux-zip-bounded-probe-").FullName;
+        try
+        {
+            const int length = 128 * 1024 * 1024 + 1;
+            var hash = new string('d', 64);
+            var path = Path.Combine("sha256", "dd", hash + ".bin");
+            var fullPath = Path.Combine(root, path);
+            Directory.CreateDirectory(Path.GetDirectoryName(fullPath)!);
+            using (var stream = File.Create(fullPath)) stream.SetLength(length);
+            var seeded = await SeedDeferredZipAsync(hash, length, path, extension: ".bin");
+            await CreateActivation(root).RunOnceAsync(CancellationToken.None);
+
+            await using var context = CreateContext();
+            var activity = await context.SourceActivities.SingleAsync(value => value.Id == seeded.LegacyActivityId);
+            Assert.Equal((int)SourceActivityState.DeferredUnsupported, activity.State);
+            Assert.Equal("deferred", activity.Reason);
+        }
+        finally
+        {
+            _resources.Dispose();
+            Directory.Delete(root, recursive: true);
+        }
+    }
+
+    [NativeSqlServerTheory]
+    [InlineData(true)]
+    [InlineData(false)]
+    public async Task Extensionless_zip_advances_past_a_full_batch_of_unrelated_deferred_inputs(bool recognised)
+    {
+        var root = Directory.CreateTempSubdirectory("flux-zip-candidates-").FullName;
+        var unrelated = "Not a ZIP archive"u8.ToArray();
+        var unrelatedHash = await WriteRetainedAsync(unrelated);
+        var first = await SeedDeferredZipAsync(unrelatedHash.Hash, unrelated.Length, unrelatedHash.Path, extension: ".bin");
+        for (var index = 1; index < RetainedProcessorOptions.MaximumAutomaticReplayBatchSize; index++)
+            await SeedDeferredZipAsync(unrelatedHash.Hash, unrelated.Length, unrelatedHash.Path,
+                extension: ".bin", sourceRootId: first.RootId);
+
+        var zip = CreateZip("readme.txt", "searchable retained archive member");
+        var archiveHash = await WriteRetainedAsync(zip);
+        var archive = await SeedDeferredZipAsync(archiveHash.Hash, zip.Length, archiveHash.Path,
+            extension: "", sourceRootId: first.RootId);
+        await using var context = CreateContext();
+        if (!recognised)
+        {
+            await context.SourceActivities.Where(activity => activity.Id != first.LegacyActivityId &&
+                    activity.Id != archive.LegacyActivityId && activity.SourceRevisionId != archive.SourceRevisionId &&
+                    context.SourceRevisions.Any(revision => revision.Id == activity.SourceRevisionId && revision.SourceRootId == first.RootId))
+                .ExecuteUpdateAsync(update => update.SetProperty(activity => activity.AttemptEvidenceJson, "{\"alpha\":1,\"alpha\":2}"));
+            await context.SourceActivities.Where(activity => activity.Id == first.LegacyActivityId)
+                .ExecuteUpdateAsync(update => update.SetProperty(activity => activity.AttemptEvidenceJson, "[1,2]"));
+        }
+        if (recognised)
+        {
+            await context.SourceActivities.Where(activity => activity.Id == archive.LegacyActivityId)
+                .ExecuteUpdateAsync(update => update.SetProperty(activity => activity.Reason, "archive-zip-expansion-pending"));
+        }
+
+        // Use a new activation service on the second pass to require persisted progress.
+        await CreateActivation(root).RunOnceAsync(CancellationToken.None);
+        if (!recognised) await CreateActivation(root).RunOnceAsync(CancellationToken.None);
+        var branch = await context.SourceProcessorBranches.SingleAsync(value => value.SourceRevisionId == archive.SourceRevisionId);
+        Assert.Equal(archive.SourceRevisionId, branch.SourceRevisionId);
+        if (!recognised)
+        {
+            var evidence = await context.SourceActivities.Where(activity => activity.Id == first.LegacyActivityId)
+                .Select(activity => activity.AttemptEvidenceJson).SingleAsync();
+            using var json = JsonDocument.Parse(Assert.IsType<string>(evidence));
+            Assert.Equal("[1,2]", json.RootElement.GetProperty("legacyAttemptEvidence").GetString());
+        }
+        Assert.Equal((int)RetainedProcessorBranchState.Completed, branch.State);
+        await DeferFixtureTextActivitiesAsync(first.RootId);
+        _resources.Dispose();
+
+        async Task<(string Hash, string Path)> WriteRetainedAsync(byte[] bytes)
+        {
+            var hash = Convert.ToHexStringLower(SHA256.HashData(bytes));
+            var relative = Path.Combine("sha256", hash[..2], hash + ".bin");
+            var file = Path.Combine(root, relative);
+            Directory.CreateDirectory(Path.GetDirectoryName(file)!);
+            await File.WriteAllBytesAsync(file, bytes);
+            return (hash, relative);
+        }
+    }
+
     [NativeSqlServerTheory]
     [InlineData(false)]
     [InlineData(true)]

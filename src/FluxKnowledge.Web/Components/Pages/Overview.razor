@@ -56,7 +56,11 @@
         </div>
     </header>
     <p class="visually-hidden" role="status" aria-live="polite">@_announcement</p>
-    @if (ProjectionState.IsStale)
+    @if (ProjectionState.RefreshPending)
+    {
+        <p class="status-freshness">Refreshing status. The last committed sample is shown below.</p>
+    }
+    else if (ProjectionState.IsStale)
     {
         <p class="pipeline-warning refresh-notice" role="alert">@ProjectionState.RefreshIssue @refreshContext</p>
     }
@@ -70,7 +74,7 @@
             <div class="overview-status-heading">
                 <div><div class="overview-status-title">
                     <span class="overview-title-reserve" aria-hidden="true">Latest status is unavailable</span>
-                    <h2>@(ProjectionState.IsStale ? "Latest status is unavailable" : diagnostics.State == "Healthy" ? "Search index is ready" : $"Search index is {diagnostics.State.ToLowerInvariant()}")</h2>
+                    <h2>@(ProjectionState.IsStale && !ProjectionState.RefreshPending ? "Latest status is unavailable" : diagnostics.State == "Healthy" ? "Search index is ready" : $"Search index is {diagnostics.State.ToLowerInvariant()}")</h2>
                     </div><p>@view.State · @view.Message</p></div>
                 <a class="operation-link" href="/search">Search</a>
             </div>
@@ -237,6 +241,12 @@
                     {
                         <tr @key="item.Id"><td>@item.SourceName</td><td>@(item.Stage ?? item.Unit) · @item.State</td><td>@item.Applicability</td>
                             <td>@item.Reason
+                                @if (item.CleanupDetails.Count > 0)
+                                {
+                                    <ul>
+                                        @foreach (var detail in item.CleanupDetails) { <li>@detail</li> }
+                                    </ul>
+                                }
                                 @if (item.ResultStatus is { } result) { <p>Result · @result</p> }
                                 @if (item.CapacityStatus is { } capacity) { <p>GPU resources · @capacity</p> }
                             </td>
@@ -300,7 +310,7 @@
     }
     <section aria-labelledby="source-progress-heading">
         <h2 id="source-progress-heading">Source progress</h2>
-        <p>Known files include discovered files and retained archive members. The categories add up to Known files. Published — ready to query means the file's extracted text has completed indexing.</p>
+        <p>Known files include discovered files and retained archive members. The categories add up to Known files. Source totals include ignored file issues, which are hidden from Needs attention. Published — ready to query means the file's extracted text has completed indexing.</p>
         <details><summary>How files are counted</summary><p>Each logical file is a source root plus canonical path: physical paths are case-insensitive; archive member paths are case-sensitive. Generated text and metadata belong to their original file. Conflicting current revision bindings are unconfirmed, rather than selecting the newest timestamp.</p>
             <p>Pipeline jobs, GPU tasks, pages and passages are separate units. Undiscovered changes, interactive search and independent local ingress are outside these file totals. Archive entries skipped or deferred before retention are excluded; no logical file identity is known for them. The file outcome categories are mutually exclusive.</p>
             <p>No extractable text describes direct file text. An expanded archive does not publish direct text; its retained members have separate outcomes.</p></details>

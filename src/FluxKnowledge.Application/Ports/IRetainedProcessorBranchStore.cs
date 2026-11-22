@@ -73,6 +73,10 @@ public interface IRetainedProcessorBranchStore
         int maximumCount,
         CancellationToken cancellationToken) => ValueTask.FromResult<IReadOnlyList<RetainedProcessorPromotionCandidate>>([]);
 
+    /// <summary>Records a verified non-ZIP signature for this exact immutable retained input.</summary>
+    ValueTask RecordZipSignatureMismatchAsync(RetainedProcessorPromotionCandidate candidate,
+        CancellationToken cancellationToken) => ValueTask.CompletedTask;
+
     ValueTask<bool> PromoteAsync(
         RetainedProcessorPromotionCandidate candidate,
         SourceCapabilityDescriptor capability,
@@ -164,7 +168,10 @@ public sealed record RetainedProcessorPromotionCandidate(
     Guid LegacyActivityId,
     SourceRevisionId SourceRevisionId,
     string InputSha256,
-    string Extension = "");
+    string Extension = "")
+{
+    public long? SourceConfigurationRevision { get; init; }
+}
 
 /// <summary>Processor-derived child manifest. Values are opaque and never use a source locator.</summary>
 public record RetainedProcessorDerivedChild(

@@ -57,6 +57,7 @@ public sealed record PipelineAttentionItem(
     public string? Stage { get; init; }
     public string? ResultStatus { get; init; }
     public string? CapacityStatus { get; init; }
+    public IReadOnlyList<string> CleanupDetails { get; init; } = [];
 }
 
 public sealed record PipelineAttentionPage(int TotalCount, int Page, int PageSize, IReadOnlyList<PipelineAttentionItem> Items)

@@ -58,8 +58,16 @@ internal static class SourceIssuePresentation
         "archive-entry-count-limit" or "archive-member-size-limit" or "nested-archive-depth-limit" => "The archive exceeds the indicated safe processing limit. Split or flatten an authorised copy rather than disabling archive safeguards.",
         "retained-artifact-checksum-invalid" => "The retained file has an invalid binding or length, or a historical checksum failure. Check its local availability and recorded source identity before requesting fresh ingestion.",
         "repository-gpu-outcome-cleanup-or-binding-unconfirmed" or "source-revision-binding-unconfirmed" => "Execution ownership or prior native cleanup is unconfirmed. Review the exact binding and cleanup evidence before recovery; do not blindly retry or clear it.",
-        "compound-binary-parser-unavailable" or "legacy-office-binary-parser-unavailable" or "binary-format-parser-unavailable" or "No installed parser can process this retained binary format." => "No installed parser supports these bytes. Export an authorised copy to a supported format; allowing the policy does not add a parser.",
-        "archive-zip-expansion-pending" => "Archive expansion has not completed. Review the current retained branch and enabled capability before scheduling a bounded replay.",
+        "legacy-office-binary-parser-unavailable" or "binary-format-parser-unavailable" or "No installed parser can process this retained binary format." => "No installed parser supports these bytes. Export an authorised copy to a supported format; allowing the policy does not add a parser.",
+        "archive-zip-expansion-pending" => "The ZIP worker can expand this retained archive when the input and source are eligible. Review the branch status if it stays deferred.",
+        "media-metadata-extraction-pending" => "The media worker checks the retained signature, file extension, size and parser before indexing metadata. Review the recorded format or OCR routing if this stays deferred.",
+        "media-metadata-parser-unavailable" => "The local media parser failed its preflight. The worker can continue after the installed parser passes that check.",
+        "media-metadata-format-unsupported" or "media-metadata-signature-mismatch" => "Check the actual media format and use an authorised export in a supported format.",
+        "media-metadata-input-too-large" => "The retained media exceeds the metadata reader's size limit. Supply a smaller authorised export if metadata is required.",
+        "compound-binary-parser-unavailable" => "This is a compound binary container. Identify the original document type or obtain a supported export from its owner.",
+        "File bytes are not valid UTF-8." => "Have the producer emit UTF-8, or convert a copy using a confirmed source encoding. Keep the original bytes.",
+        "source-removed" => "Review the current source inventory. A verified capture of the same revision can let the existing recovery worker restore its extraction.",
+        "document-ocr-source-unavailable" => "Verify the exact source revision is readable, then check the recorded OCR result and native cleanup before using document recovery.",
         "File bytes contain binary control values and are not accepted as text." => "These bytes cannot safely be treated as text. Use a supported binary parser or an authorised text export.",
         _ => "Review the recorded cause and affected item before retrying. Current security and content-safety checks remain in force."
     };

@@ -24,6 +24,31 @@ internal sealed class OverviewRefreshLog : ILogger<OverviewSnapshotCoordinator>
 
 public sealed class OverviewSnapshotCoordinatorTests
 {
+    [Fact]
+    public async Task A_regular_poll_keeps_a_recently_published_sample_usable()
+    {
+        var clock = new ManualClock();
+        var reader = new ControlledReader();
+        using var services = new ServiceCollection().AddSingleton<IProjectionReader>(reader).BuildServiceProvider();
+        await using var shared = new OverviewSnapshotCoordinator(services.GetRequiredService<IServiceScopeFactory>(),
+            new StatusEventFeed(), clock);
+        using var subscription = shared.Subscribe();
+        var sampledAt = clock.GetUtcNow();
+        reader.Result = Sample(7) with { Activity = new(sampledAt, sampledAt, [], [], [], 0, 0, 0) };
+        var first = shared.RefreshAsync(default).AsTask();
+        await WaitUntilAsync(() => reader.Reads == 1);
+        clock.Advance(TimeSpan.FromSeconds(2));
+        reader.Release.SetResult();
+        await first;
+        var state = new OverviewProjectionState(reader, shared: shared, timeProvider: clock);
+        state.SynchronizeFromShared();
+
+        clock.Advance(TimeSpan.FromSeconds(8));
+
+        Assert.Equal(sampledAt, state.LastSuccessfulReadAtUtc);
+        Assert.False(state.IsStale);
+    }
+
     [Theory]
     [InlineData(false, "published")]
     [InlineData(true, "timeout")]

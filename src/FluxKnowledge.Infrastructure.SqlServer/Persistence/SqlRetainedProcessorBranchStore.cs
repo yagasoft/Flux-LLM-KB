@@ -1,3 +1,5 @@
+using System.Text.Json;
+using System.Text.Json.Nodes;
 using FluxKnowledge.Application.Ports;
 using FluxKnowledge.Application.Sources;
 using FluxKnowledge.Domain.Sources;
@@ -993,6 +995,8 @@ public sealed class SqlRetainedProcessorBranchStore(IDbContextFactory<FluxKnowle
             _ => Array.Empty<string>()
         };
         await using var context = await contextFactory.CreateDbContextAsync(cancellationToken).ConfigureAwait(false);
+        var needsSourceBinding = capability.Id == ZipArchiveRetainedProcessor.Capability.Id ||
+            capability.Id == MediaMetadataRetainedProcessor.Capability.Id;
         var candidates = from activity in context.SourceActivities.AsNoTracking()
                       join revision in context.SourceRevisions.AsNoTracking() on activity.SourceRevisionId equals revision.Id
                       join root in context.SourceRootConfigurations.AsNoTracking() on revision.SourceRootId equals root.Id
@@ -1005,14 +1009,15 @@ public sealed class SqlRetainedProcessorBranchStore(IDbContextFactory<FluxKnowle
                             EF.Functions.Collate(revision.ContentSha256, SchemaConfiguration.SchedulerFenceCollation) ==
                                 EF.Functions.Collate(activity.InputFingerprint, SchemaConfiguration.SchedulerFenceCollation) &&
                             !context.SourceProcessorBranches.Any(branch => branch.SourceActivityId == activity.Id)
-                      select new { activity, revision, artifact };
+                      select new { activity, revision, root.ConfigurationRevision };
         if (capability.ProcessorKind is "document-ooxml-structural-extract" or "document-vsdx-structural-extract" or "document-vsdx-visio-extract" or "document-pdf-structural-extract" or "document-image-ocr-extract")
             candidates = candidates.Where(value => extensions.Contains(value.revision.Extension.ToLower()));
         else if (capability.ProcessorKind == "media-metadata")
         {
             var imageOcrRunnable = await IsImageOcrRunnableAsync(context, cancellationToken).ConfigureAwait(false);
             candidates = candidates.Where(value =>
-                extensions.Contains(value.revision.Extension.ToLower()) &&
+                (extensions.Contains(value.revision.Extension.ToLower()) ||
+                    value.activity.Reason == "media-metadata-extraction-pending") &&
                 (!imageOcrRunnable || !new[] { ".jpg", ".jpeg", ".png" }.Contains(value.revision.Extension.ToLower())));
         }
         else if (capability.ProcessorKind == "retained-csharp-code")
@@ -1025,9 +1030,35 @@ public sealed class SqlRetainedProcessorBranchStore(IDbContextFactory<FluxKnowle
                 value.activity.RequiredCapability == RetainedCsharpCodeProcessor.ProcessorKind &&
                 value.activity.Reason == "csharp-code-writer-not-ready");
         else if (capability.ProcessorKind == "archive-zip-expand")
-            candidates = candidates.Where(value => !new[] { ".docx", ".xlsx", ".pptx", ".vsdx", ".doc", ".xls", ".ppt" }.Contains(value.revision.Extension.ToLower()));
-        return await candidates.OrderBy(value => value.activity.CreatedAtUtc).ThenBy(value => value.activity.Id)
-            .Select(value => new RetainedProcessorPromotionCandidate(value.activity.Id, new SourceRevisionId(value.activity.SourceRevisionId), value.activity.InputFingerprint, value.revision.Extension))
+        {
+            var checkedInputs = context.SourceActivities.FromSqlInterpolated($"""
+                SELECT activity.* FROM [SourceActivities] activity
+                WHERE JSON_VALUE(CASE WHEN ISJSON(activity.[AttemptEvidenceJson]) = 1
+                    THEN activity.[AttemptEvidenceJson] ELSE NCHAR(123) + NCHAR(125) END, '$.zipSignatureMismatch')
+                    COLLATE Latin1_General_100_BIN2 =
+                    CONCAT({ZipArchiveRetainedProcessor.Capability.ProcessorFingerprint}, N':', activity.[InputFingerprint])
+                """).Select(activity => activity.Id);
+            candidates = candidates.Where(value => !new[] { ".docx", ".xlsx", ".pptx", ".vsdx", ".doc", ".xls", ".ppt" }
+                .Contains(value.revision.Extension.ToLower()) && !checkedInputs.Contains(value.activity.Id));
+        }
+        if (needsSourceBinding)
+        {
+            var admittedInputs = SqlSourceWorkEligibility.Inputs(context, sourceAdmission).Select(revision => revision.Id);
+            // An explicit unsupported-binary policy successor has already been adjudicated.
+            // Leave it with the policy owner rather than repeatedly probing older opaque inputs.
+            candidates = candidates.Where(value => admittedInputs.Contains(value.revision.Id) &&
+                value.activity.DescriptorFingerprint != RetainedDefaultPolicy.UnsupportedBinary.ProcessorFingerprint);
+        }
+        // Current capture recognises ZIP signatures independently of the filename. Leave room for legacy
+        // inputs without that classification while ensuring unrelated deferred inputs cannot hide known ZIPs.
+        var ordered = capability.ProcessorKind == "archive-zip-expand"
+            ? candidates.OrderByDescending(value => value.activity.Reason == "archive-zip-expansion-pending")
+                .ThenByDescending(value => value.revision.Extension.ToLower() == ".zip")
+                .ThenBy(value => value.activity.CreatedAtUtc)
+            : candidates.OrderBy(value => value.activity.CreatedAtUtc);
+        return await ordered.ThenBy(value => value.activity.Id)
+            .Select(value => new RetainedProcessorPromotionCandidate(value.activity.Id, new SourceRevisionId(value.activity.SourceRevisionId), value.activity.InputFingerprint, value.revision.Extension)
+            { SourceConfigurationRevision = needsSourceBinding ? value.ConfigurationRevision : null })
             .Take(Math.Clamp(maximumCount, 1, RetainedProcessorOptions.MaximumAutomaticReplayBatchSize)).ToListAsync(cancellationToken).ConfigureAwait(false);
     }
 
@@ -1037,6 +1068,7 @@ public sealed class SqlRetainedProcessorBranchStore(IDbContextFactory<FluxKnowle
     {
         var extensions = new[] { ".avif", ".heic", ".heif", ".avi", ".mkv", ".webm", ".ogg", ".flac", ".aac", ".m4a", ".wma" };
         await using var context = await contextFactory.CreateDbContextAsync(cancellationToken).ConfigureAwait(false);
+        var admittedInputs = SqlSourceWorkEligibility.Inputs(context, sourceAdmission).Select(revision => revision.Id);
         return await (from activity in context.SourceActivities.AsNoTracking()
                       join revision in context.SourceRevisions.AsNoTracking() on activity.SourceRevisionId equals revision.Id
                       join root in context.SourceRootConfigurations.AsNoTracking() on revision.SourceRootId equals root.Id
@@ -1044,14 +1076,15 @@ public sealed class SqlRetainedProcessorBranchStore(IDbContextFactory<FluxKnowle
                       where activity.State == (int)SourceActivityState.DeferredUnsupported &&
                             activity.ExecutionClass == (int)ExecutionClass.DeferredCapability &&
                             root.State == (int)SourceRootState.Enabled &&
-                            extensions.Contains(revision.Extension.ToLower()) &&
+                            extensions.Contains(revision.Extension.ToLower()) && admittedInputs.Contains(revision.Id) &&
                             EF.Functions.Collate(artifact.ContentSha256, SchemaConfiguration.SchedulerFenceCollation) ==
                                 EF.Functions.Collate(activity.InputFingerprint, SchemaConfiguration.SchedulerFenceCollation) &&
                             EF.Functions.Collate(revision.ContentSha256, SchemaConfiguration.SchedulerFenceCollation) ==
                                 EF.Functions.Collate(activity.InputFingerprint, SchemaConfiguration.SchedulerFenceCollation) &&
                             !context.SourceProcessorBranches.Any(branch => branch.SourceActivityId == activity.Id)
                       orderby activity.CreatedAtUtc, activity.Id
-                      select new RetainedProcessorPromotionCandidate(activity.Id, new SourceRevisionId(activity.SourceRevisionId), activity.InputFingerprint, revision.Extension))
+                      select new RetainedProcessorPromotionCandidate(activity.Id, new SourceRevisionId(activity.SourceRevisionId), activity.InputFingerprint, revision.Extension)
+                      { SourceConfigurationRevision = root.ConfigurationRevision })
             .Take(Math.Clamp(maximumCount, 1, RetainedProcessorOptions.MaximumAutomaticReplayBatchSize)).ToListAsync(cancellationToken).ConfigureAwait(false);
     }
 
@@ -1132,6 +1165,24 @@ public sealed class SqlRetainedProcessorBranchStore(IDbContextFactory<FluxKnowle
         }).ConfigureAwait(false);
     }
 
+    public async ValueTask RecordZipSignatureMismatchAsync(RetainedProcessorPromotionCandidate candidate,
+        CancellationToken cancellationToken)
+    {
+        await UpdatePromotionAsync(candidate, activity =>
+        {
+            var prior = activity.AttemptEvidenceJson;
+            JsonObject? evidence = null;
+            if (prior is not null)
+            {
+                try { evidence = JsonNode.Parse(prior, documentOptions: new JsonDocumentOptions { AllowDuplicateProperties = false }) as JsonObject; }
+                catch (JsonException) { /* Keep the original legacy evidence below. */ }
+            }
+            evidence ??= prior is null ? new JsonObject() : new JsonObject { ["legacyAttemptEvidence"] = prior };
+            evidence["zipSignatureMismatch"] = $"{ZipArchiveRetainedProcessor.Capability.ProcessorFingerprint}:{candidate.InputSha256}";
+            activity.AttemptEvidenceJson = evidence.ToJsonString();
+        }, cancellationToken).ConfigureAwait(false);
+    }
+
     public async ValueTask<bool> PromoteAsync(RetainedProcessorPromotionCandidate candidate, SourceCapabilityDescriptor capability, CancellationToken cancellationToken)
     {
         if (capability.Id == RetainedCsharpCodeProcessor.Capability.Id)
@@ -1145,9 +1196,11 @@ public sealed class SqlRetainedProcessorBranchStore(IDbContextFactory<FluxKnowle
         {
             await using var context = await contextFactory.CreateDbContextAsync(cancellationToken).ConfigureAwait(false);
             await using var transaction = await context.Database.BeginTransactionAsync(IsolationLevel.Serializable, cancellationToken).ConfigureAwait(false);
-            var legacy = await context.SourceActivities.SingleOrDefaultAsync(value => value.Id == candidate.LegacyActivityId, cancellationToken).ConfigureAwait(false);
-            if (legacy is null || legacy.State != (int)SourceActivityState.DeferredUnsupported ||
-                await context.SourceProcessorBranches.AnyAsync(value => value.SourceActivityId == legacy.Id, cancellationToken).ConfigureAwait(false)) return false;
+            var automaticArchiveOrMedia = capability.Id == ZipArchiveRetainedProcessor.Capability.Id ||
+                capability.Id == MediaMetadataRetainedProcessor.Capability.Id;
+            var legacy = await ReadDeferredPromotionAsync(context, candidate, automaticArchiveOrMedia, cancellationToken)
+                .ConfigureAwait(false);
+            if (legacy is null) return false;
             if (capability.ProcessorKind == MediaMetadataRetainedProcessor.Capability.ProcessorKind &&
                 await IsImageOcrRunnableAsync(context, cancellationToken).ConfigureAwait(false) &&
                 await context.SourceRevisions.AnyAsync(value =>
@@ -1169,6 +1222,7 @@ public sealed class SqlRetainedProcessorBranchStore(IDbContextFactory<FluxKnowle
                 InputSha256 = legacy.InputFingerprint, ProcessorVersion = capability.ProcessorVersion, ProcessorFingerprint = capability.ProcessorFingerprint,
                 State = (int)RetainedProcessorBranchState.Pending, CreatedAtUtc = timeProvider.GetUtcNow(), UpdatedAtUtc = timeProvider.GetUtcNow() });
             await context.SaveChangesAsync(cancellationToken).ConfigureAwait(false);
+            if (automaticArchiveOrMedia && deploymentValidationHold?.IsHeld == true) return false;
             await transaction.CommitAsync(cancellationToken).ConfigureAwait(false);
             return true;
         }).ConfigureAwait(false);
@@ -1338,39 +1392,72 @@ public sealed class SqlRetainedProcessorBranchStore(IDbContextFactory<FluxKnowle
         }, cancellationToken).ConfigureAwait(false);
     }
 
-    public async ValueTask<bool> BlockPromotionAsync(RetainedProcessorPromotionCandidate candidate, string outcomeCode, CancellationToken cancellationToken)
+    public ValueTask<bool> BlockPromotionAsync(RetainedProcessorPromotionCandidate candidate, string outcomeCode,
+        CancellationToken cancellationToken) => UpdatePromotionAsync(candidate, activity =>
     {
-        return await ExecuteWithRetryAsync(async () =>
-        {
-        await using var context = await contextFactory.CreateDbContextAsync(cancellationToken).ConfigureAwait(false);
-        await using var transaction = await context.Database.BeginTransactionAsync(IsolationLevel.Serializable, cancellationToken).ConfigureAwait(false);
-        var legacy = await context.SourceActivities.SingleOrDefaultAsync(value => value.Id == candidate.LegacyActivityId, cancellationToken).ConfigureAwait(false);
-        if (legacy is null || legacy.State != (int)SourceActivityState.DeferredUnsupported ||
-            await context.SourceProcessorBranches.AnyAsync(value => value.SourceActivityId == legacy.Id, cancellationToken).ConfigureAwait(false)) return false;
-        legacy.State = (int)SourceActivityState.DeferredPolicy;
-        legacy.Reason = outcomeCode;
-        legacy.UpdatedAtUtc = timeProvider.GetUtcNow();
-        await context.SaveChangesAsync(cancellationToken).ConfigureAwait(false);
-        await transaction.CommitAsync(cancellationToken).ConfigureAwait(false);
-        return true;
-        }, cancellationToken).ConfigureAwait(false);
-    }
+        activity.State = (int)SourceActivityState.DeferredPolicy;
+        activity.Reason = outcomeCode;
+        activity.UpdatedAtUtc = timeProvider.GetUtcNow();
+    }, cancellationToken);
 
-    public async ValueTask<bool> DeferPromotionAsync(RetainedProcessorPromotionCandidate candidate, string outcomeCode, CancellationToken cancellationToken)
+    public ValueTask<bool> DeferPromotionAsync(RetainedProcessorPromotionCandidate candidate, string outcomeCode,
+        CancellationToken cancellationToken) => UpdatePromotionAsync(candidate, activity =>
     {
-        return await ExecuteWithRetryAsync(async () =>
+        if (activity.Reason == outcomeCode) return;
+        activity.Reason = outcomeCode;
+        activity.UpdatedAtUtc = timeProvider.GetUtcNow();
+    }, cancellationToken);
+
+    private async ValueTask<bool> UpdatePromotionAsync(RetainedProcessorPromotionCandidate candidate,
+        Action<SourceActivityEntity> update, CancellationToken cancellationToken) =>
+        await ExecuteWithRetryAsync(async () =>
         {
-        await using var context = await contextFactory.CreateDbContextAsync(cancellationToken).ConfigureAwait(false);
-        await using var transaction = await context.Database.BeginTransactionAsync(IsolationLevel.Serializable, cancellationToken).ConfigureAwait(false);
-        var legacy = await context.SourceActivities.SingleOrDefaultAsync(value => value.Id == candidate.LegacyActivityId, cancellationToken).ConfigureAwait(false);
-        if (legacy is null || legacy.State != (int)SourceActivityState.DeferredUnsupported ||
-            await context.SourceProcessorBranches.AnyAsync(value => value.SourceActivityId == legacy.Id, cancellationToken).ConfigureAwait(false)) return false;
-        legacy.Reason = outcomeCode;
-        legacy.UpdatedAtUtc = timeProvider.GetUtcNow();
-        await context.SaveChangesAsync(cancellationToken).ConfigureAwait(false);
-        await transaction.CommitAsync(cancellationToken).ConfigureAwait(false);
-        return true;
+            await using var context = await contextFactory.CreateDbContextAsync(cancellationToken).ConfigureAwait(false);
+            await using var transaction = await context.Database.BeginTransactionAsync(IsolationLevel.Serializable, cancellationToken)
+                .ConfigureAwait(false);
+            var activity = await ReadDeferredPromotionAsync(context, candidate, candidate.SourceConfigurationRevision.HasValue,
+                cancellationToken).ConfigureAwait(false);
+            if (activity is null) return false;
+            update(activity);
+            await context.SaveChangesAsync(cancellationToken).ConfigureAwait(false);
+            if (candidate.SourceConfigurationRevision.HasValue && deploymentValidationHold?.IsHeld == true) return false;
+            await transaction.CommitAsync(cancellationToken).ConfigureAwait(false);
+            return true;
         }, cancellationToken).ConfigureAwait(false);
+
+    private async Task<SourceActivityEntity?> ReadDeferredPromotionAsync(FluxKnowledgeDbContext context,
+        RetainedProcessorPromotionCandidate candidate, bool requireSourceBinding, CancellationToken cancellationToken)
+    {
+        if (requireSourceBinding)
+        {
+            await SqlPublishedPassageSelection.AcquireFenceAsync(context, cancellationToken).ConfigureAwait(false);
+            if (deploymentValidationHold?.IsHeld == true) return null;
+            var input = await (from revision in SqlSourceWorkEligibility.Inputs(context, sourceAdmission)
+                               join root in context.SourceRootConfigurations on revision.SourceRootId equals root.Id
+                               join artifact in context.SourceArtifacts on revision.Id equals artifact.SourceRevisionId
+                               where revision.Id == candidate.SourceRevisionId.Value &&
+                                     root.State == (int)SourceRootState.Enabled &&
+                                     (candidate.SourceConfigurationRevision == null ||
+                                      root.ConfigurationRevision == candidate.SourceConfigurationRevision) &&
+                                     revision.ContentSha256 == candidate.InputSha256 &&
+                                     artifact.ContentSha256 == revision.ContentSha256 &&
+                                     artifact.ByteLength == revision.ByteLength
+                               select new { root.Id, root.ConfigurationRevision })
+                .SingleOrDefaultAsync(cancellationToken).ConfigureAwait(false);
+            if (input is null ||
+                !await SqlDefaultRetainedPolicy.BindingIsCurrentAsync(context, candidate.LegacyActivityId, cancellationToken).ConfigureAwait(false) ||
+                sourceAdmission?.ReadAdmittedRoots().Any(value => value.RootId == input.Id &&
+                    value.ConfigurationRevision == input.ConfigurationRevision) != true)
+                return null;
+        }
+
+        var activity = await context.SourceActivities.SingleOrDefaultAsync(value => value.Id == candidate.LegacyActivityId,
+            cancellationToken).ConfigureAwait(false);
+        return activity is null || activity.State != (int)SourceActivityState.DeferredUnsupported ||
+            activity.SourceRevisionId != candidate.SourceRevisionId.Value ||
+            !string.Equals(activity.InputFingerprint, candidate.InputSha256, StringComparison.Ordinal) ||
+            await context.SourceProcessorBranches.AnyAsync(value => value.SourceActivityId == activity.Id, cancellationToken)
+                .ConfigureAwait(false) ? null : activity;
     }
 
     public async ValueTask<IReadOnlyList<RetainedCsharpCodeClaim>> ClaimCsharpCodeAsync(

@@ -68,6 +68,12 @@ public static class PipelineFilePresentation
 
     public static string NextAction(string? reason) => reason switch
     {
+        "archive-zip-expansion-pending" or "media-metadata-extraction-pending" or
+        "media-metadata-parser-unavailable" or "media-metadata-format-unsupported" or
+        "media-metadata-signature-mismatch" or "media-metadata-input-too-large" or
+        "compound-binary-parser-unavailable" or "File bytes are not valid UTF-8." or
+        "source-removed" or "document-ocr-source-unavailable" =>
+            Sources.SourceIssuePresentation.Guidance(reason),
         RetainedDefaultPolicy.UnadmittedLegacyTextReason => "Reassess the retained input under the current source policy before queueing it.",
         "File extension is unknown to local source ingestion." => "Reassess the retained input under the current source policy before queueing it.",
         "File exceeds the effective UTF-8 text ingestion limit." => "Review the file size against the app's text limit.",
