@@ -131,6 +131,10 @@ public sealed class SqlOutlookExportIngestionService(
                 candidate.ProfileId == observation.ProfileId.Value &&
                 candidate.State == 1 &&
                 candidate.FencingToken == request.FencingToken &&
+                (candidate.ConfigurationRevision == null ||
+                    candidate.ConfigurationRevision == profile.ConfigurationRevision && profile.IsEnabled &&
+                    folder.State != (int)OutlookCaptureState.Disabled &&
+                    (!folder.IsDiscoveredSubfolder || profile.IncludeSubfolders)) &&
                 candidate.LeaseExpiresAtUtc != null &&
                 candidate.LeaseExpiresAtUtc >= _clock.GetUtcNow(),
             cancellationToken).ConfigureAwait(false);

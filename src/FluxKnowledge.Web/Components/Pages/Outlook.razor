@@ -35,6 +35,7 @@
                     <div><dt>Capture state</dt><dd>@CaptureState(profile)</dd></div>
                     <div><dt>Incremental basis</dt><dd>@FormatBasis(profile.IncrementalBasis)</dd></div>
                     <div><dt>Schedule</dt><dd>Every @profile.Cadence.TotalMinutes.ToString("0") minutes</dd></div>
+                    <div><dt>Subfolders</dt><dd>@(profile.IncludeSubfolders ? "Included" : "Excluded")</dd></div>
                     <div><dt>Overlap</dt><dd>@profile.MaximumOverlap.TotalMinutes.ToString("0") minutes</dd></div>
                     <div><dt>Spool</dt><dd>@profile.Spool.Status · @profile.Spool.Health · @profile.Spool.Capacity capacity</dd></div>
                     <div><dt>Created</dt><dd>@profile.CreatedAtUtc.LocalDateTime</dd></div>
@@ -103,6 +104,10 @@
             {
                 <p>Older moved messages outside that window can still be missed.</p>
             }
+            @if (selection.IncludeSubfolders)
+            {
+                <p>Capture includes all subfolders of the selected folders.</p>
+            }
             @if (selection.Folders.Count > 0)
             {
                 <details><summary>Folders selected in this preview (@selection.Folders.Count)</summary>
@@ -155,6 +160,7 @@
                 }
                 <label>Cadence (minutes) <input type="number" min="5" max="1440" @bind="_cadenceMinutes" /></label>
                 <label>Overlap (minutes) <input type="number" min="0" max="240" @bind="_overlapMinutes" /></label>
+                <label><input type="checkbox" @bind="_includeSubfolders" /> Include subfolders</label>
                 <label>Exact Outlook folder path <input required maxlength="512" placeholder="Mailbox/Inbox/Folder" @key="_targetFolderPathInputGeneration" @ref="_targetFolderPathInput" autocomplete="off" /></label>
                 <p>
                     <button type="submit" disabled="@_saving">Verify and enable</button>
@@ -176,6 +182,7 @@
     private string _spoolConfigurationKey = string.Empty;
     private OutlookIncrementalBasis _basis = OutlookIncrementalBasis.LastModificationTime;
     private int _cadenceMinutes = 15;
+    private bool _includeSubfolders;
     private int _overlapMinutes = 2;
     private ElementReference _targetFolderPathInput;
     private long _targetFolderPathInputGeneration;
@@ -189,7 +196,7 @@
     private bool _checkCatchUpReceipt;
     private bool CatchUpLocked => _submittingCatchUp || _checkCatchUpReceipt;
     private sealed record CatchUpSelection(Guid OperationId, Guid ProfileId, string ProfileName, long ConfigurationRevision,
-        IReadOnlyList<OutlookFolderStatusProjection> Folders, bool ReconcileMovedMessages, DateTimeOffset ExpiresAtUtc);
+        IReadOnlyList<OutlookFolderStatusProjection> Folders, bool ReconcileMovedMessages, DateTimeOffset ExpiresAtUtc, bool IncludeSubfolders);
 
     protected override async Task OnInitializedAsync()
     {
@@ -208,6 +215,7 @@
         _spoolConfigurationKey = PageState.SpoolChoices.FirstOrDefault()?.Key ?? string.Empty;
         _basis = OutlookIncrementalBasis.LastModificationTime;
         _cadenceMinutes = 15;
+        _includeSubfolders = false;
         _overlapMinutes = 2;
         _targetFolderPathInputGeneration++;
     }
@@ -222,6 +230,7 @@
         _spoolConfigurationKey = profile.Spool.ConfigurationKey ?? string.Empty;
         _basis = profile.IncrementalBasis;
         _cadenceMinutes = checked((int)profile.Cadence.TotalMinutes);
+        _includeSubfolders = profile.IncludeSubfolders;
         _overlapMinutes = checked((int)profile.MaximumOverlap.TotalMinutes);
         _targetFolderPathInputGeneration++;
     }
@@ -354,7 +363,8 @@
             return;
         }
         _pendingCatchUp = new(Guid.NewGuid(), profile.ProfileId, profile.DisplayName, profile.ConfigurationRevision,
-            profile.Folders.ToArray(), reconcileMovedMessages, Clock.GetUtcNow().AddMinutes(2));
+            profile.Folders.Where(folder => !folder.IsDiscoveredSubfolder).ToArray(), reconcileMovedMessages,
+            Clock.GetUtcNow().AddMinutes(2), profile.IncludeSubfolders);
     }
 
     private async Task ConfirmCatchUpAsync()
@@ -446,7 +456,10 @@
         _basis,
         new OutlookCaptureSchedule(TimeSpan.FromMinutes(_cadenceMinutes), TimeSpan.FromMinutes(_overlapMinutes)),
         false,
-        _configurationRevision);
+        _configurationRevision)
+    {
+        IncludeSubfolders = _includeSubfolders
+    };
 
     private ValueTask<string> ReadAndClearTargetFolderPathAsync() =>
         JavaScriptRuntime.InvokeAsync<string>("fluxKnowledge.outlook.readAndClearTargetPath", _targetFolderPathInput);

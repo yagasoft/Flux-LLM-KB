@@ -1,4 +1,4 @@
-param([Parameter(Mandatory)][string]$SourceRoot,[Parameter(Mandatory)][string]$ReceiptDirectory,[switch]$CodexWorkspace,[switch]$GpuResidency,[switch]$MediaTranscription,[switch]$ForwardOnly)
+param([Parameter(Mandatory)][string]$SourceRoot,[Parameter(Mandatory)][string]$ReceiptDirectory,[switch]$CodexWorkspace,[switch]$GpuResidency,[switch]$MediaTranscription,[switch]$ForwardOnly,[switch]$OutlookRecursiveCapture)
 $ErrorActionPreference='Stop';Set-StrictMode -Version Latest
 foreach($name in @('incremental-vector-publication-metadata-migration','incremental-source-deletion-pending-queue-index','incremental-passage-window-eligibility-migration','incremental-source-journal-migration')){
  Import-Module (Join-Path $SourceRoot ('scripts/deploy/'+$name+'.psm1')) -Force
@@ -17,7 +17,7 @@ function Test-Sql([string]$Text){
   $null=$command.ExecuteNonQuery()
  }finally{$connection.Dispose()}
 }
-$mode = if ($GpuResidency) { @{GpuResidency=$true} } elseif ($MediaTranscription) { @{MediaTranscription=$true} } elseif ($CodexWorkspace) { @{CodexWorkspace = $true} } else { @{Outlook = $true} }
+$mode = if ($OutlookRecursiveCapture) { @{OutlookRecursiveCapture=$true} } elseif ($GpuResidency) { @{GpuResidency=$true} } elseif ($MediaTranscription) { @{MediaTranscription=$true} } elseif ($CodexWorkspace) { @{CodexWorkspace = $true} } else { @{Outlook = $true} }
 $contract=Get-PassageWindowEligibilityMigrationContract @mode
 $sqlPath=(Resolve-Path -LiteralPath (Join-Path $SourceRoot ('scripts/deploy/' + $contract.ArtifactPrefix + '-up.sql'))).Path
 $read={Get-PassageWindowEligibilityDatabaseState $connectionText @mode}
@@ -81,12 +81,16 @@ Invoke-PassageWindowEligibilityMigrationAttempt $state $read {} {throw 'Complete
 Invoke-PassageWindowEligibilityMigrationSql @mode $connectionText $sqlPath $initial.Identity
 Check $state.Applied 'Already-new state was not validated.'
 Assert-SourceJournalSchema (Get-SourceJournalDatabaseState $connectionText)
-$alter = if ($GpuResidency) { 'ALTER TABLE dbo.GpuModelResidencies NOCHECK CONSTRAINT CK_GpuModelResidencies_Release;' } elseif ($MediaTranscription) {
+$alter = if ($OutlookRecursiveCapture) {
+    'ALTER TABLE dbo.OutlookCaptureProfiles ALTER COLUMN NextScheduledScanAtUtc datetimeoffset(3) NULL;'
+} elseif ($GpuResidency) { 'ALTER TABLE dbo.GpuModelResidencies NOCHECK CONSTRAINT CK_GpuModelResidencies_Release;' } elseif ($MediaTranscription) {
     'ALTER TABLE dbo.MediaTranscriptionGpuRequests NOCHECK CONSTRAINT CK_MediaTranscriptionGpuRequests_Phase;'
 } elseif ($CodexWorkspace) {
     'ALTER INDEX IX_KnowledgeItems_CodexWorkspaceRootId_CreatedAtUtc_Id ON dbo.KnowledgeItems DISABLE;'
 } else { 'ALTER TABLE dbo.OutlookCaptureProfiles ALTER COLUMN WatchedRootIdentity varchar(127) NULL;' }
-$restore = if ($GpuResidency) { 'ALTER TABLE dbo.GpuModelResidencies WITH CHECK CHECK CONSTRAINT CK_GpuModelResidencies_Release;' } elseif ($MediaTranscription) {
+$restore = if ($OutlookRecursiveCapture) {
+    'ALTER TABLE dbo.OutlookCaptureProfiles ALTER COLUMN NextScheduledScanAtUtc datetimeoffset(7) NULL;'
+} elseif ($GpuResidency) { 'ALTER TABLE dbo.GpuModelResidencies WITH CHECK CHECK CONSTRAINT CK_GpuModelResidencies_Release;' } elseif ($MediaTranscription) {
     'ALTER TABLE dbo.MediaTranscriptionGpuRequests WITH CHECK CHECK CONSTRAINT CK_MediaTranscriptionGpuRequests_Phase;'
 } elseif ($CodexWorkspace) {
     'ALTER INDEX IX_KnowledgeItems_CodexWorkspaceRootId_CreatedAtUtc_Id ON dbo.KnowledgeItems REBUILD;'

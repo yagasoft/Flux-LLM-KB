@@ -10,6 +10,7 @@ public sealed class OutlookCaptureFolderEntity
     public string CanonicalIdentityFingerprint { get; private set; } = string.Empty;
     public string DisplayName { get; set; } = string.Empty;
     public int Basis { get; set; }
+    public bool IsDiscoveredSubfolder { get; set; }
     public DateTimeOffset? CursorUtc { get; set; }
     public string? CursorFingerprint { get; set; }
     public int State { get; set; }

@@ -131,9 +131,11 @@ public sealed class NativeOutlookConfigurationBrowserTests
             await page.GotoAsync(new Uri(host.BaseAddress, "/outlook").ToString(), new PageGotoOptions { WaitUntil = WaitUntilState.NetworkIdle });
             await page.GetByRole(AriaRole.Button, new() { Name = "Add profile" }).ClickAsync();
             await page.GetByLabel("Profile name").FillAsync("Target privacy profile");
+            await page.GetByLabel("Include subfolders").CheckAsync();
             await page.GetByLabel("Exact Outlook folder path").FillAsync(target);
             await page.GetByRole(AriaRole.Button, new() { Name = "Verify and enable" }).ClickAsync();
             await page.GetByText("Waiting for Outlook", new() { Exact = true }).WaitForAsync();
+            await page.GetByText("Included", new() { Exact = true }).WaitForAsync();
             Assert.DoesNotContain(target, await page.ContentAsync(), StringComparison.Ordinal);
 
             // A fresh page can observe the same durable verification, without the original form.

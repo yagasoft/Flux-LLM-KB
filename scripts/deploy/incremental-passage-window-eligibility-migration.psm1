@@ -7,7 +7,7 @@ function Get-PassageWindowEligibilityHash([string]$Text) {
 }
 
 function Get-PassageWindowEligibilityMigrationContract {
-    param([switch]$Outlook,[switch]$CodexWorkspace,[switch]$MediaTranscription,[switch]$GpuResidency,[switch]$AncestorReconciliation)
+    param([switch]$Outlook,[switch]$CodexWorkspace,[switch]$MediaTranscription,[switch]$GpuResidency,[switch]$AncestorReconciliation,[switch]$OutlookRecursiveCapture)
     $contract = @{
         Baseline='20261101195325_AddVectorPublicationMetadata'
         Target='20261117210606_PersistPassageWindowEligibility'
@@ -26,7 +26,7 @@ function Get-PassageWindowEligibilityMigrationContract {
         ManifestField='passage_window_eligibility'
         Description='additive migration 79 to 80; eligibility proofs and withdrawal cursor; no corpus backfill'
     }
-    if ($Outlook -or $CodexWorkspace -or $MediaTranscription -or $GpuResidency -or $AncestorReconciliation) {
+    if ($Outlook -or $CodexWorkspace -or $MediaTranscription -or $GpuResidency -or $AncestorReconciliation -or $OutlookRecursiveCapture) {
         $contract.Baseline = $contract.Target
         $contract.Target = '20261118224032_BindOutlookWatchedSources'
         $contract.PriorHistoryCount = 80
@@ -39,7 +39,7 @@ function Get-PassageWindowEligibilityMigrationContract {
         $contract.ManifestField = 'outlook_watched_source'
         $contract.Description = 'additive migration 80 to 81; watched Outlook binding and bundle receipts; no export or backfill'
     }
-    if ($CodexWorkspace -or $MediaTranscription -or $GpuResidency -or $AncestorReconciliation) {
+    if ($CodexWorkspace -or $MediaTranscription -or $GpuResidency -or $AncestorReconciliation -or $OutlookRecursiveCapture) {
         $contract.Baseline = $contract.Target
         $contract.Target = '20261118225053_BindCodexNotesToWorkspace'
         $contract.PriorHistoryCount = 81
@@ -50,7 +50,7 @@ function Get-PassageWindowEligibilityMigrationContract {
         $contract.ManifestField = 'codex_workspace_notes'
         $contract.Description = 'additive migration 81 to 82; nullable workspace binding and filtered index; no backfill'
     }
-    if ($MediaTranscription -or $GpuResidency -or $AncestorReconciliation) {
+    if ($MediaTranscription -or $GpuResidency -or $AncestorReconciliation -or $OutlookRecursiveCapture) {
         $contract.Baseline = $contract.Target
         $contract.Target = '20261119125051_AddMediaTranscriptionGpuRequests'
         $contract.PriorHistoryCount = 82
@@ -63,7 +63,7 @@ function Get-PassageWindowEligibilityMigrationContract {
         $contract.ManifestField = 'media_transcription_gpu'
         $contract.Description = 'additive migration 82 to 83; shared GPU transcription request lifecycle'
     }
-    if ($GpuResidency -or $AncestorReconciliation) {
+    if ($GpuResidency -or $AncestorReconciliation -or $OutlookRecursiveCapture) {
         $contract.Baseline = $contract.Target
         $contract.Target = '20261119201434_AddGpuModelResidencies'
         $contract.PriorHistoryCount = 83
@@ -77,7 +77,7 @@ function Get-PassageWindowEligibilityMigrationContract {
         $contract.ManifestField = 'gpu_model_residency'
         $contract.Description = 'additive migration 83 to 84; native model ownership and dispatch detachment receipts'
     }
-    if ($AncestorReconciliation) {
+    if ($AncestorReconciliation -or $OutlookRecursiveCapture) {
         $contract.Baseline = $contract.Target
         $contract.Target = '20261120221703_ScheduleAncestorMetadataReconciliation'
         $contract.PriorHistoryCount = 84
@@ -88,6 +88,16 @@ function Get-PassageWindowEligibilityMigrationContract {
         $contract.ArtifactPrefix = 'ancestor-reconciliation'
         $contract.ManifestField = 'ancestor_reconciliation'
         $contract.Description = 'additive migration 84 to 85; due time for unresolved ancestor journal coverage'
+    }
+    if ($OutlookRecursiveCapture) {
+        $contract.Baseline = $contract.Target
+        $contract.Target = '20261122215123_ScheduleRecursiveOutlookCapture'
+        $contract.PriorHistoryCount = 85
+        $contract.PriorHistorySha256 = '5FAA8954681145A5B757F12B2922D9832424E2D29FD8CE6A22699CCB702A0525'
+        $contract.UpSha256 = 'F41728D82EE6DB01EF970DE24765B7E0BD8832D0D3648BCDA598F7C8E7CB5D79'
+        $contract.ArtifactPrefix = 'outlook-recursive-capture'
+        $contract.ManifestField = 'outlook_recursive_capture'
+        $contract.Description = 'additive migration 85 to 86 for Outlook scan cadence, recursive scope and claim fencing'
     }
     [pscustomobject]$contract
 }
@@ -164,9 +174,9 @@ function Get-PassageWindowEligibilitySchemaSha256 {
 }
 
 function Get-PassageWindowEligibilityStateKind {
-    param([Parameter(Mandatory)]$DatabaseState,[Parameter(Mandatory)][string]$ExpectedDatabaseIdentity,[switch]$Outlook,[switch]$CodexWorkspace,[switch]$MediaTranscription,[switch]$GpuResidency,[switch]$AncestorReconciliation)
-    $contract=Get-PassageWindowEligibilityMigrationContract -Outlook:$Outlook -CodexWorkspace:$CodexWorkspace -MediaTranscription:$MediaTranscription -GpuResidency:$GpuResidency -AncestorReconciliation:$AncestorReconciliation;$history=@($DatabaseState.History)
-    $journalHash = if ($AncestorReconciliation -and $history.Count -eq 85) { $contract.SuccessorJournalSchemaSha256 } else { $contract.JournalSchemaSha256 }
+    param([Parameter(Mandatory)]$DatabaseState,[Parameter(Mandatory)][string]$ExpectedDatabaseIdentity,[switch]$Outlook,[switch]$CodexWorkspace,[switch]$MediaTranscription,[switch]$GpuResidency,[switch]$AncestorReconciliation,[switch]$OutlookRecursiveCapture)
+    $contract=Get-PassageWindowEligibilityMigrationContract -Outlook:$Outlook -CodexWorkspace:$CodexWorkspace -MediaTranscription:$MediaTranscription -GpuResidency:$GpuResidency -AncestorReconciliation:$AncestorReconciliation -OutlookRecursiveCapture:$OutlookRecursiveCapture;$history=@($DatabaseState.History)
+    $journalHash = if ($OutlookRecursiveCapture -or ($AncestorReconciliation -and $history.Count -eq 85)) { $contract.SuccessorJournalSchemaSha256 } else { $contract.JournalSchemaSha256 }
     if(-not $ExpectedDatabaseIdentity -or $DatabaseState.Identity -cne $ExpectedDatabaseIdentity -or
         $DatabaseState.ResolvesDbo -cne $true -or
         $DatabaseState.SchemaSha256 -cne $journalHash -or
@@ -174,11 +184,16 @@ function Get-PassageWindowEligibilityStateKind {
     if($history.Count -notin @($contract.PriorHistoryCount,($contract.PriorHistoryCount+1))){throw 'window-eligibility-history-not-exact'}
     $prefix=@($history[0..($contract.PriorHistoryCount-1)])
     if($prefix[-1] -cne $contract.Baseline -or (Get-PassageWindowEligibilityHash ($prefix -join "`n")) -cne $contract.PriorHistorySha256){throw 'window-eligibility-predecessor-history-changed'}
-    if ($AncestorReconciliation) {
+    if ($AncestorReconciliation -or $OutlookRecursiveCapture) {
         if ($DatabaseState.ResidencySchemaFingerprint -cne $contract.ResidencySchemaSha256 -or
             $DatabaseState.FeatureSchemaSha256 -cne $contract.NewSchemaSha256 -or
             $DatabaseState.OutlookSchemaSha256 -cne $contract.OutlookNewSchemaSha256 -or $DatabaseState.CodexWorkspaceSchemaKind -cne 'New') {
             throw 'ancestor-reconciliation-predecessor-schema-changed'
+        }
+        if ($OutlookRecursiveCapture) {
+            if ($history.Count -eq 85 -and $DatabaseState.OutlookRecursiveCaptureSchema -ceq 'Old') { return 'Old' }
+            if ($history[-1] -ceq $contract.Target -and $DatabaseState.OutlookRecursiveCaptureSchema -ceq 'New') { return 'New' }
+            throw 'outlook-recursive-capture-partial-or-unreviewed-schema'
         }
         if ($history.Count -eq 84) { return 'Old' }
         if ($history[-1] -ceq $contract.Target) { return 'New' }
@@ -239,8 +254,39 @@ function Read-PassageWindowEligibilitySqlText([string]$Path,[string]$ExpectedSha
     } finally {$file.Dispose()}
 }
 
+function Get-OutlookRecursiveCaptureSchemaKind($Connection, $Transaction) {
+    $command = $Connection.CreateCommand()
+    try {
+        $command.Transaction = $Transaction
+        $command.CommandTimeout = 10
+        $command.CommandText = @'
+WITH Expected AS (
+    SELECT * FROM (VALUES
+        (N'OutlookCatchUps', N'ConfigurationRevision', N'bigint', 1),
+        (N'OutlookCaptureProfiles', N'IncludeSubfolders', N'bit', 0),
+        (N'OutlookCaptureProfiles', N'NextScheduledScanAtUtc', N'datetimeoffset', 1),
+        (N'OutlookCaptureFolders', N'IsDiscoveredSubfolder', N'bit', 0)
+    ) AS fields(TableName, ColumnName, TypeName, IsNullable)
+)
+SELECT CASE WHEN COUNT(t.object_id) <> 4 THEN 'Unknown'
+            WHEN COUNT(c.column_id) = 0 THEN 'Old'
+            WHEN SUM(CASE WHEN TYPE_NAME(c.user_type_id) = e.TypeName AND c.is_nullable = e.IsNullable
+                            AND c.is_computed = 0 AND (e.TypeName <> N'datetimeoffset' OR c.scale = 7)
+                            AND (e.IsNullable = 1 AND c.default_object_id = 0 OR e.IsNullable = 0 AND
+                                REPLACE(REPLACE(d.definition, N'(', N''), N')', N'') = N'0')
+                          THEN 1 ELSE 0 END) = 4 THEN 'New'
+            ELSE 'Unknown' END
+FROM Expected AS e
+LEFT JOIN sys.tables AS t ON t.object_id = OBJECT_ID(N'dbo.' + e.TableName, N'U')
+LEFT JOIN sys.columns AS c ON c.object_id = t.object_id AND c.name = e.ColumnName
+LEFT JOIN sys.default_constraints AS d ON d.object_id = c.default_object_id;
+'@
+        [string]$command.ExecuteScalar()
+    } finally { $command.Dispose() }
+}
+
 function Read-PassageWindowEligibilityConnectionState {
-    param([Parameter(Mandatory)]$Connection,[Parameter(Mandatory)]$Transaction,[switch]$Outlook,[switch]$CodexWorkspace,[switch]$MediaTranscription,[switch]$GpuResidency,[switch]$AncestorReconciliation)
+    param([Parameter(Mandatory)]$Connection,[Parameter(Mandatory)]$Transaction,[switch]$Outlook,[switch]$CodexWorkspace,[switch]$MediaTranscription,[switch]$GpuResidency,[switch]$AncestorReconciliation,[switch]$OutlookRecursiveCapture)
     $command=$Connection.CreateCommand()
     try {
         $command.Transaction=$Transaction;$command.CommandTimeout=10
@@ -248,21 +294,24 @@ function Read-PassageWindowEligibilityConnectionState {
         $identity=[string]$command.ExecuteScalar()
         $command.CommandText="SELECT CASE WHEN OBJECT_ID(N'Vectors')=OBJECT_ID(N'dbo.Vectors') AND OBJECT_ID(N'__EFMigrationsHistory')=OBJECT_ID(N'dbo.__EFMigrationsHistory') AND OBJECT_ID(N'dbo.Vectors') IS NOT NULL AND OBJECT_ID(N'dbo.__EFMigrationsHistory') IS NOT NULL AND OBJECT_ID(N'Artifacts')=OBJECT_ID(N'dbo.Artifacts') AND OBJECT_ID(N'TextChunks')=OBJECT_ID(N'dbo.TextChunks') AND OBJECT_ID(N'SourceDeletionOperations')=OBJECT_ID(N'dbo.SourceDeletionOperations') AND (OBJECT_ID(N'TextChunkWindowEligibilities') IS NULL OR OBJECT_ID(N'TextChunkWindowEligibilities')=OBJECT_ID(N'dbo.TextChunkWindowEligibilities')) AND (OBJECT_ID(N'TextChunkWindowBackfillStates') IS NULL OR OBJECT_ID(N'TextChunkWindowBackfillStates')=OBJECT_ID(N'dbo.TextChunkWindowBackfillStates')) THEN 1 ELSE 0 END;"
         $resolvesDbo=$command.ExecuteScalar() -eq 1
-        if (($Outlook -or $CodexWorkspace -or $MediaTranscription -or $GpuResidency -or $AncestorReconciliation) -and $resolvesDbo) {
+        if (($Outlook -or $CodexWorkspace -or $MediaTranscription -or $GpuResidency -or $AncestorReconciliation -or $OutlookRecursiveCapture) -and $resolvesDbo) {
             $command.CommandText = "SELECT CASE WHEN OBJECT_ID(N'OutlookCaptureProfiles')=OBJECT_ID(N'dbo.OutlookCaptureProfiles') AND OBJECT_ID(N'OutlookCaptureExports')=OBJECT_ID(N'dbo.OutlookCaptureExports') AND OBJECT_ID(N'SourceRootConfigurations')=OBJECT_ID(N'dbo.SourceRootConfigurations') THEN 1 ELSE 0 END;"
             $resolvesDbo = $command.ExecuteScalar() -eq 1
         }
-        if (($CodexWorkspace -or $MediaTranscription -or $GpuResidency -or $AncestorReconciliation) -and $resolvesDbo) {
+        if (($CodexWorkspace -or $MediaTranscription -or $GpuResidency -or $AncestorReconciliation -or $OutlookRecursiveCapture) -and $resolvesDbo) {
             $command.CommandText = "SELECT CASE WHEN OBJECT_ID(N'KnowledgeItems',N'U')=OBJECT_ID(N'dbo.KnowledgeItems',N'U') THEN 1 ELSE 0 END;"
             $resolvesDbo = $command.ExecuteScalar() -eq 1
         }
-        if (($MediaTranscription -or $GpuResidency -or $AncestorReconciliation) -and $resolvesDbo) {
+        if (($MediaTranscription -or $GpuResidency -or $AncestorReconciliation -or $OutlookRecursiveCapture) -and $resolvesDbo) {
             $command.CommandText = "SELECT CASE WHEN SCHEMA_NAME()=N'dbo' AND (OBJECT_ID(N'MediaTranscriptionGpuRequests') IS NULL OR OBJECT_ID(N'MediaTranscriptionGpuRequests')=OBJECT_ID(N'dbo.MediaTranscriptionGpuRequests')) THEN 1 ELSE 0 END;"
             $resolvesDbo = $command.ExecuteScalar() -eq 1
         }
-        if ($AncestorReconciliation) {
+        if ($AncestorReconciliation -or $OutlookRecursiveCapture) {
             $command.CommandText = "SELECT CASE WHEN OBJECT_ID(N'dbo.SourceRootScanStates', N'U') IS NOT NULL AND NOT EXISTS (SELECT 1 FROM sys.triggers WHERE parent_id=OBJECT_ID(N'dbo.SourceRootScanStates') AND is_disabled=0) THEN 1 ELSE 0 END;"
             if ($command.ExecuteScalar() -ne 1) { throw 'ancestor-reconciliation-source-scan-state-trigger-or-table-drift' }
+        }
+        $recursiveSchema = if ($OutlookRecursiveCapture) {
+            Get-OutlookRecursiveCaptureSchemaKind $Connection $Transaction
         }
         $command.CommandText="SELECT HAS_PERMS_BY_NAME(DB_NAME(),'DATABASE','ALTER');"
         $canAlter=$command.ExecuteScalar() -eq 1
@@ -274,11 +323,11 @@ function Read-PassageWindowEligibilityConnectionState {
         $schema=[string]$command.ExecuteScalar()
         if(-not $schema){throw 'window-eligibility-journal-schema-observation-missing'}
         [pscustomobject]@{Identity=$identity;History=$history.ToArray();CanAlter=$canAlter;ResolvesDbo=$resolvesDbo;
-            SchemaSha256=(Get-PassageWindowEligibilityHash $schema);
-            ResidencySchemaFingerprint=$(if ($GpuResidency -or $AncestorReconciliation -or ($MediaTranscription -and $history.Count -eq 83)) { Get-GpuModelResidencySchemaFingerprint $Connection $Transaction });
-            MediaSchemaFingerprint=$(if ($MediaTranscription -or $GpuResidency -or $AncestorReconciliation) { Get-MediaTranscriptionSchemaFingerprint $Connection $Transaction });
-            CodexWorkspaceSchemaKind=$(if ($CodexWorkspace -or $MediaTranscription -or $GpuResidency -or $AncestorReconciliation) { Get-CodexWorkspaceNotesSchemaKind $Connection $Transaction });
-            OutlookSchemaSha256=$(if ($Outlook -or $CodexWorkspace -or $MediaTranscription -or $GpuResidency -or $AncestorReconciliation) { Get-OutlookWatchedSourceSchemaSha256 $Connection $Transaction });
+            SchemaSha256=(Get-PassageWindowEligibilityHash $schema); OutlookRecursiveCaptureSchema=$recursiveSchema;
+            ResidencySchemaFingerprint=$(if ($GpuResidency -or $AncestorReconciliation -or $OutlookRecursiveCapture -or ($MediaTranscription -and $history.Count -eq 83)) { Get-GpuModelResidencySchemaFingerprint $Connection $Transaction });
+            MediaSchemaFingerprint=$(if ($MediaTranscription -or $GpuResidency -or $AncestorReconciliation -or $OutlookRecursiveCapture) { Get-MediaTranscriptionSchemaFingerprint $Connection $Transaction });
+            CodexWorkspaceSchemaKind=$(if ($CodexWorkspace -or $MediaTranscription -or $GpuResidency -or $AncestorReconciliation -or $OutlookRecursiveCapture) { Get-CodexWorkspaceNotesSchemaKind $Connection $Transaction });
+            OutlookSchemaSha256=$(if ($Outlook -or $CodexWorkspace -or $MediaTranscription -or $GpuResidency -or $AncestorReconciliation -or $OutlookRecursiveCapture) { Get-OutlookWatchedSourceSchemaSha256 $Connection $Transaction });
             FeatureSchemaSha256=(Get-PassageWindowEligibilitySchemaSha256 -Connection $Connection -Transaction $Transaction);
             MetadataIndexSha256=(Get-VectorPublicationMetadataIndexSha256 -Connection $Connection -Transaction $Transaction);
             QueueIndexSha256=(Get-SourceDeletionPendingQueueIndexSha256 -Connection $Connection -Transaction $Transaction)}
@@ -296,27 +345,27 @@ function New-PassageWindowEligibilityConnection([string]$ConnectionString) {
 }
 
 function Get-PassageWindowEligibilityDatabaseState {
-    param([Parameter(Mandatory)][string]$ConnectionString,[switch]$Outlook,[switch]$CodexWorkspace,[switch]$MediaTranscription,[switch]$GpuResidency,[switch]$AncestorReconciliation)
+    param([Parameter(Mandatory)][string]$ConnectionString,[switch]$Outlook,[switch]$CodexWorkspace,[switch]$MediaTranscription,[switch]$GpuResidency,[switch]$AncestorReconciliation,[switch]$OutlookRecursiveCapture)
     $connection=New-PassageWindowEligibilityConnection $ConnectionString
     try {
         $connection.Open();$transaction=$connection.BeginTransaction([Data.IsolationLevel]::Serializable)
-        try {$state=Read-PassageWindowEligibilityConnectionState $connection $transaction -Outlook:$Outlook -CodexWorkspace:$CodexWorkspace -MediaTranscription:$MediaTranscription -GpuResidency:$GpuResidency -AncestorReconciliation:$AncestorReconciliation;$transaction.Commit();$state}
+        try {$state=Read-PassageWindowEligibilityConnectionState $connection $transaction -Outlook:$Outlook -CodexWorkspace:$CodexWorkspace -MediaTranscription:$MediaTranscription -GpuResidency:$GpuResidency -AncestorReconciliation:$AncestorReconciliation -OutlookRecursiveCapture:$OutlookRecursiveCapture;$transaction.Commit();$state}
         finally {$transaction.Dispose()}
     } finally {$connection.Dispose()}
 }
 
 function Invoke-PassageWindowEligibilityMigrationSql {
     param([Parameter(Mandatory)][string]$ConnectionString,[Parameter(Mandatory)][string]$SqlPath,
-        [Parameter(Mandatory)][string]$ExpectedDatabaseIdentity,[switch]$Outlook,[switch]$CodexWorkspace,[switch]$MediaTranscription,[switch]$GpuResidency,[switch]$AncestorReconciliation)
-    $contract=Get-PassageWindowEligibilityMigrationContract -Outlook:$Outlook -CodexWorkspace:$CodexWorkspace -MediaTranscription:$MediaTranscription -GpuResidency:$GpuResidency -AncestorReconciliation:$AncestorReconciliation
+        [Parameter(Mandatory)][string]$ExpectedDatabaseIdentity,[switch]$Outlook,[switch]$CodexWorkspace,[switch]$MediaTranscription,[switch]$GpuResidency,[switch]$AncestorReconciliation,[switch]$OutlookRecursiveCapture)
+    $contract=Get-PassageWindowEligibilityMigrationContract -Outlook:$Outlook -CodexWorkspace:$CodexWorkspace -MediaTranscription:$MediaTranscription -GpuResidency:$GpuResidency -AncestorReconciliation:$AncestorReconciliation -OutlookRecursiveCapture:$OutlookRecursiveCapture
     $text=Read-PassageWindowEligibilitySqlText $SqlPath $contract.UpSha256 'window-eligibility-up-sql-changed'
     $connection=New-PassageWindowEligibilityConnection $ConnectionString
     try {
         $connection.Open()
         $transaction=$connection.BeginTransaction([Data.IsolationLevel]::Serializable)
         try {
-            $before=Read-PassageWindowEligibilityConnectionState $connection $transaction -Outlook:$Outlook -CodexWorkspace:$CodexWorkspace -MediaTranscription:$MediaTranscription -GpuResidency:$GpuResidency -AncestorReconciliation:$AncestorReconciliation
-            $kind=Get-PassageWindowEligibilityStateKind $before $ExpectedDatabaseIdentity -Outlook:$Outlook -CodexWorkspace:$CodexWorkspace -MediaTranscription:$MediaTranscription -GpuResidency:$GpuResidency -AncestorReconciliation:$AncestorReconciliation
+            $before=Read-PassageWindowEligibilityConnectionState $connection $transaction -Outlook:$Outlook -CodexWorkspace:$CodexWorkspace -MediaTranscription:$MediaTranscription -GpuResidency:$GpuResidency -AncestorReconciliation:$AncestorReconciliation -OutlookRecursiveCapture:$OutlookRecursiveCapture
+            $kind=Get-PassageWindowEligibilityStateKind $before $ExpectedDatabaseIdentity -Outlook:$Outlook -CodexWorkspace:$CodexWorkspace -MediaTranscription:$MediaTranscription -GpuResidency:$GpuResidency -AncestorReconciliation:$AncestorReconciliation -OutlookRecursiveCapture:$OutlookRecursiveCapture
             if(-not $before.ResolvesDbo){throw 'window-eligibility-unqualified-objects-do-not-resolve-to-dbo'}
             if($kind -ceq 'New'){$transaction.Commit();return}
             if(-not $before.CanAlter){throw 'window-eligibility-ddl-connection-alter-permission-required'}
@@ -328,7 +377,7 @@ function Invoke-PassageWindowEligibilityMigrationSql {
                 try{$command.Transaction=$transaction;$command.CommandTimeout=$remaining;$command.CommandText=$batch;$null=$command.ExecuteNonQuery()}
                 finally{$command.Dispose()}
             }
-            if((Get-PassageWindowEligibilityStateKind (Read-PassageWindowEligibilityConnectionState $connection $transaction -Outlook:$Outlook -CodexWorkspace:$CodexWorkspace -MediaTranscription:$MediaTranscription -GpuResidency:$GpuResidency -AncestorReconciliation:$AncestorReconciliation) $ExpectedDatabaseIdentity -Outlook:$Outlook -CodexWorkspace:$CodexWorkspace -MediaTranscription:$MediaTranscription -GpuResidency:$GpuResidency -AncestorReconciliation:$AncestorReconciliation) -cne 'New'){throw 'window-eligibility-transaction-successor-invalid'}
+            if((Get-PassageWindowEligibilityStateKind (Read-PassageWindowEligibilityConnectionState $connection $transaction -Outlook:$Outlook -CodexWorkspace:$CodexWorkspace -MediaTranscription:$MediaTranscription -GpuResidency:$GpuResidency -AncestorReconciliation:$AncestorReconciliation -OutlookRecursiveCapture:$OutlookRecursiveCapture) $ExpectedDatabaseIdentity -Outlook:$Outlook -CodexWorkspace:$CodexWorkspace -MediaTranscription:$MediaTranscription -GpuResidency:$GpuResidency -AncestorReconciliation:$AncestorReconciliation -OutlookRecursiveCapture:$OutlookRecursiveCapture) -cne 'New'){throw 'window-eligibility-transaction-successor-invalid'}
             $transaction.Commit()
         } catch {try{$transaction.Rollback()}catch{};throw}
         finally {$transaction.Dispose()}
@@ -344,9 +393,9 @@ function Write-PassageWindowEligibilityRecord([string]$Path,$Value) {
 function New-PassageWindowEligibilityMigrationState {
     param([Parameter(Mandatory)]$DatabaseState,[Parameter(Mandatory)][string]$ReceiptDirectory,
         [Parameter(Mandatory)][string]$ReleaseId,[Parameter(Mandatory)][string]$Commit,
-        [Parameter(Mandatory)][string]$SqlSha256,[switch]$Outlook,[switch]$CodexWorkspace,[switch]$MediaTranscription,[switch]$GpuResidency,[switch]$AncestorReconciliation)
-    $contract=Get-PassageWindowEligibilityMigrationContract -Outlook:$Outlook -CodexWorkspace:$CodexWorkspace -MediaTranscription:$MediaTranscription -GpuResidency:$GpuResidency -AncestorReconciliation:$AncestorReconciliation
-    $kind=Get-PassageWindowEligibilityStateKind $DatabaseState $DatabaseState.Identity -Outlook:$Outlook -CodexWorkspace:$CodexWorkspace -MediaTranscription:$MediaTranscription -GpuResidency:$GpuResidency -AncestorReconciliation:$AncestorReconciliation
+        [Parameter(Mandatory)][string]$SqlSha256,[switch]$Outlook,[switch]$CodexWorkspace,[switch]$MediaTranscription,[switch]$GpuResidency,[switch]$AncestorReconciliation,[switch]$OutlookRecursiveCapture)
+    $contract=Get-PassageWindowEligibilityMigrationContract -Outlook:$Outlook -CodexWorkspace:$CodexWorkspace -MediaTranscription:$MediaTranscription -GpuResidency:$GpuResidency -AncestorReconciliation:$AncestorReconciliation -OutlookRecursiveCapture:$OutlookRecursiveCapture
+    $kind=Get-PassageWindowEligibilityStateKind $DatabaseState $DatabaseState.Identity -Outlook:$Outlook -CodexWorkspace:$CodexWorkspace -MediaTranscription:$MediaTranscription -GpuResidency:$GpuResidency -AncestorReconciliation:$AncestorReconciliation -OutlookRecursiveCapture:$OutlookRecursiveCapture
     if($SqlSha256 -cne $contract.UpSha256 -or $Commit -cnotmatch '^[a-f0-9]{40}$' -or $ReleaseId -cnotmatch '^[A-Za-z0-9-]{1,100}$'){throw 'window-eligibility-release-sql-binding-invalid'}
     if($kind -ceq 'Old' -and $DatabaseState.CanAlter -cne $true){throw 'window-eligibility-alter-permission-required'}
     if(-not [IO.Path]::IsPathFullyQualified($ReceiptDirectory) -or [IO.Path]::GetFullPath($ReceiptDirectory) -cne $ReceiptDirectory){throw 'window-eligibility-absolute-receipt-path-required'}
@@ -367,7 +416,7 @@ function New-PassageWindowEligibilityMigrationState {
 function Confirm-PassageWindowEligibilityMigrationOutcome {
     param([Parameter(Mandatory)][hashtable]$State,[Parameter(Mandatory)][scriptblock]$ReadState)
     $State.SettledState='Unknown'
-    $State.SettledState=Get-PassageWindowEligibilityStateKind (&$ReadState) $State.Identity -Outlook:($State.Purpose -ceq 'outlook-watched-source-migration') -CodexWorkspace:($State.Purpose -ceq 'codex-workspace-notes-migration') -MediaTranscription:($State.Purpose -ceq 'media-transcription-gpu-migration') -GpuResidency:($State.Purpose -ceq 'gpu-model-residency-migration') -AncestorReconciliation:($State.Purpose -ceq 'ancestor-reconciliation-migration')
+    $State.SettledState=Get-PassageWindowEligibilityStateKind (&$ReadState) $State.Identity -Outlook:($State.Purpose -ceq 'outlook-watched-source-migration') -CodexWorkspace:($State.Purpose -ceq 'codex-workspace-notes-migration') -MediaTranscription:($State.Purpose -ceq 'media-transcription-gpu-migration') -GpuResidency:($State.Purpose -ceq 'gpu-model-residency-migration') -AncestorReconciliation:($State.Purpose -ceq 'ancestor-reconciliation-migration') -OutlookRecursiveCapture:($State.Purpose -ceq 'outlook-recursive-capture-migration')
     $State.SettledState
 }
 
@@ -377,7 +426,7 @@ function Invoke-PassageWindowEligibilityMigrationAttempt {
     if($State.Attempted){throw 'window-eligibility-attempt-requires-reconciliation-not-replay'}
     &$AssertStopped
     $before=&$ReadState
-    if((Get-PassageWindowEligibilityStateKind $before $State.Identity -Outlook:($State.Purpose -ceq 'outlook-watched-source-migration') -CodexWorkspace:($State.Purpose -ceq 'codex-workspace-notes-migration') -MediaTranscription:($State.Purpose -ceq 'media-transcription-gpu-migration') -GpuResidency:($State.Purpose -ceq 'gpu-model-residency-migration') -AncestorReconciliation:($State.Purpose -ceq 'ancestor-reconciliation-migration')) -cne $State.InitialKind -or
+    if((Get-PassageWindowEligibilityStateKind $before $State.Identity -Outlook:($State.Purpose -ceq 'outlook-watched-source-migration') -CodexWorkspace:($State.Purpose -ceq 'codex-workspace-notes-migration') -MediaTranscription:($State.Purpose -ceq 'media-transcription-gpu-migration') -GpuResidency:($State.Purpose -ceq 'gpu-model-residency-migration') -AncestorReconciliation:($State.Purpose -ceq 'ancestor-reconciliation-migration') -OutlookRecursiveCapture:($State.Purpose -ceq 'outlook-recursive-capture-migration')) -cne $State.InitialKind -or
         (@($before.History) -join '|') -cne (@($State.OriginalHistory) -join '|')){throw 'window-eligibility-preflight-state-changed'}
     $State.Attempted=$true
     Write-PassageWindowEligibilityRecord $State.IntentPath $State
@@ -400,4 +449,4 @@ function Invoke-PassageWindowEligibilityMigrationAttempt {
 Export-ModuleMember -Function Get-PassageWindowEligibilityMigrationContract,Get-PassageWindowEligibilityHash,
     Get-PassageWindowEligibilitySchemaSha256,Get-PassageWindowEligibilityStateKind,Get-PassageWindowEligibilityDatabaseState,
     Invoke-PassageWindowEligibilityMigrationSql,New-PassageWindowEligibilityMigrationState,
-    Invoke-PassageWindowEligibilityMigrationAttempt,Confirm-PassageWindowEligibilityMigrationOutcome,Write-PassageWindowEligibilityRecord,Get-GpuModelResidencySchemaFingerprint,Get-MediaTranscriptionSchemaFingerprint,Get-OutlookWatchedSourceSchemaSha256,Get-CodexWorkspaceNotesSchemaKind
+    Invoke-PassageWindowEligibilityMigrationAttempt,Confirm-PassageWindowEligibilityMigrationOutcome,Write-PassageWindowEligibilityRecord,Get-GpuModelResidencySchemaFingerprint,Get-MediaTranscriptionSchemaFingerprint,Get-OutlookWatchedSourceSchemaSha256,Get-CodexWorkspaceNotesSchemaKind,Get-OutlookRecursiveCaptureSchemaKind

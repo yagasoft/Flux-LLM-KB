@@ -42,7 +42,11 @@ internal sealed record OutlookHostFolderConfiguration(
 internal sealed record OutlookHostCatchUpWork(
     OutlookCatchUpClaim Claim,
     bool IsDurablyEnabled,
-    IReadOnlyList<OutlookHostFolderConfiguration> Folders);
+    IReadOnlyList<OutlookHostFolderConfiguration> Folders)
+{
+    public bool IncludeSubfolders { get; init; }
+    public long? ConfigurationRevision { get; init; }
+}
 
 internal sealed record OutlookFolderDescriptor(
     OutlookCaptureFolderId FolderId,
@@ -62,6 +66,8 @@ internal sealed record OutlookItemEnvelope(
     DateTimeOffset ReceivedTimeUtc,
     string SourceFingerprint)
 {
+    public OutlookFolderIdentity? EnumeratedFolder { get; init; }
+
     public DateTimeOffset Timestamp(OutlookIncrementalBasis basis) =>
         basis == OutlookIncrementalBasis.LastModificationTime
             ? LastModificationTimeUtc

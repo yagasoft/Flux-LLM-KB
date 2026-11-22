@@ -43,6 +43,10 @@ public sealed class SqlOutlookCaptureStore(IDbContextFactory<FluxKnowledgeDbCont
         var fingerprint = targetFingerprint is null
             ? request.RequestFingerprint
             : ImmutableBrowseRequestFingerprint(request.RequestFingerprint, targetFingerprint);
+        if (request.IncludeSubfolders)
+        {
+            fingerprint = TargetPathFingerprint(fingerprint + "/include-subfolders");
+        }
         return MutateAsync(kind, request.OperationId, fingerprint, request.ProfileId?.Value, async context =>
         {
             var now = _clock.GetUtcNow();
@@ -112,6 +116,8 @@ public sealed class SqlOutlookCaptureStore(IDbContextFactory<FluxKnowledgeDbCont
                 row.ConfigurationRevision++;
             }
             row.DisplayName = request.DisplayName; row.IncrementalBasis = (int)request.IncrementalBasis; row.CadenceTicks = request.Schedule.Cadence.Ticks;
+            row.IncludeSubfolders = request.IncludeSubfolders;
+            row.NextScheduledScanAtUtc = null;
             row.MaximumOverlapTicks = request.Schedule.MaximumOverlap.Ticks; row.SpoolRoot = request.SpoolValidation.PrivateSpoolRoot!;
             row.IsEnabled = request.Enable; row.State = (int)(request.Enable ? OutlookCaptureState.AwaitingHost : OutlookCaptureState.Disabled); row.UpdatedAtUtc = now;
             if (request.ProfileId is not null)
@@ -173,7 +179,7 @@ public sealed class SqlOutlookCaptureStore(IDbContextFactory<FluxKnowledgeDbCont
             {
                 var current = await context.OutlookCaptureFolders.FromSqlInterpolated(
                         $"SELECT * FROM [OutlookCaptureFolders] WITH (UPDLOCK,HOLDLOCK) WHERE [ProfileId]={request.ProfileId.Value}")
-                    .Where(folder => folder.State != (int)OutlookCaptureState.Disabled).Select(folder => folder.Id)
+                    .Where(folder => !folder.IsDiscoveredSubfolder && folder.State != (int)OutlookCaptureState.Disabled).Select(folder => folder.Id)
                     .ToArrayAsync(cancellationToken).ConfigureAwait(false);
                 if (!current.Order().SequenceEqual(expectedFolders)) return (false, (Guid?)null);
             }
@@ -181,8 +187,26 @@ public sealed class SqlOutlookCaptureStore(IDbContextFactory<FluxKnowledgeDbCont
             CheckCatchUpDeadline();
             if (request.ExpectedConfigurationRevision is not null && deploymentValidationHold?.IsHeld == true)
                 throw new NativeOperationException("deployment-validation-held");
-            if (existing is not null) return (true, (Guid?)existing.Id);
-            var catchUp = new OutlookCatchUpEntity { Id = Guid.NewGuid(), ProfileId = request.ProfileId.Value, CoalescingKey = request.CoalescingKey, Provenance = (int)request.Provenance, State = 0, Reason = request.Reason };
+            if (existing is not null)
+            {
+                if (existing.ConfigurationRevision == profile.ConfigurationRevision)
+                {
+                    return (true, (Guid?)existing.Id);
+                }
+
+                existing.State = 3;
+                existing.Reason = nameof(OutlookCatchUpFailureReason.ConfigurationChanged);
+                existing.LeaseOwner = null;
+                existing.LeaseExpiresAtUtc = null;
+                // Free the active coalescing key within this transaction before adding
+                // the replacement for the current configuration.
+                await context.SaveChangesAsync(cancellationToken).ConfigureAwait(false);
+            }
+            var catchUp = new OutlookCatchUpEntity
+            {
+                Id = Guid.NewGuid(), ProfileId = profile.Id, ConfigurationRevision = profile.ConfigurationRevision,
+                CoalescingKey = request.CoalescingKey, Provenance = (int)request.Provenance, Reason = request.Reason
+            };
             context.OutlookCatchUps.Add(catchUp);
             return (true, (Guid?)catchUp.Id);
         }, cancellationToken, fenceOperation: request.ConfirmationExpiresAtUtc is not null);
@@ -197,19 +221,104 @@ public sealed class SqlOutlookCaptureStore(IDbContextFactory<FluxKnowledgeDbCont
     public async ValueTask<OutlookCatchUpClaimReceipt> ClaimCatchUpAsync(OutlookCatchUpClaimRequest request, CancellationToken cancellationToken)
     {
         request.Validate();
-        var operation = await MutateAsync("claim-catchup", request.OperationId, request.RequestFingerprint, null, async context =>
+        var fingerprint = request.ScheduleDueProfiles
+            ? TargetPathFingerprint(request.RequestFingerprint + "/schedule-due-profiles")
+            : request.RequestFingerprint;
+        var operation = await MutateAsync("claim-catchup", request.OperationId, fingerprint, null, async context =>
         {
-            var now = _clock.GetUtcNow(); var row = await context.OutlookCatchUps.OrderBy(x => x.Id).FirstOrDefaultAsync(x => x.State == 0 && (x.NotBeforeUtc == null || x.NotBeforeUtc <= now), cancellationToken).ConfigureAwait(false);
+            if (request.ScheduleDueProfiles)
+            {
+                await context.Database.ExecuteSqlRawAsync(
+                    """
+                    DECLARE @result int;
+                    EXEC @result = sp_getapplock @Resource=N'FluxKnowledge.Outlook.CatchUpAdmission',
+                        @LockMode=N'Exclusive', @LockOwner=N'Transaction', @LockTimeout=5000;
+                    IF @result < 0 THROW 51000, 'Outlook catch-up admission lock unavailable.', 1;
+                    """, cancellationToken).ConfigureAwait(false);
+            }
+
+            var now = _clock.GetUtcNow();
+            var scheduleAllowed = deploymentValidationHold?.IsHeld != true;
+            if (request.ScheduleDueProfiles)
+            {
+                await context.OutlookCatchUps.Where(c => c.State == 0 && c.ConfigurationRevision != null &&
+                    context.OutlookCaptureProfiles.Any(p => p.Id == c.ProfileId &&
+                        p.ConfigurationRevision != c.ConfigurationRevision))
+                    .ExecuteUpdateAsync(setters => setters
+                        .SetProperty(c => c.State, 3)
+                        .SetProperty(c => c.Reason, nameof(OutlookCatchUpFailureReason.ConfigurationChanged)),
+                        cancellationToken).ConfigureAwait(false);
+            }
+
+            var row = await context.OutlookCatchUps.OrderBy(x => x.Id).FirstOrDefaultAsync(
+                x => x.State == 0 && (x.NotBeforeUtc == null || x.NotBeforeUtc <= now) &&
+                    (x.Provenance != (int)OutlookCatchUpProvenance.Schedule ||
+                        scheduleAllowed && context.OutlookCaptureProfiles.Any(p => p.Id == x.ProfileId && p.IsEnabled)) &&
+                    (!request.ScheduleDueProfiles || !context.OutlookCatchUps.Any(other =>
+                        other.ProfileId == x.ProfileId && other.State == 1)),
+                cancellationToken).ConfigureAwait(false);
+            if (row is null && request.ScheduleDueProfiles && scheduleAllowed)
+            {
+                row = await CreateDueCatchUpAsync(context, now, cancellationToken).ConfigureAwait(false);
+            }
+
             if (row is null) return (false, (Guid?)null);
-            row.State = 1; row.FencingToken++; row.LeaseOwner = Owner(request.Host); row.LastHeartbeatAtUtc = now; row.LeaseExpiresAtUtc = now.Add(request.LeaseDuration); return (true, row.Id);
+            if (request.ScheduleDueProfiles && row.ConfigurationRevision is null)
+            {
+                row.ConfigurationRevision = await context.OutlookCaptureProfiles.Where(p => p.Id == row.ProfileId)
+                    .Select(p => (long?)p.ConfigurationRevision).SingleAsync(cancellationToken).ConfigureAwait(false);
+            }
+
+            row.State = 1;
+            row.FencingToken++;
+            row.LeaseOwner = Owner(request.Host);
+            row.LastHeartbeatAtUtc = now;
+            row.LeaseExpiresAtUtc = now.Add(request.LeaseDuration);
+            return (true, row.Id);
         }, cancellationToken);
         if (!operation.Accepted) return new OutlookCatchUpClaimReceipt(null, false, operation.Committed, operation.IsReplay);
         await using var context = await _contextFactory.CreateDbContextAsync(cancellationToken).ConfigureAwait(false); var resourceId = await context.OutlookCaptureOperations.Where(x => x.OperationId == request.OperationId).Select(x => x.ResourceId).SingleAsync(cancellationToken).ConfigureAwait(false); var row = await context.OutlookCatchUps.SingleAsync(x => x.Id == resourceId, cancellationToken).ConfigureAwait(false);
         return new OutlookCatchUpClaimReceipt(ToClaim(row), true, true, operation.IsReplay);
     }
 
+    private static async Task<OutlookCatchUpEntity?> CreateDueCatchUpAsync(
+        FluxKnowledgeDbContext context,
+        DateTimeOffset now,
+        CancellationToken cancellationToken)
+    {
+        var minimumCadence = OutlookCaptureSchedule.MinimumCadence.Ticks;
+        var maximumCadence = OutlookCaptureSchedule.MaximumCadence.Ticks;
+        var profile = await context.OutlookCaptureProfiles
+            .Where(p => p.IsEnabled && p.State != (int)OutlookCaptureState.Disabled &&
+                p.State != (int)OutlookCaptureState.Stale &&
+                p.CadenceTicks >= minimumCadence && p.CadenceTicks <= maximumCadence &&
+                (p.NextScheduledScanAtUtc == null || p.NextScheduledScanAtUtc <= now) &&
+                context.OutlookCaptureFolders.Any(f => f.ProfileId == p.Id && !f.IsDiscoveredSubfolder &&
+                    f.State != (int)OutlookCaptureState.Disabled) &&
+                !context.OutlookCatchUps.Any(c => c.ProfileId == p.Id && (c.State == 0 || c.State == 1)))
+            .OrderBy(p => p.NextScheduledScanAtUtc).ThenBy(p => p.Id)
+            .FirstOrDefaultAsync(cancellationToken).ConfigureAwait(false);
+        if (profile is null) return null;
+
+        // This profile update and the leased work row commit together. Its rowversion
+        // forces competing hosts to recalculate eligibility against the winner.
+        var ticksUntilNextBoundary = profile.CadenceTicks - now.UtcTicks % profile.CadenceTicks;
+        profile.NextScheduledScanAtUtc = now.AddTicks(ticksUntilNextBoundary);
+        var work = new OutlookCatchUpEntity
+        {
+            Id = Guid.NewGuid(),
+            ProfileId = profile.Id,
+            ConfigurationRevision = profile.ConfigurationRevision,
+            CoalescingKey = "scheduled-catch-up",
+            Provenance = (int)OutlookCatchUpProvenance.Schedule,
+            Reason = "scheduled-catch-up"
+        };
+        context.OutlookCatchUps.Add(work);
+        return work;
+    }
+
     public ValueTask<OutlookOperationReceipt> RenewCatchUpLeaseAsync(OutlookCatchUpLeaseRenewalRequest request, CancellationToken cancellationToken) { request.Validate(); return CatchUpMutationAsync("renew-catchup", request.OperationId, request.RequestFingerprint, request.Claim, row => { row.LeaseExpiresAtUtc = request.RenewedLeaseExpiresAtUtc; row.LastHeartbeatAtUtc = _clock.GetUtcNow(); }, cancellationToken); }
-    public ValueTask<OutlookOperationReceipt> CompleteCatchUpAsync(OutlookCatchUpCompletionRequest request, CancellationToken cancellationToken) { request.Validate(); return CatchUpMutationAsync("complete-catchup", request.OperationId, request.RequestFingerprint, request.Claim, row => row.State = 2, cancellationToken); }
+    public ValueTask<OutlookOperationReceipt> CompleteCatchUpAsync(OutlookCatchUpCompletionRequest request, CancellationToken cancellationToken) { request.Validate(); return CatchUpMutationAsync("complete-catchup", request.OperationId, request.RequestFingerprint, request.Claim, row => row.State = 2, cancellationToken, requireCurrentProfile: true); }
     public ValueTask<OutlookOperationReceipt> FailCatchUpAsync(OutlookCatchUpFailureRequest request, CancellationToken cancellationToken) { request.Validate(); return CatchUpMutationAsync("fail-catchup", request.OperationId, request.RequestFingerprint, request.Claim, row => { row.State = 3; row.Reason = request.FailureReason.ToString(); }, cancellationToken); }
     public ValueTask<OutlookOperationReceipt> RequeueCatchUpAsync(OutlookCatchUpRequeueRequest request, CancellationToken cancellationToken) { request.Validate(); return CatchUpMutationAsync("requeue-catchup", request.OperationId, request.RequestFingerprint, request.Claim, row => { row.State = 0; row.RetryCount++; row.Reason = request.RetryReason.ToString(); row.NotBeforeUtc = request.NotBeforeUtc; }, cancellationToken); }
 
@@ -454,6 +563,7 @@ public sealed class SqlOutlookCaptureStore(IDbContextFactory<FluxKnowledgeDbCont
                     configuredFolders.Add(canonical);
                     context.OutlookCaptureFolders.Add(canonical);
                 }
+                canonical.IsDiscoveredSubfolder = false;
                 canonical.DisplayName = folder.DisplayName;
                 canonical.Basis = profile.IncrementalBasis;
                 canonical.State = (int)OutlookCaptureState.Ready;
@@ -488,7 +598,39 @@ public sealed class SqlOutlookCaptureStore(IDbContextFactory<FluxKnowledgeDbCont
     public async ValueTask<IReadOnlyList<OutlookBrowseFolderProjection>> ReadBrowseResultAsync(Guid correlationId, CancellationToken cancellationToken) { await using var context = await _contextFactory.CreateDbContextAsync(cancellationToken).ConfigureAwait(false); return await (from result in context.OutlookBrowseResults join request in context.OutlookBrowseRequests on result.BrowseRequestId equals request.Id where request.CorrelationId == correlationId && request.State == 2 && request.TargetPathFingerprint != null select new OutlookBrowseFolderProjection(new OutlookCaptureFolderId(result.FolderId), result.DisplayName)).ToListAsync(cancellationToken).ConfigureAwait(false); }
 
     private ValueTask<OutlookOperationReceipt> SetProfileStateAsync(string kind, Guid id, string fingerprint, Guid profileId, OutlookCaptureState state, CancellationToken token) => MutateAsync(kind, id, fingerprint, profileId, async context => { var row = await context.OutlookCaptureProfiles.SingleOrDefaultAsync(x => x.Id == profileId, token).ConfigureAwait(false); if (row is null) return (false, (Guid?)null); row.State = (int)state; row.IsEnabled = false; row.ConfigurationRevision++; row.UpdatedAtUtc = _clock.GetUtcNow(); return (true, profileId); }, token);
-    private ValueTask<OutlookOperationReceipt> CatchUpMutationAsync(string kind, Guid id, string fingerprint, OutlookCatchUpClaim claim, Action<OutlookCatchUpEntity> mutation, CancellationToken token) => MutateAsync(kind, id, fingerprint, claim.ProfileId.Value, async context => { var row = await context.OutlookCatchUps.SingleOrDefaultAsync(x => x.Id == claim.CatchUpId && x.ProfileId == claim.ProfileId.Value && x.CoalescingKey == claim.CoalescingKey && x.FencingToken == claim.FencingToken && x.State == 1 && x.LeaseOwner == Owner(claim.LeaseOwner), token).ConfigureAwait(false); if (row is null || row.LeaseExpiresAtUtc is null || row.LeaseExpiresAtUtc < _clock.GetUtcNow()) return (false, (Guid?)null); mutation(row); return (true, row.Id); }, token);
+    private ValueTask<OutlookOperationReceipt> CatchUpMutationAsync(
+        string kind,
+        Guid id,
+        string fingerprint,
+        OutlookCatchUpClaim claim,
+        Action<OutlookCatchUpEntity> mutation,
+        CancellationToken token,
+        bool requireCurrentProfile = false) =>
+        MutateAsync(kind, id, fingerprint, claim.ProfileId.Value, async context =>
+        {
+            OutlookCaptureProfileEntity? profile = null;
+            if (requireCurrentProfile)
+            {
+                profile = await context.OutlookCaptureProfiles.FromSqlInterpolated(
+                        $"SELECT * FROM [OutlookCaptureProfiles] WITH (UPDLOCK,HOLDLOCK) WHERE [Id]={claim.ProfileId.Value}")
+                    .SingleOrDefaultAsync(token).ConfigureAwait(false);
+            }
+
+            var row = await context.OutlookCatchUps.SingleOrDefaultAsync(x =>
+                x.Id == claim.CatchUpId && x.ProfileId == claim.ProfileId.Value &&
+                x.CoalescingKey == claim.CoalescingKey && x.FencingToken == claim.FencingToken &&
+                x.State == 1 && x.LeaseOwner == Owner(claim.LeaseOwner), token).ConfigureAwait(false);
+            if (row is null || row.LeaseExpiresAtUtc is null || row.LeaseExpiresAtUtc < _clock.GetUtcNow() ||
+                requireCurrentProfile && row.ConfigurationRevision is { } revision &&
+                (profile?.ConfigurationRevision != revision || !profile.IsEnabled))
+            {
+                return (false, (Guid?)null);
+            }
+
+            mutation(row);
+            return (true, row.Id);
+        }, token);
+
     private async ValueTask<OutlookOperationReceipt> MutateAsync(
         string kind,
         Guid operationId,

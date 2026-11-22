@@ -18,6 +18,8 @@ public sealed class OutlookCaptureProfileEntity
     public bool IsEnabled { get; set; }
     public long ConfigurationRevision { get; set; }
     public long CadenceTicks { get; set; }
+    public DateTimeOffset? NextScheduledScanAtUtc { get; set; }
+    public bool IncludeSubfolders { get; set; }
     public long MaximumOverlapTicks { get; set; }
     public DateTimeOffset CreatedAtUtc { get; set; }
     public DateTimeOffset UpdatedAtUtc { get; set; }

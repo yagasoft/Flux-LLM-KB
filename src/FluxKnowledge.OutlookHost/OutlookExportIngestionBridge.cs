@@ -30,7 +30,8 @@ internal sealed class SqlOutlookReadyExportIngestionService(SqlOutlookExportInge
 
 internal sealed class OutlookExportIngestionBridge(
     IOutlookReadyExportIngestionService ingestionService,
-    PersistedOutlookSpoolRootPolicy spoolRootPolicy)
+    PersistedOutlookSpoolRootPolicy spoolRootPolicy,
+    Func<OutlookHostCatchUpWork, CancellationToken, ValueTask>? captureScope = null)
     : IOutlookExportIngestionBridge
 {
     public async ValueTask<bool> ExportAndIngestAsync(
@@ -43,6 +44,7 @@ internal sealed class OutlookExportIngestionBridge(
         var canonicalSpoolRoot = spoolRootPolicy.RequireCanonicalBeforeIo(folder.SpoolRoot);
         var exportId = ExportIdFor(folder, item);
         var layout = new OutlookSpoolLayout(canonicalSpoolRoot);
+        await using var writer = await layout.AcquireWriterAsync(cancellationToken).ConfigureAwait(false);
         var readyDirectory = layout.GetReadyExportDirectory(exportId);
         var operationId = StableGuid($"ingest|{exportId:N}|{work.Claim.CatchUpId:N}|{work.Claim.FencingToken}");
         var cursorUtc = item.Timestamp(folder.Basis);
@@ -59,6 +61,7 @@ internal sealed class OutlookExportIngestionBridge(
             Sha256($"{cursorUtc:O}|{item.SourceFingerprint}"));
         if (!Directory.Exists(readyDirectory))
         {
+            var createdHere = !Directory.Exists(layout.GetInflightExportDirectory(exportId));
             var inflightDirectory = layout.CreateInflightExportDirectory(exportId);
             var bodyPath = "body.bin";
             await WritePrivateFileAsync(
@@ -89,7 +92,15 @@ internal sealed class OutlookExportIngestionBridge(
                 ReceivedAtUtc = item.ReceivedTimeUtc.ToUniversalTime()
             };
             await layout.WriteManifestAsync(inflightDirectory, manifest, cancellationToken).ConfigureAwait(false);
-            _ = await layout.PromoteAsync(exportId, cancellationToken).ConfigureAwait(false);
+            try
+            {
+                _ = await layout.PromoteAsync(exportId, cancellationToken, EnsureCurrentScope).ConfigureAwait(false);
+            }
+            catch (OutlookComHostException exception) when (createdHere && exception.Reason == OutlookComFailureReason.LeaseStale)
+            {
+                layout.DiscardInflight(exportId);
+                throw;
+            }
         }
         else
         {
@@ -110,6 +121,7 @@ internal sealed class OutlookExportIngestionBridge(
                     // already-committed immutable manifest is never rewritten.
                 }
 
+                await EnsureCurrentScope(cancellationToken).ConfigureAwait(false);
                 await layout.RebindReadyRecoveryAsync(exportId, recovery, cancellationToken).ConfigureAwait(false);
             }
         }
@@ -118,6 +130,9 @@ internal sealed class OutlookExportIngestionBridge(
             .IngestReadyAsync(folder.SpoolRoot, exportId, cancellationToken)
             .ConfigureAwait(false);
         return receipt.Accepted && !receipt.IsReplay;
+
+        ValueTask EnsureCurrentScope(CancellationToken token) =>
+            captureScope?.Invoke(work, token) ?? ValueTask.CompletedTask;
     }
 
     internal static Guid ExportIdFor(

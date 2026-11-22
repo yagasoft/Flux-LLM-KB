@@ -122,6 +122,7 @@ public sealed record OutlookProfileSaveRequest(
     Guid? BrowseCorrelationId = null)
 {
     public string? VerifyFolderPath { get; init; }
+    public bool IncludeSubfolders { get; init; }
 
     public void Validate()
     {
@@ -449,6 +450,8 @@ public sealed record OutlookCatchUpClaimRequest(
     OutlookHostIdentity Host,
     TimeSpan LeaseDuration)
 {
+    public bool ScheduleDueProfiles { get; init; }
+
     public void Validate()
     {
         OutlookCaptureContractValidation.RequireOperation(OperationId, RequestFingerprint);

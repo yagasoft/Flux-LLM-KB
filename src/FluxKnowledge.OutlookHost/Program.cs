@@ -132,7 +132,8 @@ internal sealed class DefaultOutlookHostApplicationFactory : IOutlookHostApplica
             liveRoot,
             new LiveRootStorageSafety(liveRoot, FileSystemLiveRootPathInspector.Instance));
         var spoolRootPreflight = new SqlOutlookSpoolRootPreflight(contextFactory, spoolRootPolicy);
-        IOutlookCaptureStore store = new SqlOutlookCaptureStore(contextFactory);
+        IOutlookCaptureStore store = new SqlOutlookCaptureStore(
+            contextFactory, deploymentValidationHold: new FileDeploymentValidationHold(liveRoot));
         var controlPlane = new SqlOutlookHostControlPlane(store, contextFactory);
         var dispatcher = new OutlookStaDispatcher();
         var environment = new WindowsOutlookHostEnvironment();
@@ -145,7 +146,7 @@ internal sealed class DefaultOutlookHostApplicationFactory : IOutlookHostApplica
             new SqlOutlookReadyExportIngestionService(new SqlOutlookExportIngestionService(
                 contextFactory,
                 outlookSpoolPolicy: spoolRootPolicy)),
-            spoolRootPolicy);
+            spoolRootPolicy, controlPlane.EnsureCaptureScopeAsync);
         var catchUp = new OutlookHostLoop(
             options,
             environment,

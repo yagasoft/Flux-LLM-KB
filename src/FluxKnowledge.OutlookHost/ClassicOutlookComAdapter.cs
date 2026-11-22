@@ -31,6 +31,11 @@ internal interface IClassicOutlookAdapter : IAsyncDisposable
 {
     ValueTask<IReadOnlyList<OutlookFolderDescriptor>> BrowseFoldersAsync(string targetPath, CancellationToken cancellationToken);
 
+    ValueTask<IReadOnlyList<OutlookFolderIdentity>> DiscoverSubfoldersAsync(
+        OutlookFolderIdentity root,
+        CancellationToken cancellationToken) =>
+        throw new NotSupportedException("This Outlook adapter does not support subfolder discovery.");
+
     ValueTask<IAsyncDisposable> SubscribeHintsAsync(
         OutlookFolderIdentity folder,
         Func<OutlookHint, ValueTask> onHint,
@@ -94,6 +99,11 @@ internal sealed class DispatcherClassicOutlookAdapter(
         dispatcher.InvokeAsync(
             () => inner.BrowseFoldersAsync(targetPath, cancellationToken),
             cancellationToken);
+
+    public ValueTask<IReadOnlyList<OutlookFolderIdentity>> DiscoverSubfoldersAsync(
+        OutlookFolderIdentity root,
+        CancellationToken cancellationToken) =>
+        dispatcher.InvokeAsync(() => inner.DiscoverSubfoldersAsync(root, cancellationToken), cancellationToken);
 
     public async ValueTask<IAsyncDisposable> SubscribeHintsAsync(
         OutlookFolderIdentity folder,
@@ -189,6 +199,7 @@ internal sealed class ClassicOutlookComAdapter : IClassicOutlookAdapter
     private const int MaximumDirectedFolderCandidates = 500;
     private readonly Outlook.Application _application;
     private readonly Outlook.NameSpace _session;
+    private readonly Dictionary<OutlookFolderIdentity, OutlookFolderIdentity> _subfolderRoots = [];
 
     public ClassicOutlookComAdapter(Outlook.Application application)
     {
@@ -240,6 +251,63 @@ internal sealed class ClassicOutlookComAdapter : IClassicOutlookAdapter
             Release(roots);
         }
 
+    }
+
+    public ValueTask<IReadOnlyList<OutlookFolderIdentity>> DiscoverSubfoldersAsync(
+        OutlookFolderIdentity root,
+        CancellationToken cancellationToken)
+    {
+        var descendants = new List<OutlookFolderIdentity>();
+        var seen = new HashSet<(string StoreId, string EntryId)> { (root.StoreId, root.FolderEntryId) };
+        var pending = new Queue<OutlookFolderIdentity>();
+        pending.Enqueue(root);
+        while (pending.TryDequeue(out var parent))
+        {
+            cancellationToken.ThrowIfCancellationRequested();
+            Outlook.MAPIFolder? folder = null;
+            Outlook.Folders? children = null;
+            try
+            {
+                folder = _session.GetFolderFromID(parent.FolderEntryId, parent.StoreId);
+                children = folder.Folders;
+                var count = children.Count;
+                for (var index = 1; index <= count; index++)
+                {
+                    cancellationToken.ThrowIfCancellationRequested();
+                    Outlook.MAPIFolder? child = null;
+                    try
+                    {
+                        child = children[index];
+                        var identity = new OutlookFolderIdentity(child.StoreID, child.EntryID, child.Name);
+                        if (!string.Equals(identity.StoreId, root.StoreId, StringComparison.OrdinalIgnoreCase))
+                        {
+                            throw new OutlookComHostException(OutlookComFailureReason.FolderAccessDenied);
+                        }
+                        if (seen.Add((identity.StoreId, identity.FolderEntryId)))
+                        {
+                            descendants.Add(identity);
+                            _subfolderRoots.TryAdd(identity, root);
+                            pending.Enqueue(identity);
+                        }
+                    }
+                    finally
+                    {
+                        ReleaseReference(child);
+                    }
+                }
+            }
+            catch (COMException exception)
+            {
+                throw OutlookComFailureClassifier.ClassifyCom(exception, OutlookComFailureStage.FolderSubscription);
+            }
+            finally
+            {
+                ReleaseReference(children);
+                ReleaseReference(folder);
+            }
+        }
+
+        return ValueTask.FromResult<IReadOnlyList<OutlookFolderIdentity>>(descendants);
     }
 
     public ValueTask<IAsyncDisposable> SubscribeHintsAsync(
@@ -305,6 +373,7 @@ internal sealed class ClassicOutlookComAdapter : IClassicOutlookAdapter
         try
         {
             mapiFolder = _session.GetFolderFromID(folder.FolderEntryId, folder.StoreId);
+            RequireSelectedScope(mapiFolder, folder);
             items = mapiFolder.Items;
             for (var index = 1; index <= items.Count; index++)
             {
@@ -315,7 +384,7 @@ internal sealed class ClassicOutlookComAdapter : IClassicOutlookAdapter
                     candidate = items[index];
                     if (candidate is Outlook.MailItem mail)
                     {
-                        var envelope = Envelope(mail, folder.StoreId);
+                        var envelope = Envelope(mail, folder.StoreId) with { EnumeratedFolder = folder };
                         if (envelope.Timestamp(cursor.Basis) >= cursor.FromUtc)
                         {
                             results.Add(envelope);
@@ -368,6 +437,7 @@ internal sealed class ClassicOutlookComAdapter : IClassicOutlookAdapter
             byte[] body;
             try
             {
+                RequireMessageParent(mail, item.EnumeratedFolder);
                 body = Encoding.UTF8.GetBytes(mail.Body ?? string.Empty);
             }
             catch (COMException exception)
@@ -450,6 +520,7 @@ internal sealed class ClassicOutlookComAdapter : IClassicOutlookAdapter
                         attachments[index] = attachments[index] with { IsSignatureDecoration = false };
                 }
 
+                RequireMessageParent(mail, item.EnumeratedFolder);
                 return ValueTask.FromResult(new OutlookMessagePayload(
                     body,
                     "text/plain",
@@ -469,6 +540,57 @@ internal sealed class ClassicOutlookComAdapter : IClassicOutlookAdapter
             Release(candidate);
         }
     }
+
+    private void RequireMessageParent(Outlook.MailItem mail, OutlookFolderIdentity? expected)
+    {
+        if (expected is null) return;
+        object? parent = null;
+        try
+        {
+            parent = mail.Parent;
+            if (parent is not Outlook.MAPIFolder folder || !IsSameFolder(folder, expected))
+            {
+                throw new OutlookComHostException(OutlookComFailureReason.FolderAccessDenied);
+            }
+            RequireSelectedScope(folder, expected);
+        }
+        catch (COMException exception)
+        {
+            throw OutlookComFailureClassifier.ClassifyCom(exception, OutlookComFailureStage.MessageOpen);
+        }
+        finally
+        {
+            ReleaseReference(parent);
+        }
+    }
+
+    private void RequireSelectedScope(Outlook.MAPIFolder folder, OutlookFolderIdentity identity)
+    {
+        if (!_subfolderRoots.TryGetValue(identity, out var selectedRoot)) return;
+        object? currentParent = null;
+        var seen = new HashSet<string>(StringComparer.OrdinalIgnoreCase);
+        try
+        {
+            currentParent = folder.Parent;
+            while (currentParent is Outlook.MAPIFolder ancestor && seen.Add(ancestor.EntryID))
+            {
+                if (IsSameFolder(ancestor, selectedRoot)) return;
+                var next = ancestor.Parent;
+                ReleaseReference(currentParent);
+                currentParent = next;
+            }
+        }
+        finally
+        {
+            ReleaseReference(currentParent);
+        }
+
+        throw new OutlookComHostException(OutlookComFailureReason.FolderAccessDenied);
+    }
+
+    private static bool IsSameFolder(Outlook.MAPIFolder folder, OutlookFolderIdentity expected) =>
+        string.Equals(folder.StoreID, expected.StoreId, StringComparison.OrdinalIgnoreCase) &&
+        string.Equals(folder.EntryID, expected.FolderEntryId, StringComparison.OrdinalIgnoreCase);
 
     public ValueTask DisposeAsync()
     {
@@ -599,6 +721,14 @@ internal sealed class ClassicOutlookComAdapter : IClassicOutlookAdapter
 
     private static string Sha256(string value) =>
         Convert.ToHexStringLower(SHA256.HashData(Encoding.UTF8.GetBytes(value)));
+
+    private static void ReleaseReference(object? value)
+    {
+        if (value is not null && Marshal.IsComObject(value))
+        {
+            _ = Marshal.ReleaseComObject(value);
+        }
+    }
 
     private static void Release(object? value)
     {

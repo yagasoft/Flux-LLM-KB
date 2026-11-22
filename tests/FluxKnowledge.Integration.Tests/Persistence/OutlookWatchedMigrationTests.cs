@@ -27,6 +27,11 @@ public sealed class OutlookWatchedMigrationTests(NativeSqlServerFixture fixture)
     public Task Workspace_notes_migration_preserves_schema_on_rollback_and_classifies_lost_acknowledgement() =>
         VerifyTypedMigrationAsync(Target, "20261118225053_BindCodexNotesToWorkspace", "-CodexWorkspace");
 
+    [NativeSqlServerFact]
+    public Task Recursive_capture_migration_preserves_schema_on_rollback_and_classifies_lost_acknowledgement() =>
+        VerifyTypedMigrationAsync("20261120221703_ScheduleAncestorMetadataReconciliation",
+            "20261122215123_ScheduleRecursiveOutlookCapture", "-OutlookRecursiveCapture");
+
     [NativeSqlServerTheory]
     [InlineData(true)]
     [InlineData(false)]
@@ -34,6 +39,7 @@ public sealed class OutlookWatchedMigrationTests(NativeSqlServerFixture fixture)
     {
         await using var database = await fixture.CreateMigrationDatabaseAsync(Target);
         await using var db = database.CreateContext();
+        await db.GetService<IMigrator>().MigrateAsync();
         var now = new DateTimeOffset(2026, 11, 18, 23, 30, 0, TimeSpan.Zero);
         var privateRoot = SeedRoot("private");
         var watchedRoot = retainBinding ? SeedRoot("watched") : (Guid?)null;
@@ -62,6 +68,7 @@ public sealed class OutlookWatchedMigrationTests(NativeSqlServerFixture fixture)
             });
         }
         await db.SaveChangesAsync();
+        await db.GetService<IMigrator>().MigrateAsync(Target);
         var history = (await db.Database.GetAppliedMigrationsAsync()).ToArray();
 
         var failure = await Assert.ThrowsAsync<SqlException>(() => db.GetService<IMigrator>().MigrateAsync(Baseline));

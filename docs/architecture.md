@@ -595,6 +595,13 @@ can complete the lookup after the dashboard closes. A successful, current
 verification selects the folder and enables capture atomically. Pausing, removing
 or resaving the profile invalidates older verification requests. The requested
 path stays in private SQL state and is cleared when the request terminates.
+The desktop host claims a due scan through the durable Outlook queue on its
+next scheduled wake. The queue records the configuration revision, fences
+concurrent scans per profile, and records successful empty scans. Recursion is
+optional. A recursive scan rediscovers the subtree of the verified root, starts
+new subfolders with independent cursors, and clears the cursors of missing
+subfolders after complete discovery. Previously ingested mail remains available.
+
 Normal application startup does not activate Outlook or change desktop tasks.
 Credentials, mail contents and spool data are private runtime material.
 An explicitly bound Outlook profile publishes committed mail bundles into a

@@ -25,6 +25,15 @@ internal interface IOutlookHostControlPlane
         TimeSpan leaseDuration,
         CancellationToken cancellationToken);
 
+    ValueTask<IReadOnlyList<OutlookHostFolderConfiguration>> ReconcileSubfoldersAsync(
+        OutlookHostCatchUpWork work,
+        IReadOnlyList<OutlookFolderIdentity> discovered,
+        CancellationToken cancellationToken) =>
+        throw new NotSupportedException("This Outlook control plane does not support subfolder discovery.");
+
+    ValueTask EnsureCaptureScopeAsync(OutlookHostCatchUpWork work, CancellationToken cancellationToken) =>
+        ValueTask.CompletedTask;
+
     ValueTask RecordHintAsync(
         OutlookCaptureProfileId profileId,
         OutlookHint hint,
@@ -269,9 +278,27 @@ internal sealed class OutlookHostLoop(
         OutlookCatchUpHeartbeat heartbeat,
         CancellationToken cancellationToken)
     {
-        var exportedCount = 0;
-        foreach (var folder in work.Folders)
+        var folders = work.Folders;
+        await controlPlane.EnsureCaptureScopeAsync(work, cancellationToken).ConfigureAwait(false);
+        if (work.IncludeSubfolders)
         {
+            var discovered = new List<OutlookFolderIdentity>();
+            foreach (var root in folders)
+            {
+                heartbeat.ThrowIfLeaseLost();
+                discovered.AddRange(await adapter.DiscoverSubfoldersAsync(root.Identity, cancellationToken)
+                    .ConfigureAwait(false));
+            }
+
+            heartbeat.ThrowIfLeaseLost();
+            folders = await controlPlane.ReconcileSubfoldersAsync(work, discovered, cancellationToken)
+                .ConfigureAwait(false);
+        }
+
+        var exportedCount = 0;
+        foreach (var folder in folders)
+        {
+            await controlPlane.EnsureCaptureScopeAsync(work, cancellationToken).ConfigureAwait(false);
             var callback = new Func<OutlookHint, ValueTask>(hint =>
                 controlPlane.RecordHintAsync(work.Claim.ProfileId, hint, cancellationToken));
             await using var subscription = await adapter
@@ -280,13 +307,19 @@ internal sealed class OutlookHostLoop(
             var cursorUtc = folder.CursorUtc ?? DateTimeOffset.UnixEpoch;
             var cursor = new OutlookCursor(folder.Basis, cursorUtc.Subtract(folder.Overlap), folder.CursorFingerprint);
             var observedEntries = new HashSet<string>(StringComparer.Ordinal);
+            var items = new List<OutlookItemEnvelope>();
             await foreach (var item in adapter
                 .EnumerateAsync(folder.Identity, cursor, cancellationToken)
                 .WithCancellation(cancellationToken)
                 .ConfigureAwait(false))
             {
-                // Periodic renewal runs independently while COM enumeration is slow; observe loss
-                // before any private content read or export.
+                items.Add(item);
+            }
+
+            // Ingestion can advance the cursor after each message. Finish older
+            // messages first so an interruption leaves the remainder discoverable.
+            foreach (var item in items.OrderBy(item => item.Timestamp(folder.Basis)).ThenBy(item => item.EntryId, StringComparer.Ordinal))
+            {
                 cancellationToken.ThrowIfCancellationRequested();
                 if (!observedEntries.Add(item.EntryId))
                 {
@@ -294,7 +327,9 @@ internal sealed class OutlookHostLoop(
                 }
                 heartbeat.ThrowIfLeaseLost();
 
+                await controlPlane.EnsureCaptureScopeAsync(work, cancellationToken).ConfigureAwait(false);
                 var payload = await adapter.ReadForExportAsync(item, cancellationToken).ConfigureAwait(false);
+                await controlPlane.EnsureCaptureScopeAsync(work, cancellationToken).ConfigureAwait(false);
                 if (await ingestionBridge
                     .ExportAndIngestAsync(work, folder, item, payload, cancellationToken)
                     .ConfigureAwait(false))

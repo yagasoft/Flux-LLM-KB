@@ -31,6 +31,114 @@ public sealed class SqlOutlookCaptureStoreTests(NativeSqlServerFixture fixture) 
     private const string CursorFingerprint = "dddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddd";
 
     [NativeSqlServerFact]
+    public async Task Hourly_capture_is_due_again_after_a_successful_empty_scan()
+    {
+        await using var isolated = await _fixture.CreateMigrationDatabaseAsync(
+            "20261122215123_ScheduleRecursiveOutlookCapture");
+        await using var seedContext = isolated.CreateContext();
+        var seed = await SeedCaptureAsync(includeActiveCatchUp: false, seedContext: seedContext);
+        SqlOutlookCaptureStore StoreAt(DateTimeOffset now) => new(
+            new TestDbContextFactory(isolated.ConnectionString, null, false), new ManualTimeProvider(now));
+        await using (var context = isolated.CreateContext())
+        {
+            var profile = await context.OutlookCaptureProfiles.SingleAsync(row => row.Id == seed.ProfileId);
+            profile.State = (int)OutlookCaptureState.AwaitingHost;
+            profile.CadenceTicks = TimeSpan.FromHours(1).Ticks;
+            await context.SaveChangesAsync();
+        }
+
+        async Task<OutlookCatchUpClaim?> ClaimAt(DateTimeOffset now) =>
+            (await StoreAt(now).ClaimCatchUpAsync(
+                new OutlookCatchUpClaimRequest(Guid.NewGuid(), Fingerprint, Host, TimeSpan.FromMinutes(5))
+                {
+                    ScheduleDueProfiles = true
+                }, CancellationToken.None)).Claim;
+
+        var claims = await Task.WhenAll(ClaimAt(Now), ClaimAt(Now));
+        var first = Assert.Single(claims.OfType<OutlookCatchUpClaim>());
+        Assert.NotNull(first);
+        Assert.Equal(seed.ProfileId, first.ProfileId.Value);
+        Assert.Equal(OutlookCatchUpProvenance.Schedule, first.Provenance);
+        Assert.True((await StoreAt(Now).CompleteCatchUpAsync(
+            new(Guid.NewGuid(), Fingerprint, first, 0), CancellationToken.None)).Accepted);
+
+        Assert.Null(await ClaimAt(Now.AddMinutes(59)));
+        var next = await ClaimAt(Now.AddHours(1));
+        Assert.NotNull(next);
+        Assert.Equal(seed.ProfileId, next.ProfileId.Value);
+        Assert.NotEqual(first.CatchUpId, next.CatchUpId);
+        Assert.Null(await ClaimAt(Now.AddHours(1)));
+
+        Assert.True((await StoreAt(Now.AddHours(1)).CompleteCatchUpAsync(
+            new(Guid.NewGuid(), Fingerprint, next, 0), CancellationToken.None)).Accepted);
+        Assert.True((await StoreAt(Now).PauseProfileAsync(
+            new(Guid.NewGuid(), Fingerprint, new(seed.ProfileId), "Operator paused capture"), CancellationToken.None)).Accepted);
+        Assert.Null(await ClaimAt(Now.AddHours(2)));
+    }
+
+    [NativeSqlServerFact]
+    public async Task Scheduled_scans_update_membership_and_clear_only_removed_subfolder_cursors()
+    {
+        await using var isolated = await _fixture.CreateMigrationDatabaseAsync(
+            "20261122215123_ScheduleRecursiveOutlookCapture");
+        await using var db = isolated.CreateContext();
+        var seed = await SeedCaptureAsync(includeActiveCatchUp: false, seedContext: db);
+        var profile = await db.OutlookCaptureProfiles.SingleAsync(row => row.Id == seed.ProfileId);
+        profile.IncludeSubfolders = true;
+        profile.CadenceTicks = TimeSpan.FromHours(1).Ticks;
+        var root = await db.OutlookCaptureFolders.SingleAsync(row => row.Id == seed.FolderId);
+        root.CursorUtc = Now;
+        await db.SaveChangesAsync();
+        var factory = new TestDbContextFactory(isolated.ConnectionString, null, false);
+        var old = new OutlookFolderIdentity(root.StoreId, "old", "Old child");
+        var keep = new OutlookFolderIdentity(root.StoreId, "keep", "Retained child");
+        var added = new OutlookFolderIdentity(root.StoreId, "added", "New child");
+
+        var firstClock = new ManualTimeProvider(Now);
+        var firstStore = new SqlOutlookCaptureStore(factory, firstClock);
+        var first = await Claim(firstStore);
+        var firstFolders = await new SqlOutlookFolderScope(factory, firstClock)
+            .ReconcileAsync(first, profile.ConfigurationRevision, [root.Id], [old, keep], CancellationToken.None);
+        Assert.NotNull(firstFolders);
+        Assert.Equal(3, firstFolders.Length);
+        var firstChildIds = firstFolders.Where(folder => folder.IsDiscoveredSubfolder).Select(folder => folder.Id);
+        await db.OutlookCaptureFolders.Where(folder => firstChildIds.Contains(folder.Id))
+            .ExecuteUpdateAsync(setters => setters.SetProperty(folder => folder.CursorUtc, Now)
+                .SetProperty(folder => folder.CursorFingerprint, CursorFingerprint));
+        Assert.True((await firstStore.CompleteCatchUpAsync(
+            new(Guid.NewGuid(), Fingerprint, first, 0), CancellationToken.None)).Accepted);
+
+        var secondClock = new ManualTimeProvider(Now.AddHours(1));
+        var secondStore = new SqlOutlookCaptureStore(factory, secondClock);
+        var second = await Claim(secondStore);
+        var secondFolders = await new SqlOutlookFolderScope(factory, secondClock)
+            .ReconcileAsync(second, profile.ConfigurationRevision, [root.Id], [keep, added], CancellationToken.None);
+        Assert.NotNull(secondFolders);
+        Assert.Equal(3, secondFolders.Length);
+        Assert.Equal(Now, Assert.Single(secondFolders, folder => folder.FolderEntryId == keep.FolderEntryId).CursorUtc);
+        Assert.Null(Assert.Single(secondFolders, folder => folder.FolderEntryId == added.FolderEntryId).CursorUtc);
+        Assert.Equal(Now, Assert.Single(secondFolders, folder => folder.Id == root.Id).CursorUtc);
+        var removed = await db.OutlookCaptureFolders.AsNoTracking().SingleAsync(folder => folder.FolderEntryId == old.FolderEntryId);
+        Assert.Equal((int)OutlookCaptureState.Disabled, removed.State);
+        Assert.Null(removed.CursorUtc);
+        Assert.Null(removed.CursorFingerprint);
+        Assert.Null(await new SqlOutlookFolderScope(factory, secondClock)
+            .ReconcileAsync(second, profile.ConfigurationRevision + 1, [root.Id], [], CancellationToken.None));
+
+        static async Task<OutlookCatchUpClaim> Claim(SqlOutlookCaptureStore store)
+        {
+            var receipt = await store.ClaimCatchUpAsync(
+                new OutlookCatchUpClaimRequest(Guid.NewGuid(), Fingerprint, Host, TimeSpan.FromMinutes(5))
+                {
+                    ScheduleDueProfiles = true
+                }, CancellationToken.None);
+            Assert.NotNull(receipt.Claim);
+            Assert.Equal(OutlookCatchUpProvenance.Schedule, receipt.Claim.Provenance);
+            return receipt.Claim;
+        }
+    }
+
+    [NativeSqlServerFact]
     public async Task Save_profile_replays_matching_operation_and_rejects_divergence()
     {
         var store = CreateStore();
@@ -292,6 +400,39 @@ public sealed class SqlOutlookCaptureStoreTests(NativeSqlServerFixture fixture) 
             new OutlookCaptureProfileId(profileId), "manual", OutlookCatchUpProvenance.Manual), CancellationToken.None);
 
         Assert.False(result.Accepted);
+    }
+
+    [NativeSqlServerFact]
+    public async Task A_confirmed_request_at_a_new_revision_supersedes_an_old_queued_catch_up()
+    {
+        await using var isolated = await _fixture.CreateMigrationDatabaseAsync(
+            "20261122215123_ScheduleRecursiveOutlookCapture");
+        await using var db = isolated.CreateContext();
+        var seed = await SeedCaptureAsync(includeActiveCatchUp: false, seedContext: db);
+        var profile = await db.OutlookCaptureProfiles.SingleAsync(row => row.Id == seed.ProfileId);
+        var store = new SqlOutlookCaptureStore(
+            new TestDbContextFactory(isolated.ConnectionString, null, false), new ManualTimeProvider(Now));
+        var first = new OutlookCatchUpRequest(Guid.NewGuid(), Fingerprint, new(seed.ProfileId), "manual",
+            OutlookCatchUpProvenance.Manual)
+        {
+            ExpectedConfigurationRevision = profile.ConfigurationRevision,
+            ExpectedFolderIds = [seed.FolderId],
+            ConfirmationExpiresAtUtc = Now.AddMinutes(2)
+        };
+        Assert.True((await store.RequestCatchUpAsync(first, CancellationToken.None)).Accepted);
+        profile.ConfigurationRevision++;
+        await db.SaveChangesAsync();
+
+        Assert.True((await store.RequestCatchUpAsync(first with
+        {
+            OperationId = Guid.NewGuid(),
+            ExpectedConfigurationRevision = profile.ConfigurationRevision
+        }, CancellationToken.None)).Accepted);
+
+        var rows = await db.OutlookCatchUps.AsNoTracking().Where(row => row.ProfileId == seed.ProfileId).ToArrayAsync();
+        Assert.Equal(2, rows.Length);
+        Assert.Equal(profile.ConfigurationRevision, Assert.Single(rows, row => row.State == 0).ConfigurationRevision);
+        Assert.Equal(nameof(OutlookCatchUpFailureReason.ConfigurationChanged), Assert.Single(rows, row => row.State == 3).Reason);
     }
 
     [NativeSqlServerFact]
@@ -906,14 +1047,16 @@ public sealed class SqlOutlookCaptureStoreTests(NativeSqlServerFixture fixture) 
     private async Task<FluxKnowledgeDbContext> CreateContextAsync() =>
         await SqlTestData.CreateFactory(_fixture).CreateDbContextAsync();
 
-    private async Task<CaptureSeed> SeedCaptureAsync(bool includeFolder = true, bool includeActiveCatchUp = true)
+    private async Task<CaptureSeed> SeedCaptureAsync(bool includeFolder = true, bool includeActiveCatchUp = true,
+        FluxKnowledgeDbContext? seedContext = null)
     {
         var profileId = Guid.NewGuid();
         var folderId = Guid.NewGuid();
         var catchUpId = includeActiveCatchUp ? Guid.NewGuid() : Guid.Empty;
         var sourceRootId = Guid.NewGuid();
         const long fencingToken = 17;
-        await using var context = await CreateContextAsync();
+        await using var ownedContext = seedContext is null ? await CreateContextAsync() : null;
+        var context = seedContext ?? ownedContext!;
         context.SourceRootConfigurations.Add(new SourceRootConfigurationEntity
         {
             Id = sourceRootId,

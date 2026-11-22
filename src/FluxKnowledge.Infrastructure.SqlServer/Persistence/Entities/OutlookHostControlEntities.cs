@@ -30,6 +30,7 @@ public sealed class OutlookBrowseResultEntity
 public sealed class OutlookCatchUpEntity
 {
     public Guid Id { get; set; }
+    public long? ConfigurationRevision { get; set; }
     public Guid ProfileId { get; set; }
     public string CoalescingKey { get; set; } = string.Empty;
     public int Provenance { get; set; }

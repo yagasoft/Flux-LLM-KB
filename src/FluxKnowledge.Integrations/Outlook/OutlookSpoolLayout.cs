@@ -1,3 +1,4 @@
+using System.Diagnostics;
 using System.Text.Json;
 using FluxKnowledge.Application.Contracts;
 using FluxKnowledge.Integrations.Files;
@@ -28,6 +29,39 @@ public sealed class OutlookSpoolLayout
         PhysicalFileIdentity.EnsureNoReparsePointTraversal(Path.Combine(_root, "ready"));
     }
 
+    // Stable outside the moved export directory. The OS releases the writer on
+    // process exit, and the file is never unlinked while another writer may open it.
+    public async Task<FileStream> AcquireWriterAsync(CancellationToken cancellationToken)
+    {
+        var path = Path.Combine(_root, "_inflight", ".writer.lock");
+        PhysicalFileIdentity.EnsureNoReparsePointTraversal(Path.GetDirectoryName(path)!);
+        try
+        {
+            if ((File.GetAttributes(path) & (FileAttributes.ReparsePoint | FileAttributes.Directory)) != 0)
+            {
+                throw new IOException("The Outlook spool writer lock is not a regular file.");
+            }
+        }
+        catch (FileNotFoundException)
+        {
+            // The first writer creates the lock file in the validated private spool.
+        }
+        var waiting = Stopwatch.StartNew();
+        while (true)
+        {
+            cancellationToken.ThrowIfCancellationRequested();
+            try
+            {
+                return new FileStream(path, FileMode.OpenOrCreate, FileAccess.ReadWrite, FileShare.None);
+            }
+            catch (IOException exception) when ((exception.HResult & 0xffff) is 32 or 33 &&
+                waiting.Elapsed < TimeSpan.FromSeconds(30))
+            {
+                await Task.Delay(TimeSpan.FromMilliseconds(50), cancellationToken).ConfigureAwait(false);
+            }
+        }
+    }
+
     public string CreateInflightExportDirectory(Guid exportId)
     {
         var path = GetInflightExportDirectory(exportId);
@@ -53,7 +87,8 @@ public sealed class OutlookSpoolLayout
         stream.Flush(flushToDisk: true);
     }
 
-    public async Task<string> PromoteAsync(Guid exportId, CancellationToken cancellationToken)
+    public async Task<string> PromoteAsync(Guid exportId, CancellationToken cancellationToken,
+        Func<CancellationToken, ValueTask>? ensureCurrentScope = null)
     {
         var inflight = GetInflightExportDirectory(exportId);
         var ready = GetReadyExportDirectory(exportId);
@@ -70,9 +105,21 @@ public sealed class OutlookSpoolLayout
             throw new IOException("An Outlook ready export already exists.");
         }
 
+        if (ensureCurrentScope is not null)
+        {
+            await ensureCurrentScope(cancellationToken).ConfigureAwait(false);
+        }
+
         Directory.Move(inflight, ready);
         EnsureContainedDirectory(ready);
         return ready;
+    }
+
+    public void DiscardInflight(Guid exportId)
+    {
+        var path = GetInflightExportDirectory(exportId);
+        EnsureContainedDirectory(path);
+        Directory.Delete(path, recursive: true);
     }
 
     public async Task<OutlookExportManifest> ReadReadyManifestAsync(Guid exportId, CancellationToken cancellationToken) =>

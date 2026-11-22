@@ -4,6 +4,7 @@ using FluxKnowledge.Application.Contracts;
 using FluxKnowledge.Application.Ports;
 using FluxKnowledge.Domain.Outlook;
 using FluxKnowledge.Infrastructure.SqlServer.Persistence;
+using FluxKnowledge.Infrastructure.SqlServer.Persistence.Entities;
 using Microsoft.EntityFrameworkCore;
 
 namespace FluxKnowledge.OutlookHost;
@@ -31,7 +32,10 @@ internal sealed class SqlOutlookHostControlPlane(
                 operationId,
                 Fingerprint("claim-catchup", operationId, host),
                 host,
-                leaseDuration),
+                leaseDuration)
+            {
+                ScheduleDueProfiles = true
+            },
             cancellationToken).ConfigureAwait(false);
         if (receipt.Claim is null)
         {
@@ -44,27 +48,70 @@ internal sealed class SqlOutlookHostControlPlane(
             .ConfigureAwait(false);
         var isEnabled = profile is not null &&
             profile.IsEnabled &&
-            profile.State != (int)OutlookCaptureState.Disabled;
+            profile.State != (int)OutlookCaptureState.Disabled &&
+            await context.OutlookCatchUps.AnyAsync(row => row.Id == receipt.Claim.CatchUpId &&
+                row.ConfigurationRevision == profile.ConfigurationRevision, cancellationToken).ConfigureAwait(false);
         if (profile is null)
         {
             return new OutlookHostCatchUpWork(receipt.Claim, false, []);
         }
 
         var folderRows = await context.OutlookCaptureFolders.AsNoTracking()
-            .Where(row => row.ProfileId == profile.Id && row.State != (int)OutlookCaptureState.Disabled)
+            .Where(row => row.ProfileId == profile.Id && !row.IsDiscoveredSubfolder &&
+                row.State != (int)OutlookCaptureState.Disabled)
             .OrderBy(row => row.Id)
             .ToListAsync(cancellationToken).ConfigureAwait(false);
-        var overlap = TimeSpan.FromTicks(profile.MaximumOverlapTicks);
-        var folders = folderRows.Select(row => new OutlookHostFolderConfiguration(
+        var folders = folderRows.Select(row => ToConfiguration(profile, row)).ToArray();
+        return new OutlookHostCatchUpWork(receipt.Claim, isEnabled, folders)
+        {
+            IncludeSubfolders = profile.IncludeSubfolders,
+            ConfigurationRevision = profile.ConfigurationRevision
+        };
+    }
+
+    public async ValueTask EnsureCaptureScopeAsync(OutlookHostCatchUpWork work, CancellationToken cancellationToken)
+    {
+        await using var context = await contextFactory.CreateDbContextAsync(cancellationToken).ConfigureAwait(false);
+        var profile = SqlOutlookFolderScope.CurrentProfiles(context, work.Claim, work.ConfigurationRevision, _clock.GetUtcNow());
+        if (!await profile.AnyAsync(cancellationToken).ConfigureAwait(false))
+        {
+            throw new OutlookComHostException(OutlookComFailureReason.LeaseStale);
+        }
+    }
+
+    public async ValueTask<IReadOnlyList<OutlookHostFolderConfiguration>> ReconcileSubfoldersAsync(
+        OutlookHostCatchUpWork work,
+        IReadOnlyList<OutlookFolderIdentity> discovered,
+        CancellationToken cancellationToken)
+    {
+        var rows = await new SqlOutlookFolderScope(contextFactory, _clock)
+            .ReconcileAsync(work.Claim, work.ConfigurationRevision, work.Folders.Select(folder => folder.FolderId.Value).ToArray(),
+                discovered, cancellationToken).ConfigureAwait(false);
+        if (rows is null)
+        {
+            throw new OutlookComHostException(OutlookComFailureReason.LeaseStale);
+        }
+
+        var root = work.Folders[0];
+        return rows.Select(row => new OutlookHostFolderConfiguration(
             new OutlookCaptureFolderId(row.Id),
             new OutlookFolderIdentity(row.StoreId, row.FolderEntryId, row.DisplayName),
             (OutlookIncrementalBasis)row.Basis,
             row.CursorUtc,
             row.CursorFingerprint,
-            overlap,
-            profile.SpoolRoot)).ToArray();
-        return new OutlookHostCatchUpWork(receipt.Claim, isEnabled, folders);
+            root.Overlap,
+            root.SpoolRoot)).ToArray();
     }
+
+    private static OutlookHostFolderConfiguration ToConfiguration(
+        OutlookCaptureProfileEntity profile, OutlookCaptureFolderEntity row) =>
+        new(new OutlookCaptureFolderId(row.Id),
+            new OutlookFolderIdentity(row.StoreId, row.FolderEntryId, row.DisplayName),
+            (OutlookIncrementalBasis)row.Basis,
+            row.CursorUtc,
+            row.CursorFingerprint,
+            TimeSpan.FromTicks(profile.MaximumOverlapTicks),
+            profile.SpoolRoot);
 
     public ValueTask RecordHintAsync(
         OutlookCaptureProfileId profileId,

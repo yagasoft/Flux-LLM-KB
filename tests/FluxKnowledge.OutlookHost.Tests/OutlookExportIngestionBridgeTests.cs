@@ -13,6 +13,71 @@ public sealed class OutlookExportIngestionBridgeTests
     private static readonly DateTimeOffset CursorUtc = new(2026, 8, 11, 8, 0, 0, TimeSpan.Zero);
 
     [Fact]
+    public async Task Revoked_capture_scope_discards_new_inflight_bytes_before_publication()
+    {
+        using var spool = new TemporaryDirectory();
+        var ingestion = new FakeReadyIngestionService();
+        var bridge = new OutlookExportIngestionBridge(ingestion,
+            PersistedOutlookSpoolRootPolicy.CreateForIsolatedTests(spool.Path),
+            (_, _) => throw new OutlookComHostException(OutlookComFailureReason.LeaseStale));
+        var item = Item();
+        var work = Work(spool.Path, Guid.NewGuid(), 1);
+
+        var error = await Assert.ThrowsAsync<OutlookComHostException>(async () =>
+            await bridge.ExportAndIngestAsync(work.Work, work.Folder, item, Payload(), CancellationToken.None));
+
+        Assert.Equal(OutlookComFailureReason.LeaseStale, error.Reason);
+        var exportId = OutlookExportIngestionBridge.ExportIdFor(work.Folder, item);
+        var layout = new OutlookSpoolLayout(spool.Path);
+        Assert.False(Directory.Exists(layout.GetInflightExportDirectory(exportId)));
+        Assert.False(Directory.Exists(layout.GetReadyExportDirectory(exportId)));
+        Assert.Empty(ingestion.Requests);
+    }
+
+    [Fact]
+    public async Task Revoked_writer_cannot_remove_its_successors_inflight_export()
+    {
+        using var spool = new TemporaryDirectory();
+        var ingestion = new FakeReadyIngestionService();
+        var policy = PersistedOutlookSpoolRootPolicy.CreateForIsolatedTests(spool.Path);
+        var firstAtPromotion = new TaskCompletionSource(TaskCreationOptions.RunContinuationsAsynchronously);
+        var revokeFirst = new TaskCompletionSource(TaskCreationOptions.RunContinuationsAsynchronously);
+        var secondAtPromotion = new TaskCompletionSource(TaskCreationOptions.RunContinuationsAsynchronously);
+        var firstBridge = new OutlookExportIngestionBridge(ingestion, policy, async (_, cancellationToken) =>
+        {
+            firstAtPromotion.TrySetResult();
+            await revokeFirst.Task.WaitAsync(cancellationToken);
+            throw new OutlookComHostException(OutlookComFailureReason.LeaseStale);
+        });
+        var secondBridge = new OutlookExportIngestionBridge(ingestion, policy, (_, _) =>
+        {
+            secondAtPromotion.TrySetResult();
+            return ValueTask.CompletedTask;
+        });
+
+        using var deadline = new CancellationTokenSource(TimeSpan.FromSeconds(10));
+        var item = Item();
+        var first = Work(spool.Path, Guid.NewGuid(), 1);
+        var second = Work(spool.Path, Guid.NewGuid(), 2);
+        var oldWriter = firstBridge.ExportAndIngestAsync(first.Work, first.Folder, item, Payload(), deadline.Token).AsTask();
+        await firstAtPromotion.Task.WaitAsync(deadline.Token);
+        var replacement = secondBridge.ExportAndIngestAsync(second.Work, second.Folder, item, Payload(), deadline.Token).AsTask();
+        try
+        {
+            var observationWindow = Task.Delay(200, deadline.Token);
+            Assert.Same(observationWindow, await Task.WhenAny(secondAtPromotion.Task, observationWindow));
+        }
+        finally
+        {
+            revokeFirst.TrySetResult();
+        }
+
+        await Assert.ThrowsAsync<OutlookComHostException>(() => oldWriter);
+        Assert.True(await replacement);
+        Assert.Equal(second.Work.Claim.CatchUpId, Assert.Single(ingestion.Requests).CatchUpId);
+    }
+
+    [Fact]
     public async Task Promoted_ready_export_rebinds_to_new_fencing_token_after_restart()
     {
         using var spool = new TemporaryDirectory();

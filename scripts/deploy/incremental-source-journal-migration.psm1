@@ -112,10 +112,11 @@ function Get-SourceJournalDatabaseState {
                 $residencySchema=if($history.Count -ge 83){ Get-GpuModelResidencySchemaFingerprint $connection $transaction }
                 $mediaSchema=if($history.Count -ge 82){ Get-MediaTranscriptionSchemaFingerprint $connection $transaction }
                 $codexWorkspaceSchemaKind=if($history.Count -ge 81){ Get-CodexWorkspaceNotesSchemaKind -Connection $connection -Transaction $transaction }
+                $recursiveOutlookSchema=if($history.Count -ge 85){ Get-OutlookRecursiveCaptureSchemaKind $connection $transaction }
                 $transaction.Commit()
                 [pscustomobject]@{Identity=$identity;History=$history.ToArray();CanAlter=$canAlter;SchemaSha256=(Get-SourceJournalValueHash $schema);
                     VectorPublicationIndexSha256=$vectorIndexSha256;WindowEligibilitySchemaSha256=$windowSchemaSha256;QueueIndexSha256=$queueIndexSha256;
-                    OutlookSchemaSha256=$outlookSchemaSha256;CodexWorkspaceSchemaKind=$codexWorkspaceSchemaKind;MediaSchemaFingerprint=$mediaSchema;ResidencySchemaFingerprint=$residencySchema}
+                    OutlookSchemaSha256=$outlookSchemaSha256;CodexWorkspaceSchemaKind=$codexWorkspaceSchemaKind;MediaSchemaFingerprint=$mediaSchema;ResidencySchemaFingerprint=$residencySchema;OutlookRecursiveCaptureSchema=$recursiveOutlookSchema}
             }finally{$command.Dispose()}
         }finally{$transaction.Dispose()}
     }finally{$connection.Dispose()}
@@ -133,6 +134,23 @@ function Assert-SourceJournalSchema {
     $residencyObservation=$DatabaseState.PSObject.Properties['ResidencySchemaFingerprint']
     $residency=Get-PassageWindowEligibilityMigrationContract -GpuResidency
     $journalHash = $contract.SchemaSha256
+    if ($history.Count -eq 85) {
+        $recursiveObservation = $DatabaseState.PSObject.Properties['OutlookRecursiveCaptureSchema']
+        if (!$recursiveObservation -or $recursiveObservation.Value -cne 'Old') {
+            throw 'journal-schema-unrecorded-outlook-recursive-capture'
+        }
+    }
+    if ($history.Count -eq 86) {
+        $outlookRecursive = Get-PassageWindowEligibilityMigrationContract -OutlookRecursiveCapture
+        $prefix = @($history[0..84])
+        $recursiveObservation = $DatabaseState.PSObject.Properties['OutlookRecursiveCaptureSchema']
+        if ($history[-1] -cne $outlookRecursive.Target -or
+            !$recursiveObservation -or $recursiveObservation.Value -cne 'New' -or
+            (Get-SourceJournalValueHash ($prefix -join [char]10)) -cne $outlookRecursive.PriorHistorySha256) {
+            throw 'journal-schema-outlook-recursive-capture-successor-invalid'
+        }
+        $history = $prefix
+    }
     if ($history.Count -eq 85) {
         $ancestor = Get-PassageWindowEligibilityMigrationContract -AncestorReconciliation
         $prefix = @($history[0..83])
@@ -231,7 +249,7 @@ function New-SourceJournalMigrationState {
         if($index.Value -isnot [string] -or $index.Value -cnotmatch '^[A-F0-9]{64}$'){throw 'journal-schema-index-observation-invalid'}
         $state.OriginalVectorPublicationIndexSha256=$index.Value
     }
-    foreach($field in @('WindowEligibilitySchemaSha256','QueueIndexSha256','OutlookSchemaSha256','CodexWorkspaceSchemaKind','MediaSchemaFingerprint','ResidencySchemaFingerprint')){
+    foreach($field in @('WindowEligibilitySchemaSha256','QueueIndexSha256','OutlookSchemaSha256','CodexWorkspaceSchemaKind','MediaSchemaFingerprint','ResidencySchemaFingerprint','OutlookRecursiveCaptureSchema')){
         $observed=$DatabaseState.PSObject.Properties[$field]
         if($observed -and $null -ne $observed.Value){$state['Original'+$field]=$observed.Value}
     }
@@ -257,7 +275,7 @@ function Invoke-SourceJournalMigrationAttempt {
     if($State.ContainsKey('OriginalVectorPublicationIndexSha256')){
         $receipt.OriginalVectorPublicationIndexSha256=$State.OriginalVectorPublicationIndexSha256
     }
-    foreach($field in @('OriginalWindowEligibilitySchemaSha256','OriginalQueueIndexSha256','OriginalOutlookSchemaSha256','OriginalCodexWorkspaceSchemaKind','OriginalMediaSchemaFingerprint','OriginalResidencySchemaFingerprint')){
+    foreach($field in @('OriginalWindowEligibilitySchemaSha256','OriginalQueueIndexSha256','OriginalOutlookSchemaSha256','OriginalCodexWorkspaceSchemaKind','OriginalMediaSchemaFingerprint','OriginalResidencySchemaFingerprint','OriginalOutlookRecursiveCaptureSchema')){
         if($State.ContainsKey($field)){$receipt[$field]=$State[$field]}
     }
     $bytes=[Text.UTF8Encoding]::new($false).GetBytes(($receipt|ConvertTo-Json -Depth 12))
@@ -396,11 +414,11 @@ function Get-SourceJournalHeldMigrationIntent {
         if($index -isnot [string] -or $index -cnotmatch '^[A-F0-9]{64}$'){throw 'journal-schema-held-intent-index-observation-invalid'}
         $original|Add-Member -NotePropertyName VectorPublicationIndexSha256 -NotePropertyValue $index
     }
-    foreach($field in @('WindowEligibilitySchemaSha256','QueueIndexSha256','OutlookSchemaSha256','CodexWorkspaceSchemaKind','MediaSchemaFingerprint','ResidencySchemaFingerprint')){
+    foreach($field in @('WindowEligibilitySchemaSha256','QueueIndexSha256','OutlookSchemaSha256','CodexWorkspaceSchemaKind','MediaSchemaFingerprint','ResidencySchemaFingerprint','OutlookRecursiveCaptureSchema')){
         $key='Original'+$field
         if($intent.Contains($key)){
             $value=$intent[$key]
-            $pattern=if($field -cin @('MediaSchemaFingerprint','ResidencySchemaFingerprint')){'^(Old|[A-F0-9]{64})$'}elseif($field -ceq 'CodexWorkspaceSchemaKind'){'^(Old|New)$'}else{'^[A-F0-9]{64}$'}
+            $pattern=if($field -cin @('MediaSchemaFingerprint','ResidencySchemaFingerprint')){'^(Old|[A-F0-9]{64})$'}elseif($field -cin @('CodexWorkspaceSchemaKind','OutlookRecursiveCaptureSchema')){'^(Old|New)$'}else{'^[A-F0-9]{64}$'}
             if($value -isnot [string] -or $value -cnotmatch $pattern){throw 'journal-schema-held-intent-successor-observation-invalid'}
             $original|Add-Member -NotePropertyName $field -NotePropertyValue $value
         }

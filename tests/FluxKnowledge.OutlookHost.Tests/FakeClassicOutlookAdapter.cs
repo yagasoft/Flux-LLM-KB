@@ -23,6 +23,21 @@ internal sealed class FakeClassicOutlookAdapter : IClassicOutlookAdapter
             [new(new OutlookCaptureFolderId(Guid.Parse("11111111-1111-1111-1111-111111111111")), new OutlookFolderIdentity("store", "folder", "Inbox"))];
     }
 
+    public IReadOnlyList<OutlookFolderIdentity> DiscoveredSubfolders { get; init; } = [];
+    public IReadOnlyDictionary<string, IReadOnlyList<OutlookItemEnvelope>> FolderItems { get; init; } =
+        new Dictionary<string, IReadOnlyList<OutlookItemEnvelope>>();
+    public List<OutlookFolderIdentity> DiscoveryRoots { get; } = [];
+    public List<(OutlookFolderIdentity Folder, OutlookCursor Cursor)> Enumerations { get; } = [];
+
+    public ValueTask<IReadOnlyList<OutlookFolderIdentity>> DiscoverSubfoldersAsync(
+        OutlookFolderIdentity root,
+        CancellationToken cancellationToken)
+    {
+        cancellationToken.ThrowIfCancellationRequested();
+        DiscoveryRoots.Add(root);
+        return ValueTask.FromResult(DiscoveredSubfolders);
+    }
+
     public int BrowseCount { get; private set; }
     public string? LastBrowseTargetPath { get; private set; }
     public int EnumerateCount { get; private set; }
@@ -60,12 +75,14 @@ internal sealed class FakeClassicOutlookAdapter : IClassicOutlookAdapter
         [System.Runtime.CompilerServices.EnumeratorCancellation] CancellationToken cancellationToken)
     {
         EnumerateCount++;
+        Enumerations.Add((folder, cursor));
         LastCursor = cursor;
         if (_enumerationDelay > TimeSpan.Zero)
         {
             await Task.Delay(_enumerationDelay, cancellationToken);
         }
-        foreach (var item in _items)
+        var items = FolderItems.TryGetValue(folder.FolderEntryId, out var matching) ? matching : _items;
+        foreach (var item in items)
         {
             cancellationToken.ThrowIfCancellationRequested();
             if (item.Timestamp(cursor.Basis) >= cursor.FromUtc)

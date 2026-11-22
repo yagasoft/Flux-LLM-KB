@@ -356,6 +356,51 @@ public sealed class OutlookHostLoopTests
         Assert.Equal("archive-store", adapter.LastReadStoreId);
     }
 
+    [Theory]
+    [InlineData(false)]
+    [InlineData(true)]
+    public async Task Configured_recursion_scans_descendants_at_their_own_cursors(bool recursive)
+    {
+        var work = CreateWork() with { IncludeSubfolders = recursive };
+        var root = Assert.Single(work.Folders);
+        var child = new OutlookFolderIdentity(root.Identity.StoreId, "child", "Child");
+        var grandchild = new OutlookFolderIdentity(root.Identity.StoreId, "grandchild", "Grandchild");
+        var adapter = new FakeClassicOutlookAdapter
+        {
+            DiscoveredSubfolders = [child, grandchild],
+            FolderItems = new Dictionary<string, IReadOnlyList<OutlookItemEnvelope>>
+            {
+                [child.FolderEntryId] = [Item("older-child-mail", CursorUtc.AddYears(-3), CursorUtc.AddYears(-4))],
+                [grandchild.FolderEntryId] = [Item("older-grandchild-mail", CursorUtc.AddYears(-2), CursorUtc.AddYears(-3))]
+            }
+        };
+        var fixture = Fixture.Create(work: work, adapter: adapter);
+
+        var result = await fixture.Loop.RunOnceAsync(CancellationToken.None);
+
+        Assert.Equal(OutlookHostExitReason.Completed, result.Reason);
+        Assert.Equal(recursive ? [root.Identity] : [], adapter.DiscoveryRoots);
+        Assert.Equal(recursive ? [root.Identity, child, grandchild] : [root.Identity],
+            adapter.Enumerations.Select(record => record.Folder));
+        Assert.Equal(root.CursorUtc!.Value - root.Overlap, adapter.Enumerations[0].Cursor.FromUtc);
+        Assert.All(adapter.Enumerations.Skip(1), record =>
+            Assert.Equal(DateTimeOffset.UnixEpoch - root.Overlap, record.Cursor.FromUtc));
+        Assert.Equal(recursive ? ["older-child-mail", "older-grandchild-mail"] : [], fixture.Ingestion.IngestedEntryIds);
+    }
+
+    [Fact]
+    public async Task Out_of_order_enumeration_advances_capture_from_oldest_to_newest()
+    {
+        var newer = Item("newer", CursorUtc.AddMinutes(3), CursorUtc);
+        var older = Item("older", CursorUtc.AddMinutes(1), CursorUtc);
+        var fixture = Fixture.Create(adapter: new FakeClassicOutlookAdapter([newer, older]));
+
+        var result = await fixture.Loop.RunOnceAsync(CancellationToken.None);
+
+        Assert.Equal(OutlookHostExitReason.Completed, result.Reason);
+        Assert.Equal(["older", "newer"], fixture.Ingestion.IngestedEntryIds);
+    }
+
     [Fact]
     public async Task Empty_scan_renews_before_activation_and_again_before_completion()
     {
@@ -1015,6 +1060,22 @@ public sealed class OutlookHostLoopTests
         {
             ClaimCount++;
             return ValueTask.FromResult(work);
+        }
+
+        public ValueTask<IReadOnlyList<OutlookHostFolderConfiguration>> ReconcileSubfoldersAsync(
+            OutlookHostCatchUpWork work,
+            IReadOnlyList<OutlookFolderIdentity> discovered,
+            CancellationToken cancellationToken)
+        {
+            var root = Assert.Single(work.Folders);
+            return ValueTask.FromResult<IReadOnlyList<OutlookHostFolderConfiguration>>(
+                [root, .. discovered.Select(identity => root with
+                {
+                    FolderId = OutlookCaptureFolderId.New(),
+                    Identity = identity,
+                    CursorUtc = null,
+                    CursorFingerprint = null
+                })]);
         }
 
         public ValueTask RecordHintAsync(

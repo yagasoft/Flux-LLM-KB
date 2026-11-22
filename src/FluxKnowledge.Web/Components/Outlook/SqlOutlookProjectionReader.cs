@@ -21,7 +21,10 @@ public sealed record OutlookFolderStatusProjection(
     DateTimeOffset? CursorUtc,
     int IngestedCount,
     int DeferredCount,
-    int BlockedCount);
+    int BlockedCount)
+{
+    public bool IsDiscoveredSubfolder { get; init; }
+}
 
 public sealed record OutlookProfileStatusProjection(
     Guid ProfileId,
@@ -39,6 +42,7 @@ public sealed record OutlookProfileStatusProjection(
     IReadOnlyList<OutlookFolderStatusProjection> Folders,
     OutlookFolderVerificationStatus? Verification = null)
 {
+    public bool IncludeSubfolders { get; init; }
     public Guid? WatchedSourceRootId { get; init; }
     public DateTimeOffset? LastSuccessfulExportAtUtc { get; init; }
 }
@@ -324,7 +328,8 @@ public sealed class SqlOutlookProjectionReader(
             {
                 spool = new OutlookSpoolStatus("Configured", "Blocked", "Unknown");
             }
-            var folderResults = folders.Where(folder => folder.ProfileId == profile.Id)
+            var folderResults = folders.Where(folder => folder.ProfileId == profile.Id &&
+                    (!folder.IsDiscoveredSubfolder || profile.IncludeSubfolders))
                 .Select(folder => new OutlookFolderStatusProjection(
                     folder.Id,
                     folder.DisplayName,
@@ -332,7 +337,10 @@ public sealed class SqlOutlookProjectionReader(
                     folder.CursorUtc,
                     Count(folder.Id, OutlookExportState.Ingested),
                     Count(folder.Id, OutlookExportState.Deferred),
-                    Count(folder.Id, OutlookExportState.Blocked)))
+                    Count(folder.Id, OutlookExportState.Blocked))
+                    {
+                        IsDiscoveredSubfolder = folder.IsDiscoveredSubfolder
+                    })
                 .ToArray();
             results.Add(new OutlookProfileStatusProjection(
                 profile.Id,
@@ -357,6 +365,7 @@ public sealed class SqlOutlookProjectionReader(
                             : browse.ExpiresAtUtc <= now ? OutlookBrowseFailureCode.Expired : null)
                     : null)
             {
+                IncludeSubfolders = profile.IncludeSubfolders,
                 WatchedSourceRootId = profile.WatchedSourceRootId,
                 LastSuccessfulExportAtUtc = row.LastSuccessfulExportAtUtc
             });

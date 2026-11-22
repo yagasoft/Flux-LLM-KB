@@ -18,6 +18,8 @@ public sealed record OutlookProfileDraft(
     long ConfigurationRevision,
     string TargetFolderPath = "")
 {
+    public bool IncludeSubfolders { get; init; }
+
     public static OutlookProfileDraft Empty { get; } = new(
         null,
         string.Empty,
@@ -214,7 +216,8 @@ public sealed class OutlookPageState(
             draft.ProfileId is null ? null : draft.ConfigurationRevision,
             draft.Enable ? _browseCorrelationId : null)
         {
-            VerifyFolderPath = verifyFolderPath
+            VerifyFolderPath = verifyFolderPath,
+            IncludeSubfolders = draft.IncludeSubfolders
         };
         request.Validate();
         var receipt = await store.SaveProfileAsync(request, cancellationToken).ConfigureAwait(false);
@@ -317,7 +320,8 @@ public sealed class OutlookPageState(
         draft.Schedule.MaximumOverlap.Ticks,
         draft.Enable,
         draft.ConfigurationRevision,
-        draft.TargetFolderPath);
+        draft.TargetFolderPath,
+        draft.IncludeSubfolders);
 
     private static string BrowseDraftFingerprint(OutlookProfileDraft draft) =>
         DraftFingerprint(draft with { TargetFolderPath = string.Empty });
