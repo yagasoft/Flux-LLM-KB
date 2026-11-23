@@ -11,18 +11,16 @@
 - Run all further testing, trials and diagnostics in a separate test/staging
   deployment with its own database, configuration, runtime, storage and endpoints.
   Do not reuse production bindings, scheduled tasks or mutable data. Preserve
-  production payloads, models, rollback and recovery evidence.
+  installed production payloads and models.
 - The current app database was classified as non-critical on 13 October. That
   classification does not waive the production boundary above. Preserve technical
   eligibility, ownership, idempotency and native-cleanup checks; database edits
-  alone cannot prove GPU cleanup. The historical authority receipts remain under
-  `I:\Codex Workspaces\Operational Evidence\FluxKnowledge\startup-shutdown-stability-20261013`.
+  alone cannot prove GPU cleanup.
 - Deliver a usable, reliably running personal app for indexing real workspaces.
   Keep effort proportional; optional hardening and investigation must not become
   an indefinite delivery barrier. Subsequent releases must pair necessary
   supporting work with tangible user improvements. Preserve these priorities
-  through compaction and handoffs; the delivery record is
-  `I:\Codex Workspaces\Operational Evidence\FluxKnowledge\startup-shutdown-stability-20261013\delivery-priorities-and-post-mvp-roadmap.md`.
+  through compaction and handoffs.
 - Run full closeout only at the very end of the chat, once the full plan is
   finished and no further in-scope implementation, fixes, deployment or live
   validation remains. Do not run full closeout between development or deployment
